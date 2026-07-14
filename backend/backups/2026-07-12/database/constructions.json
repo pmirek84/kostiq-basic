@@ -1,0 +1,116 @@
+[
+  {
+    "_id": "6a48fb518e5ce9845d60ae51",
+    "id": "2093e493-5d07-4684-b0fa-08b9cc6b369b",
+    "jobId": "job-001",
+    "name": "Okno Aluminiowe Specjalne",
+    "quantity": 12,
+    "unit": "szt",
+    "status": "ordered",
+    "plannedLaborHours": 48,
+    "materialCosts": {
+      "total": 24000
+    }
+  },
+  {
+    "_id": "6a48fb518e5ce9845d60ae52",
+    "id": "17e4061d-815d-44f4-9b96-6567414f2d09",
+    "jobId": "job-002",
+    "name": "Panele Elewacyjne HPL",
+    "quantity": 200,
+    "unit": "m2",
+    "status": "pending",
+    "plannedLaborHours": 160,
+    "materialCosts": {
+      "total": 45000
+    }
+  },
+  {
+    "_id": "6a528fff3d4a543e6037fc9d",
+    "id": "e407bf85-c7f6-4822-8d24-e5e069ddcf9e",
+    "offerId": "94675e28-98dd-45e1-84e2-f271985db684",
+    "number": 1,
+    "name": "Witryna W1",
+    "type": "witryna",
+    "width": 1500,
+    "height": 2200,
+    "quantity": 5,
+    "area": 3.3,
+    "perimeter": 7.4,
+    "installationLocation": "zew",
+    "weight": 50,
+    "totalArea": 16.5,
+    "totalPerimeter": 37,
+    "totalCost": 0,
+    "materialCosts": {
+      "items": [],
+      "total": 0
+    },
+    "installationCosts": {
+      "rate": 0,
+      "total": 0
+    },
+    "createdAt": "2026-07-11T18:48:31.391Z",
+    "updatedAt": "2026-07-11T18:48:31.391Z"
+  },
+  {
+    "_id": "6a528fff3d4a543e6037fc9e",
+    "id": "75b36f25-a4d9-45bd-a4e5-c4f2b471ac50",
+    "offerId": "db25cd70-f53d-4a92-a8a6-94aea8746525",
+    "number": 1,
+    "name": "Witryna W1",
+    "type": "witryna",
+    "width": 1500,
+    "height": 2200,
+    "quantity": 5,
+    "area": 3.3,
+    "perimeter": 7.4,
+    "installationLocation": "zew",
+    "weight": 50,
+    "totalArea": 16.5,
+    "totalPerimeter": 37,
+    "totalCost": 0,
+    "materialCosts": {
+      "items": [],
+      "total": 0
+    },
+    "installationCosts": {
+      "rate": 0,
+      "total": 0
+    },
+    "createdAt": "2026-07-11T18:48:31.395Z",
+    "updatedAt": "2026-07-11T18:48:31.396Z"
+  },
+  {
+    "_id": "6a52a3f8ebdfd3ccca224dd5",
+    "id": "14cd38cb-36b2-47e2-8120-b6d124b5c27c",
+    "offerId": "offer-2026-05-budex",
+    "createdAt": "2026-07-11T20:13:44.640Z",
+    "updatedAt": "2026-07-11T20:16:11.943Z",
+    "materialBreakdown": [],
+    "installationStandardId": "82d7d903-189c-4158-9625-c7eb2f0ee23b",
+    "number": 1,
+    "name": "Pozycja 1",
+    "type": "Drzwi Alu",
+    "widthMm": 1200,
+    "heightMm": 2000,
+    "width": 1.2,
+    "height": 2,
+    "quantity": 1,
+    "installationLocation": "wew",
+    "totalArea": 2.4,
+    "area": 2.4,
+    "totalPerimeter": 6.4,
+    "perimeter": 6.4,
+    "weight": 0,
+    "materialCosts": {
+      "total": 96,
+      "items": []
+    },
+    "installationCosts": {
+      "rate": 0,
+      "total": 0
+    },
+    "totalCost": 96
+  }
+]

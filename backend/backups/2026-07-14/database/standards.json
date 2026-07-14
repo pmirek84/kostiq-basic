@@ -1,0 +1,80 @@
+[
+  {
+    "_id": "6a553a413b7272d5545e4ad0",
+    "id": "8843e478-8ce5-4c8e-891d-222350e023e1",
+    "name": "Standard Podstawowy",
+    "isDefault": true,
+    "applicableTypes": [
+      "okno_pvc"
+    ],
+    "rules": [
+      {
+        "id": "bf5c008a-7692-4dd6-8180-2886739047aa",
+        "edge": "vertical",
+        "materialId": "41f33de5-9798-43b4-ba25-54329610583b",
+        "usagePerMeter": 0.5
+      }
+    ],
+    "createdAt": "2026-07-13T19:19:29.066Z",
+    "updatedAt": "2026-07-13T21:33:08.204Z",
+    "description": ""
+  },
+  {
+    "_id": "6a553a413b7272d5545e4ad1",
+    "id": "3d18536c-f60f-4664-973c-ab2f9a369120",
+    "name": "Standard Ciepły Montaż",
+    "isDefault": false,
+    "applicableTypes": [
+      "okno_pvc",
+      "okno_aluminiowe"
+    ],
+    "rules": [
+      {
+        "id": "93d75a5f-e09d-43ff-b3d5-92fa7bba7ed2",
+        "edge": "vertical",
+        "materialId": "41f33de5-9798-43b4-ba25-54329610583b",
+        "usagePerMeter": 0.5
+      },
+      {
+        "id": "da0afaab-bcc5-406b-bcb7-14a2e5fef9fd",
+        "edge": "vertical",
+        "materialId": "9b1dfdcb-48be-4120-ba36-c40ab0a4846f",
+        "usagePerMeter": 1
+      },
+      {
+        "id": "c828e9da-5d18-4cc6-8d50-b901435ed240",
+        "edge": "horizontal",
+        "materialId": "8cfb4aba-4695-45e1-ac7c-1cc4d6252169",
+        "usagePerMeter": 1
+      }
+    ],
+    "createdAt": "2026-07-13T19:19:29.066Z",
+    "updatedAt": "2026-07-13T19:19:29.066Z"
+  },
+  {
+    "_id": "6a553a413b7272d5545e4ad2",
+    "id": "72b053a9-0099-4349-a0b2-6f2c2ae29684",
+    "name": "Standard Pasywny",
+    "isDefault": false,
+    "applicableTypes": [
+      "okno_pvc",
+      "okno_aluminiowe"
+    ],
+    "rules": [
+      {
+        "id": "eca8ef4d-76c2-4ff8-b0c5-76e4bee92fc1",
+        "edge": "bottom",
+        "materialId": "358218b0-6352-42d0-bb0e-de1ea391f2bf",
+        "usagePerMeter": 1
+      },
+      {
+        "id": "2ecfb8ac-247f-461d-885b-3d910de721a6",
+        "edge": "vertical",
+        "materialId": "41f33de5-9798-43b4-ba25-54329610583b",
+        "usagePerMeter": 0.5
+      }
+    ],
+    "createdAt": "2026-07-13T19:19:29.066Z",
+    "updatedAt": "2026-07-13T19:19:29.066Z"
+  }
+]

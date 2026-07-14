@@ -1,0 +1,30 @@
+[
+  {
+    "_id": "6a48fb518e5ce9845d60ae55",
+    "id": "1657c9b5-196d-47e7-bdbd-1ccb200e869e",
+    "type": "measurement",
+    "title": "Pomiar okien u klienta",
+    "subtitle": "Gdańsk, ul. Morska 1",
+    "location": "Gdańsk, ul. Morska 1",
+    "start": "2026-07-04T10:00:00",
+    "end": "2026-07-04T12:00:00",
+    "team": [
+      "Sasza",
+      "Kamil"
+    ],
+    "status": "planned"
+  },
+  {
+    "_id": "6a48fb518e5ce9845d60ae56",
+    "id": "c2fe1135-6e25-474c-99ec-32eb4fcff031",
+    "type": "custom",
+    "title": "Przegląd techniczny narzędzi",
+    "subtitle": "Magazyn główny",
+    "start": "2026-07-05T08:00:00",
+    "end": "2026-07-05T16:00:00",
+    "team": [
+      "Sasza"
+    ],
+    "status": "planned"
+  }
+]

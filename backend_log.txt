@@ -1,0 +1,9 @@
+Attempting to connect to MongoDB at mongodb://127.0.0.1:27017/costframe...
+Backend server running on http://localhost:3000
+Successfully connected to MongoDB
+[BACKUP] Nightly backup schedule initialized (03:00 AM)
+[RATE-LIMIT] Login blocked for IP ::1 — too many attempts
+[RATE-LIMIT] Login blocked for IP ::1 — too many attempts
+[RATE-LIMIT] Login blocked for IP ::1 — too many attempts
+[RATE-LIMIT] Login blocked for IP ::1 — too many attempts
+[EXPENSE-TRIGGER] Job 7974b876-9345-484b-94db-fc985094eef7: material=0, transport=256, equipment=0, other=0

@@ -1,0 +1,139 @@
+[
+  {
+    "_id": "6a553a413b7272d5545e4ad6",
+    "id": "cee0ae05-508b-4b29-831c-f31af2840b1f",
+    "jobId": "job-001",
+    "name": "Okno Aluminiowe Specjalne",
+    "quantity": 12,
+    "unit": "szt",
+    "status": "ordered",
+    "plannedLaborHours": 48,
+    "materialCosts": {
+      "total": 24000
+    },
+    "height": 1500,
+    "perimeter": 6,
+    "totalPerimeter": 72,
+    "type": "okno_pvc",
+    "width": 1500
+  },
+  {
+    "_id": "6a553a413b7272d5545e4ad7",
+    "id": "3fccb5b5-778f-4d0d-86dd-0ad0c6c13605",
+    "jobId": "job-002",
+    "name": "Panele Elewacyjne HPL",
+    "quantity": 200,
+    "unit": "m2",
+    "status": "pending",
+    "plannedLaborHours": 160,
+    "materialCosts": {
+      "total": 45000
+    },
+    "height": 1000,
+    "perimeter": 4,
+    "totalPerimeter": 800,
+    "type": "okno_pvc",
+    "width": 1000
+  },
+  {
+    "_id": "6a553a413b7272d5545e4ad8",
+    "id": "1e6ce963-19b7-4a21-81a8-9920c51e74d1",
+    "offerId": "offer-2026-05-budex",
+    "number": 1,
+    "name": "Okno PVC Drutex Iglo 5",
+    "type": "okno_pvc",
+    "width": 1500,
+    "height": 1500,
+    "area": 2.25,
+    "totalArea": 18,
+    "perimeter": 6,
+    "totalPerimeter": 48,
+    "installationLocation": "zew",
+    "weight": 45,
+    "quantity": 8,
+    "materialCosts": {
+      "items": [
+        {
+          "name": "Profil i szkło",
+          "quantity": 8,
+          "unitPrice": 800,
+          "total": 6400
+        }
+      ],
+      "total": 6400
+    },
+    "installationCosts": {
+      "rate": 80,
+      "total": 1440
+    },
+    "totalCost": 7840,
+    "updatedAt": "2026-07-13T20:36:26.509Z"
+  },
+  {
+    "_id": "6a553a413b7272d5545e4ad9",
+    "id": "9df65aea-b974-4e0c-8bb9-ad3225d300e1",
+    "offerId": "offer-2026-05-budex",
+    "number": 2,
+    "name": "Drzwi Aluminiowe Aluprof MB-86",
+    "type": "okno_aluminiowe",
+    "width": 1000,
+    "height": 2100,
+    "area": 2.1,
+    "totalArea": 4.2,
+    "perimeter": 6.2,
+    "totalPerimeter": 12.4,
+    "installationLocation": "zew",
+    "weight": 90,
+    "quantity": 2,
+    "materialCosts": {
+      "items": [
+        {
+          "name": "Skrzydło i ościeżnica",
+          "quantity": 2,
+          "unitPrice": 3500,
+          "total": 7000
+        }
+      ],
+      "total": 7000
+    },
+    "installationCosts": {
+      "rate": 120,
+      "total": 504
+    },
+    "totalCost": 7504,
+    "updatedAt": "2026-07-13T20:36:26.546Z"
+  },
+  {
+    "_id": "6a553a413b7272d5545e4ada",
+    "id": "1be9fe2c-3fbc-4ceb-93f5-068bd4075b50",
+    "offerId": "offer-2026-05-jan",
+    "number": 1,
+    "name": "Okno PVC Drutex Iglo 5",
+    "type": "okno_pvc",
+    "width": 1500,
+    "height": 1500,
+    "area": 2.25,
+    "totalArea": 18,
+    "perimeter": 6,
+    "totalPerimeter": 48,
+    "installationLocation": "zew",
+    "weight": 45,
+    "quantity": 8,
+    "materialCosts": {
+      "items": [
+        {
+          "name": "Profil i szkło",
+          "quantity": 8,
+          "unitPrice": 800,
+          "total": 6400
+        }
+      ],
+      "total": 6400
+    },
+    "installationCosts": {
+      "rate": 80,
+      "total": 1440
+    },
+    "totalCost": 7840
+  }
+]

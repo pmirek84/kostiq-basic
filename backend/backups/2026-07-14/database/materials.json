@@ -1,0 +1,38 @@
+[
+  {
+    "_id": "6a553a413b7272d5545e4acc",
+    "id": "41f33de5-9798-43b4-ba25-54329610583b",
+    "name": "Pianka montażowa krótka",
+    "category": "izolacyjne",
+    "unit": "szt",
+    "defaultUnitPrice": 25,
+    "isActive": true
+  },
+  {
+    "_id": "6a553a413b7272d5545e4acd",
+    "id": "9b1dfdcb-48be-4120-ba36-c40ab0a4846f",
+    "name": "Taśma paroizolacyjna wewnętrzna",
+    "category": "izolacyjne",
+    "unit": "m",
+    "defaultUnitPrice": 10,
+    "isActive": true
+  },
+  {
+    "_id": "6a553a413b7272d5545e4ace",
+    "id": "8cfb4aba-4695-45e1-ac7c-1cc4d6252169",
+    "name": "Taśma paroprzepuszczalna zewnętrzna",
+    "category": "izolacyjne",
+    "unit": "m",
+    "defaultUnitPrice": 12,
+    "isActive": true
+  },
+  {
+    "_id": "6a553a413b7272d5545e4acf",
+    "id": "358218b0-6352-42d0-bb0e-de1ea391f2bf",
+    "name": "Ciepły parapet EPS",
+    "category": "podbudowy",
+    "unit": "szt",
+    "defaultUnitPrice": 45,
+    "isActive": true
+  }
+]

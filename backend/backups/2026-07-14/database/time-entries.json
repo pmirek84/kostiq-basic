@@ -1,0 +1,62 @@
+[
+  {
+    "_id": "6a553a413b7272d5545e4adb",
+    "id": "6b1ffdba-c8bf-4a6a-a5da-8af78fd0f5a0",
+    "employee_id": "emp-sasza-001",
+    "employeeName": "Sasza",
+    "date": "2026-07-12",
+    "jobId": "job-001",
+    "jobName": "Montaż hali magazynowej",
+    "hours": 8,
+    "status": "approved",
+    "billingType": "hourly",
+    "hourlyRate": 60,
+    "cost": 480,
+    "createdAt": "2026-07-13T19:19:29.090Z"
+  },
+  {
+    "_id": "6a553a413b7272d5545e4adc",
+    "id": "c62c8e26-5855-438e-beb4-01d3d81a7bbb",
+    "employee_id": "emp-kamil-001",
+    "employeeName": "Kamil",
+    "date": "2026-07-12",
+    "jobId": "job-001",
+    "jobName": "Montaż hali magazynowej",
+    "hours": 8,
+    "status": "approved",
+    "billingType": "hourly",
+    "hourlyRate": 60,
+    "cost": 480,
+    "createdAt": "2026-07-13T19:19:29.090Z"
+  },
+  {
+    "_id": "6a553a413b7272d5545e4add",
+    "id": "9ca76c5d-80b4-4296-92b4-ece34488df4e",
+    "employee_id": "emp-sasza-001",
+    "employeeName": "Sasza",
+    "date": "2026-06-05",
+    "jobId": "job-003",
+    "jobName": "Montaż stolarki w willi",
+    "hours": 80,
+    "status": "approved",
+    "billingType": "hourly",
+    "hourlyRate": 60,
+    "cost": 4800,
+    "createdAt": "2026-06-18T19:19:29.074Z"
+  },
+  {
+    "_id": "6a553a413b7272d5545e4ade",
+    "id": "9e9baee6-9571-404a-83e6-649d59be075f",
+    "employee_id": "emp-kamil-001",
+    "employeeName": "Kamil",
+    "date": "2026-06-05",
+    "jobId": "job-003",
+    "jobName": "Montaż stolarki w willi",
+    "hours": 90,
+    "status": "approved",
+    "billingType": "hourly",
+    "hourlyRate": 60,
+    "cost": 5400,
+    "createdAt": "2026-06-18T19:19:29.074Z"
+  }
+]

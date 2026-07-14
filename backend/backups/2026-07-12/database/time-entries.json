@@ -1,0 +1,32 @@
+[
+  {
+    "_id": "6a48fb518e5ce9845d60ae53",
+    "id": "6dcc84bd-7f55-423d-9b6f-ad5d5b866a7b",
+    "employee_id": "emp-sasza-001",
+    "employeeName": "Sasza",
+    "date": "2026-07-03",
+    "jobId": "job-001",
+    "jobName": "Montaż hali magazynowej",
+    "hours": 8,
+    "status": "approved",
+    "billingType": "hourly",
+    "hourlyRate": 60,
+    "cost": 480,
+    "createdAt": "2026-07-04T12:23:45.280Z"
+  },
+  {
+    "_id": "6a48fb518e5ce9845d60ae54",
+    "id": "942567cd-e62f-40c0-8cde-5206ebd70ce5",
+    "employee_id": "emp-kamil-001",
+    "employeeName": "Kamil",
+    "date": "2026-07-03",
+    "jobId": "job-001",
+    "jobName": "Montaż hali magazynowej",
+    "hours": 8,
+    "status": "approved",
+    "billingType": "hourly",
+    "hourlyRate": 60,
+    "cost": 480,
+    "createdAt": "2026-07-04T12:23:45.280Z"
+  }
+]

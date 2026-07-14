@@ -1,0 +1,13 @@
+[
+  {
+    "_id": "6a553be66afcdc548dcd70c5",
+    "type": "site_log",
+    "title": "Nowy wpis w dzienniku",
+    "message": "Pracownik dodał nowy raport.",
+    "jobId": "job-001",
+    "read": true,
+    "createdAt": "2026-07-13T19:26:30.592Z",
+    "id": "1783970790592xez40",
+    "updatedAt": "2026-07-13T20:30:50.847Z"
+  }
+]

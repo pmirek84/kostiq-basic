@@ -1,0 +1,38 @@
+[
+  {
+    "_id": "6a54c4426afcdc548dcd70c3",
+    "id": "ar-1783940162207",
+    "jobId": "f8ad3ad5-5a40-40b4-981d-d37d6f4539bd",
+    "jobCode": "CF-2026-004",
+    "jobName": "OfertaMontaz okien PCV z uzyciem piany",
+    "title": "Raport CF-2026-004_20260613-20260713_wszystkie",
+    "filename": "1783940162204-817193004.pdf",
+    "url": "/uploads/1783940162204-817193004.pdf",
+    "size": 5700,
+    "dateFrom": "2026-06-13",
+    "dateTo": "2026-07-13",
+    "onlyApproved": false,
+    "entryCount": 0,
+    "generatedBy": "Administrator",
+    "generatedById": "9e566ecd-43a8-4f91-8d33-08e20f71f705",
+    "createdAt": "2026-07-13T10:56:02.207Z"
+  },
+  {
+    "_id": "6a5542b16afcdc548dcd70c6",
+    "id": "ar-1783972529533",
+    "jobId": "job-001",
+    "jobCode": "CF-2026-001",
+    "jobName": "Montaż hali magazynowej",
+    "title": "Raport CF-2026-001_wszystkie",
+    "filename": "1783972529529-631841494.pdf",
+    "url": "/uploads/1783972529529-631841494.pdf",
+    "size": 10808,
+    "dateFrom": null,
+    "dateTo": null,
+    "onlyApproved": false,
+    "entryCount": 6,
+    "generatedBy": "Paweł",
+    "generatedById": "admin-dev-id",
+    "createdAt": "2026-07-13T19:55:29.533Z"
+  }
+]

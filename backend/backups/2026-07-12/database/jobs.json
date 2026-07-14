@@ -1,0 +1,66 @@
+[
+  {
+    "_id": "6a48fb518e5ce9845d60ae4f",
+    "id": "job-001",
+    "jobCode": "CF-2026-001",
+    "name": "Montaż hali magazynowej",
+    "clientId": "b6d091ed-bd8c-4efc-a93c-b4ea136b9504",
+    "clientName": "Budex Sp. z o.o.",
+    "location": "Poznań, ul. Magazynowa 4",
+    "status": "in_progress",
+    "riskFlag": "none",
+    "plannedStartDate": "2026-06-30",
+    "plannedEndDate": "2026-07-27",
+    "totalPlannedRevenueNet": 150000,
+    "createdAt": "2026-07-04T12:23:45.268Z",
+    "updatedAt": "2026-07-04T12:25:00.504Z",
+    "stages": [
+      {
+        "id": "stage-j1-s1",
+        "jobId": "job-001",
+        "name": "Konstrukcja główna",
+        "type": "podstawowy",
+        "status": "w_toku",
+        "plannedRevenueNet": 100000,
+        "billingType": "hourly",
+        "startPlanned": "2026-06-30",
+        "endPlanned": "2026-07-27",
+        "assignedTeams": [
+          "Ekipa 1"
+        ]
+      }
+    ],
+    "actualLaborCost": 960,
+    "actualLaborHours": 16,
+    "settledLaborCost": 0
+  },
+  {
+    "_id": "6a48fb518e5ce9845d60ae50",
+    "id": "job-002",
+    "jobCode": "CF-2026-002",
+    "name": "Remont fasady biurowca",
+    "clientId": "b6d091ed-bd8c-4efc-a93c-b4ea136b9504",
+    "clientName": "Budex Sp. z o.o.",
+    "location": "Warszawa, ul. Prosta 20",
+    "status": "planned",
+    "riskFlag": "warning",
+    "plannedStartDate": "2026-06-30",
+    "plannedEndDate": "2026-07-27",
+    "totalPlannedRevenueNet": 85000,
+    "createdAt": "2026-07-04T12:23:45.268Z",
+    "updatedAt": "2026-07-04T12:23:45.268Z",
+    "stages": [
+      {
+        "id": "stage-j2-s1",
+        "jobId": "job-002",
+        "name": "Prace przygotowawcze",
+        "type": "podstawowy",
+        "status": "planowany",
+        "plannedRevenueNet": 25000,
+        "billingType": "hourly",
+        "startPlanned": "2026-06-30",
+        "endPlanned": "2026-07-27"
+      }
+    ]
+  }
+]

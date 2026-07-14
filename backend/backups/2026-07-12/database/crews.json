@@ -1,0 +1,13 @@
+[
+  {
+    "_id": "6a48fb518e5ce9845d60ae4b",
+    "id": "crew-ekipa-1",
+    "name": "Ekipa 1",
+    "color": "#3B82F6",
+    "leadId": "emp-sasza-001",
+    "memberIds": [
+      "emp-sasza-001",
+      "emp-kamil-001"
+    ]
+  }
+]

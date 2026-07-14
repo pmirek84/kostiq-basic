@@ -1,0 +1,26 @@
+[
+  {
+    "_id": "6a555d3bdba99254c31eac2c",
+    "type": "Montaż poniżej podstawowy (piana + kotwy/śruby) [PVC/Alu/Drewno]",
+    "rate": 85,
+    "unit": "mb",
+    "isActive": true,
+    "id": "c87e9884-d5a9-472b-bf1e-bc0f87106674"
+  },
+  {
+    "_id": "6a555d3bdba99254c31eac2d",
+    "type": "Montaż standardowy (szczelny) - w świetle muru [PVC/Alu/Drewno]",
+    "rate": 135,
+    "unit": "mb",
+    "isActive": true,
+    "id": "485cf4c5-d3d6-4a03-88b3-1a47bd39cabe"
+  },
+  {
+    "_id": "6a555d3bdba99254c31eac2e",
+    "type": "Montaż pasywny (w warstwie ocieplenia) [PVC/Alu/Drewno]",
+    "rate": 240,
+    "unit": "mb",
+    "isActive": true,
+    "id": "8e1c4545-5d0e-4a36-a857-fbb80a806a8a"
+  }
+]

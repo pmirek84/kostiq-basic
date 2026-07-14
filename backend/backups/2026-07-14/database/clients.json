@@ -1,0 +1,46 @@
+[
+  {
+    "_id": "6a553a413b7272d5545e4abd",
+    "id": "b6d091ed-bd8c-4efc-a93c-b4ea136b9504",
+    "type": "company",
+    "name": "Budex Sp. z o.o.",
+    "lastName": "",
+    "nip": "1234567890",
+    "email": "biuro@budex.pl",
+    "phone": "500 123 456",
+    "address": [
+      {
+        "street": "Budowlana 1",
+        "city": "Warszawa",
+        "zipCode": "00-001",
+        "country": "Polska"
+      }
+    ],
+    "status": "active",
+    "isActive": true,
+    "createdAt": "2026-07-13T19:19:29.015Z",
+    "updatedAt": "2026-07-13T19:19:29.015Z"
+  },
+  {
+    "_id": "6a553a413b7272d5545e4abe",
+    "id": "7888bfc3-db12-4ce9-bc9e-605bbb715760",
+    "type": "individual",
+    "name": "Jan",
+    "lastName": "Testowy",
+    "nip": "",
+    "email": "jan@test.pl",
+    "phone": "600 700 800",
+    "address": [
+      {
+        "street": "Testowa 2",
+        "city": "Poznań",
+        "zipCode": "60-001",
+        "country": "Polska"
+      }
+    ],
+    "status": "active",
+    "isActive": true,
+    "createdAt": "2026-07-13T19:19:29.015Z",
+    "updatedAt": "2026-07-13T19:19:29.015Z"
+  }
+]

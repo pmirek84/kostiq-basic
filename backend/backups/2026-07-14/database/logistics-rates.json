@@ -1,0 +1,30 @@
+[
+  {
+    "_id": "6a54c1776afcdc548dcd70ba",
+    "vehicleType": "truck",
+    "ratePerKm": 5,
+    "id": "3b2100f0-ba82-4b57-95b0-e572754e50b8"
+  },
+  {
+    "_id": "6a54c18c6afcdc548dcd70bb",
+    "vehicleType": "van",
+    "ratePerKm": 3,
+    "id": "1bc2be9c-fb79-4ea6-a6d8-f41331a83cb4"
+  },
+  {
+    "_id": "6a555d3bdba99254c31eac2f",
+    "vehicleType": "Dojazd powyżej 15-20 km (osobowy)",
+    "ratePerKm": 3,
+    "description": "Dojazd ekipy montażowej (stawka niska)",
+    "isActive": true,
+    "id": "db10f485-84e5-4844-b679-f65f542ea4ec"
+  },
+  {
+    "_id": "6a555d3bdba99254c31eac30",
+    "vehicleType": "Dojazd powyżej 15-20 km (dostawczy)",
+    "ratePerKm": 3.5,
+    "description": "Dojazd / transport bus (stawka wysoka)",
+    "isActive": true,
+    "id": "3d3c767f-eee8-4c71-92c9-89abd23a691d"
+  }
+]

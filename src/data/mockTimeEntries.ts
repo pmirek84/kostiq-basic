@@ -1,0 +1,63 @@
+import type { TimeEntry } from '../models/types';
+
+export const mockTimeEntries: TimeEntry[] = [
+    {
+        id: 'te1',
+        employeeId: 'emp1',
+        employeeName: 'Jan Kowalski',
+        jobId: 'job1',
+        jobCode: 'CF-2026-001',
+        jobName: 'Hala Magazynowa A',
+        stageId: 'stage1',
+        stageName: 'Montaż konstrukcji',
+        date: '2026-01-10',
+        hours: 8,
+        billingType: 'hourly',
+        hourlyRate: 80,
+        cost: 640,
+        type: 'work',
+        status: 'approved',
+        description: 'Montaż słupów głównych',
+        createdAt: '2026-01-10T16:00:00Z',
+        updatedAt: '2026-01-10T16:30:00Z'
+    },
+    {
+        id: 'te2',
+        employeeId: 'emp2',
+        employeeName: 'Piotr Nowak',
+        jobId: 'job1',
+        jobCode: 'CF-2026-001',
+        jobName: 'Hala Magazynowa A',
+        stageId: 'stage1',
+        stageName: 'Montaż konstrukcji',
+        date: '2026-01-10',
+        hours: 8,
+        billingType: 'hourly',
+        hourlyRate: 70,
+        cost: 560,
+        type: 'work',
+        status: 'approved',
+        createdAt: '2026-01-10T16:00:00Z',
+        updatedAt: '2026-01-10T16:00:00Z'
+    },
+    {
+        id: 'te3',
+        employeeId: 'emp3',
+        employeeName: 'Anna Wiśniewska',
+        jobId: 'job2',
+        jobCode: 'CF-2026-002',
+        jobName: 'Biurowiec B',
+        stageId: 'stage3',
+        stageName: 'Transport',
+        date: '2026-01-11',
+        hours: 6,
+        billingType: 'hourly',
+        hourlyRate: 60,
+        cost: 360,
+        type: 'drive',
+        status: 'submitted',
+        description: 'Transport materiałów z bazy',
+        createdAt: '2026-01-11T14:00:00Z',
+        updatedAt: '2026-01-11T14:00:00Z'
+    }
+];

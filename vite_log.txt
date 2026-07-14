@@ -1,0 +1,612 @@
+
+> costframe@0.0.0 dev
+> vite --port 5173
+
+
+  [32m[1mVITE[22m v7.3.1[39m  [2mready in [0m[1m433[22m[2m[0m ms[22m
+
+  [32m➜[39m  [1mLocal[22m:   [36mhttp://localhost:[1m5173[22m/[39m
+[2m  [32m➜[39m  [1mNetwork[22m[2m: use [22m[1m--host[22m[2m to expose[22m
+[2m[32m  ➜[39m[22m[2m  press [22m[1mh + enter[22m[2m to show help[22m
+[2m10:31:21[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/index.css, /src/context/JobLogContext.tsx, /src/context/JobsContext.tsx, /src/context/CalendarContext.tsx, /src/context/SubcontractorContractsContext.tsx, /src/context/ClientReportsContext.tsx, /src/context/OffersContext.tsx, /src/pages/OffersPage.tsx, /src/components/offers/OfferForm.tsx, /src/context/TiCoContext.tsx, /src/components/offers/OfferPrintView.tsx, /src/components/offers/ConstructionModal.tsx[22m
+[2m10:31:21[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/index.css[22m
+[2m10:31:21[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [33mhmr invalidate [39m[2m/src/context/JobLogContext.tsx[22m Could not Fast Refresh ("jobLogStorage" export is incompatible). Learn more at https://github.com/vitejs/vite-plugin-react/tree/main/packages/plugin-react#consistent-components-exports
+[2m10:31:21[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/App.tsx, /src/context/ClientReportsContext.tsx[22m
+[2m10:31:21[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [33mhmr invalidate [39m[2m/src/context/JobsContext.tsx[22m Could not Fast Refresh ("JobsContext" export is incompatible). Learn more at https://github.com/vitejs/vite-plugin-react/tree/main/packages/plugin-react#consistent-components-exports
+[2m10:31:21[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/App.tsx, /src/components/jobs/reports/EditReportView.tsx, /src/components/layout/AppLayout.tsx, /src/components/layout/GlobalSearch.tsx, /src/components/jobs/wizard/CreateJobWizard.tsx[22m
+[2m10:31:21[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [33mhmr invalidate [39m[2m/src/context/CalendarContext.tsx[22m Could not Fast Refresh ("useCalendar" export is incompatible). Learn more at https://github.com/vitejs/vite-plugin-react/tree/main/packages/plugin-react#consistent-components-exports
+[2m10:31:21[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/App.tsx[22m
+[2m10:31:21[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [33mhmr invalidate [39m[2m/src/context/SubcontractorContractsContext.tsx[22m Could not Fast Refresh ("useSubcontractorContracts" export is incompatible). Learn more at https://github.com/vitejs/vite-plugin-react/tree/main/packages/plugin-react#consistent-components-exports
+[2m10:31:21[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/App.tsx[22m
+[2m10:31:21[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [33mhmr invalidate [39m[2m/src/context/ClientReportsContext.tsx[22m Could not Fast Refresh ("useClientReports" export is incompatible). Learn more at https://github.com/vitejs/vite-plugin-react/tree/main/packages/plugin-react#consistent-components-exports
+[2m10:31:21[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/App.tsx, /src/components/jobs/reports/EditReportView.tsx[22m
+[2m10:31:21[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [33mhmr invalidate [39m[2m/src/context/OffersContext.tsx[22m Could not Fast Refresh ("OffersContext" export is incompatible). Learn more at https://github.com/vitejs/vite-plugin-react/tree/main/packages/plugin-react#consistent-components-exports
+[2m10:31:21[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/App.tsx, /src/components/layout/GlobalSearch.tsx, /src/pages/OffersPage.tsx, /src/components/offers/OfferForm.tsx[22m
+[2m10:31:21[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [33mhmr invalidate [39m[2m/src/context/TiCoContext.tsx[22m Could not Fast Refresh ("TiCoContext" export is incompatible). Learn more at https://github.com/vitejs/vite-plugin-react/tree/main/packages/plugin-react#consistent-components-exports
+[2m10:31:21[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/App.tsx, /src/components/layout/AppLayout.tsx[22m
+[2m10:35:15[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/index.css, /src/components/layout/NotificationsDropdown.tsx[22m
+[2m10:35:15[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/index.css[22m
+[2m11:30:44[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/pages/OffersPage.tsx, /src/index.css[22m
+[2m11:30:44[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/index.css[22m
+[2m11:35:14[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/index.css, /src/components/jobs/wizard/CreateJobWizard.tsx[22m
+[2m11:35:14[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/index.css[22m
+[2m11:39:52[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/pages/JobsPage.tsx, /src/index.css[22m
+[2m11:39:52[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/index.css[22m
+[2m11:40:48[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/pages/JobsPage.tsx, /src/index.css[22m
+[2m11:40:48[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/index.css[22m
+[2m11:52:20[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/pages/JobDetailsPage.tsx, /src/index.css[22m
+[2m11:52:20[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/index.css[22m
+[2m11:52:39[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/index.css, /src/components/jobs/JobFinancialTab.tsx[22m
+[2m11:52:39[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/index.css[22m
+[2m11:53:13[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/index.css, /src/components/jobs/JobChecklistsTab.tsx[22m
+[2m11:53:13[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/index.css[22m
+[2m11:53:51[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/index.css, /src/components/jobs/JobDocumentsTab.tsx[22m
+[2m11:53:51[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/index.css[22m
+[2m11:53:53[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/index.css, /src/components/jobs/JobTeamTab.tsx[22m
+[2m11:53:53[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/index.css[22m
+[2m12:02:18[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/index.css, /src/components/jobs/wizard/CreateJobWizard.tsx[22m
+[2m12:02:18[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/index.css[22m
+[2m12:02:55[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/context/TiCoContext.tsx, /src/index.css[22m
+[2m12:02:55[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/index.css[22m
+[2m12:02:56[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [33mhmr invalidate [39m[2m/src/context/TiCoContext.tsx[22m Could not Fast Refresh ("TiCoContext" export is incompatible). Learn more at https://github.com/vitejs/vite-plugin-react/tree/main/packages/plugin-react#consistent-components-exports
+[2m12:02:56[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/App.tsx, /src/components/layout/AppLayout.tsx, /src/components/jobs/JobSubcontractorsTab.tsx, /src/components/jobs/JobFinancialTab.tsx, /src/components/jobs/JobTeamTab.tsx, /src/components/reports/JobsReportsPanel.tsx, /src/components/reports/ClosedJobsReportPanel.tsx, /src/components/reports/DifficultyReportsPanel.tsx, /src/components/reports/EmployeeReportsPanel.tsx, /src/components/reports/SiteEventsReportsPanel.tsx, /src/pages/GlobalDiaryPage.tsx, /src/pages/tico/views/ReportsView.tsx, /src/pages/tico/views/CommunicationView.tsx, /src/pages/tico/views/RequestsView.tsx, /src/pages/tico/views/SubcontractorsView.tsx, /src/pages/tico/views/ApprovalsView.tsx, /src/pages/tico/views/CrewsView.tsx, /src/pages/tico/views/EmployeesView.tsx, /src/pages/tico/views/TimeRegistrationView.tsx, /src/pages/tico/views/SettlementsListView.tsx, /src/pages/tico/views/SettlementDetailsView.tsx, /src/pages/tico/views/SettlementWizard.tsx[22m
+[2m12:03:26[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/index.css, /src/components/jobs/JobChecklistsTab.tsx[22m
+[2m12:03:26[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/index.css[22m
+[2m12:10:37[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/pages/JobDetailsPage.tsx, /src/index.css[22m
+[2m12:10:37[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/index.css[22m
+[2m12:30:31[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/pages/JobDetailsPage.tsx, /src/index.css[22m
+[2m12:30:31[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/index.css[22m
+[2m12:58:38[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/context/TiCoContext.tsx, /src/index.css[22m
+[2m12:58:38[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/index.css[22m
+[2m12:58:38[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [33mhmr invalidate [39m[2m/src/context/TiCoContext.tsx[22m Could not Fast Refresh ("TiCoContext" export is incompatible). Learn more at https://github.com/vitejs/vite-plugin-react/tree/main/packages/plugin-react#consistent-components-exports
+[2m12:58:38[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/App.tsx, /src/components/layout/AppLayout.tsx, /src/components/jobs/JobSubcontractorsTab.tsx, /src/components/jobs/JobFinancialTab.tsx, /src/components/jobs/JobTeamTab.tsx, /src/components/reports/JobsReportsPanel.tsx, /src/components/reports/ClosedJobsReportPanel.tsx, /src/components/reports/DifficultyReportsPanel.tsx, /src/components/reports/EmployeeReportsPanel.tsx, /src/components/reports/SiteEventsReportsPanel.tsx, /src/pages/GlobalDiaryPage.tsx, /src/pages/tico/views/ReportsView.tsx, /src/pages/tico/views/CommunicationView.tsx, /src/pages/tico/views/RequestsView.tsx, /src/pages/tico/views/SubcontractorsView.tsx, /src/pages/tico/views/ApprovalsView.tsx, /src/pages/tico/views/CrewsView.tsx, /src/pages/tico/views/EmployeesView.tsx, /src/pages/tico/views/TimeRegistrationView.tsx, /src/pages/tico/views/SettlementsListView.tsx, /src/pages/tico/views/SettlementDetailsView.tsx, /src/pages/tico/views/SettlementWizard.tsx[22m
+[2m12:58:50[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/context/TiCoContext.tsx, /src/index.css[22m
+[2m12:58:50[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/index.css[22m
+[2m12:58:50[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [33mhmr invalidate [39m[2m/src/context/TiCoContext.tsx[22m Could not Fast Refresh ("TiCoContext" export is incompatible). Learn more at https://github.com/vitejs/vite-plugin-react/tree/main/packages/plugin-react#consistent-components-exports
+[2m12:58:50[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/App.tsx, /src/components/layout/AppLayout.tsx, /src/components/jobs/JobSubcontractorsTab.tsx, /src/components/jobs/JobFinancialTab.tsx, /src/components/jobs/JobTeamTab.tsx, /src/components/reports/JobsReportsPanel.tsx, /src/components/reports/ClosedJobsReportPanel.tsx, /src/components/reports/DifficultyReportsPanel.tsx, /src/components/reports/EmployeeReportsPanel.tsx, /src/components/reports/SiteEventsReportsPanel.tsx, /src/pages/GlobalDiaryPage.tsx, /src/pages/tico/views/ReportsView.tsx, /src/pages/tico/views/CommunicationView.tsx, /src/pages/tico/views/RequestsView.tsx, /src/pages/tico/views/SubcontractorsView.tsx, /src/pages/tico/views/ApprovalsView.tsx, /src/pages/tico/views/CrewsView.tsx, /src/pages/tico/views/EmployeesView.tsx, /src/pages/tico/views/TimeRegistrationView.tsx, /src/pages/tico/views/SettlementsListView.tsx, /src/pages/tico/views/SettlementDetailsView.tsx, /src/pages/tico/views/SettlementWizard.tsx[22m
+[2m13:11:49[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/index.css, /src/components/jobs/JobTeamTab.tsx[22m
+[2m13:11:49[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/index.css[22m
+[2m13:12:10[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/index.css, /src/components/jobs/JobTeamTab.tsx[22m
+[2m13:12:10[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/index.css[22m
+[2m13:12:49[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/context/JobsContext.tsx, /src/index.css[22m
+[2m13:12:49[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/index.css[22m
+[2m13:12:49[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [33mhmr invalidate [39m[2m/src/context/JobsContext.tsx[22m Could not Fast Refresh ("JobsContext" export is incompatible). Learn more at https://github.com/vitejs/vite-plugin-react/tree/main/packages/plugin-react#consistent-components-exports
+[2m13:12:49[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/App.tsx, /src/components/jobs/reports/EditReportView.tsx, /src/components/layout/AppLayout.tsx, /src/components/layout/GlobalSearch.tsx, /src/components/jobs/wizard/CreateJobWizard.tsx, /src/pages/JobsPage.tsx, /src/pages/JobDetailsPage.tsx, /src/components/jobs/JobScheduleTab.tsx, /src/components/jobs/JobMaterialsTab.tsx, /src/components/jobs/JobDocumentsTab.tsx, /src/components/jobs/JobStagesTab.tsx, /src/components/jobs/JobSubcontractorsTab.tsx, /src/components/jobs/JobFinancialTab.tsx, /src/components/jobs/JobTeamTab.tsx, /src/components/jobs/stages/JobStageDetail.tsx, /src/components/reports/JobsReportsPanel.tsx, /src/components/reports/ClosedJobsReportPanel.tsx, /src/components/reports/DifficultyReportsPanel.tsx, /src/components/reports/EmployeeReportsPanel.tsx, /src/components/reports/SiteEventsReportsPanel.tsx, /src/pages/GlobalDiaryPage.tsx, /src/pages/tico/views/ReportsView.tsx, /src/pages/tico/views/ApprovalsView.tsx, /src/pages/tico/views/TimeRegistrationView.tsx[22m
+[2m13:13:00[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/context/JobsContext.tsx, /src/index.css[22m
+[2m13:13:00[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/index.css[22m
+[2m13:13:00[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [33mhmr invalidate [39m[2m/src/context/JobsContext.tsx[22m Could not Fast Refresh ("JobsContext" export is incompatible). Learn more at https://github.com/vitejs/vite-plugin-react/tree/main/packages/plugin-react#consistent-components-exports
+[2m13:13:00[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/App.tsx, /src/components/jobs/reports/EditReportView.tsx, /src/components/layout/AppLayout.tsx, /src/components/layout/GlobalSearch.tsx, /src/components/jobs/wizard/CreateJobWizard.tsx, /src/pages/JobsPage.tsx, /src/pages/JobDetailsPage.tsx, /src/components/jobs/JobScheduleTab.tsx, /src/components/jobs/JobMaterialsTab.tsx, /src/components/jobs/JobDocumentsTab.tsx, /src/components/jobs/JobStagesTab.tsx, /src/components/jobs/JobSubcontractorsTab.tsx, /src/components/jobs/JobFinancialTab.tsx, /src/components/jobs/JobTeamTab.tsx, /src/components/jobs/stages/JobStageDetail.tsx, /src/components/reports/JobsReportsPanel.tsx, /src/components/reports/ClosedJobsReportPanel.tsx, /src/components/reports/DifficultyReportsPanel.tsx, /src/components/reports/EmployeeReportsPanel.tsx, /src/components/reports/SiteEventsReportsPanel.tsx, /src/pages/GlobalDiaryPage.tsx, /src/pages/tico/views/ReportsView.tsx, /src/pages/tico/views/ApprovalsView.tsx, /src/pages/tico/views/TimeRegistrationView.tsx[22m
+[2m13:18:03[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/index.css, /src/components/jobs/wizard/CreateJobWizard.tsx[22m
+[2m13:18:03[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/index.css[22m
+[2m13:18:30[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/index.css, /src/components/jobs/JobScheduleTab.tsx[22m
+[2m13:18:30[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/index.css[22m
+[2m13:18:57[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/index.css, /src/components/jobs/JobScheduleTab.tsx[22m
+[2m13:18:57[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/index.css[22m
+[2m13:23:51[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/index.css, /src/components/jobs/JobTeamTab.tsx[22m
+[2m13:23:51[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/index.css[22m
+[2m13:24:28[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/index.css, /src/components/jobs/JobTeamTab.tsx[22m
+[2m13:24:28[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/index.css[22m
+[2m13:25:04[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/index.css, /src/components/jobs/JobTeamTab.tsx[22m
+[2m13:25:04[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/index.css[22m
+[2m13:25:49[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/index.css, /src/components/jobs/JobTeamTab.tsx[22m
+[2m13:25:49[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/index.css[22m
+[2m13:30:37[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/index.css, /src/components/jobs/JobFinancialTab.tsx[22m
+[2m13:30:37[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/index.css[22m
+[2m13:31:41[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/index.css, /src/components/jobs/JobFinancialTab.tsx[22m
+[2m13:31:41[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/index.css[22m
+[2m13:32:08[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/pages/JobDetailsPage.tsx, /src/index.css[22m
+[2m13:32:08[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/index.css[22m
+[2m13:54:38[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/index.css, /src/components/jobs/JobFinancialTab.tsx[22m
+[2m13:54:38[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/index.css[22m
+[2m14:01:00[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/index.css, /src/components/jobs/JobInvoicesTab.tsx[22m
+[2m14:01:00[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/index.css[22m
+[2m14:03:21[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/index.css, /src/components/jobs/JobInvoicesTab.tsx[22m
+[2m14:03:21[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/index.css[22m
+[2m14:06:31[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/index.css, /src/components/jobs/JobFinancialTab.tsx[22m
+[2m14:06:31[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/index.css[22m
+[2m14:06:46[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/index.css, /src/components/jobs/JobFinancialTab.tsx[22m
+[2m14:06:46[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/index.css[22m
+[2m14:07:14[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/index.css, /src/components/jobs/JobFinancialTab.tsx[22m
+[2m14:07:14[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/index.css[22m
+[2m14:10:59[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/index.css, /src/components/jobs/JobFinancialTab.tsx[22m
+[2m14:10:59[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/index.css[22m
+[2m14:11:27[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/index.css, /src/components/jobs/JobFinancialTab.tsx[22m
+[2m14:11:27[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/index.css[22m
+[2m14:11:36[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/index.css, /src/components/jobs/JobFinancialTab.tsx[22m
+[2m14:11:36[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/index.css[22m
+[2m14:15:16[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/index.css, /src/components/jobs/JobFinancialTab.tsx[22m
+[2m14:15:16[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/index.css[22m
+[2m14:15:32[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/index.css, /src/components/jobs/JobFinancialTab.tsx[22m
+[2m14:15:32[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/index.css[22m
+[2m14:15:47[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/index.css, /src/components/jobs/JobFinancialTab.tsx[22m
+[2m14:15:47[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/index.css[22m
+[2m14:20:12[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/index.css, /src/components/jobs/JobInvoicesTab.tsx[22m
+[2m14:20:12[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/index.css[22m
+[2m14:21:47[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/index.css, /src/components/jobs/JobInvoicesTab.tsx[22m
+[2m14:21:47[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/index.css[22m
+[2m14:22:22[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/index.css, /src/components/jobs/JobInvoicesTab.tsx[22m
+[2m14:22:22[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/index.css[22m
+[2m14:25:02[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/index.css, /src/components/jobs/JobInvoicesTab.tsx[22m
+[2m14:25:02[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/index.css[22m
+[2m14:28:32[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/index.css, /src/components/jobs/JobInvoicesTab.tsx[22m
+[2m14:28:32[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/index.css[22m
+[2m14:29:19[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/index.css, /src/components/jobs/JobInvoicesTab.tsx[22m
+[2m14:29:19[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/index.css[22m
+[2m14:29:20[22m [31m[1m[vite][22m[39m [31mInternal server error: C:\Users\mirek\.gemini\antigravity\scratch\costframe\src\components\jobs\JobInvoicesTab.tsx: Unexpected token, expected "," (593:44)
+
+[0m [90m 591 |[31m                                                 [33m<[31m[33m/[31m[33mtd[31m[33m>[31m
+ [90m 592 |[31m                                             [33m<[31m[33m/[31m[33mtr[31m[33m>[31m
+[31m[1m>[22m[31m[90m 593 |[31m                                             { editingId [33m===[31m inv[33m.[31mid [33m&&[31m (
+ [90m     |[31m                                             [31m[1m^[22m[31m
+ [90m 594 |[31m                                                 [33m<[31m[33mtr[31m className[33m=[31m[32m"bg-blue-50 border-b border-blue-200"[31m[33m>[31m
+ [90m 595 |[31m                                                     [33m<[31m[33mtd[31m colSpan[33m=[31m{[35m9[31m} className[33m=[31m[32m"p-4"[31m[33m>[31m
+ [90m 596 |[31m                                                         [33m<[31m[33mdiv[31m className[33m=[31m[32m"grid grid-cols-2 md:grid-cols-4 lg:grid-cols-7 gap-3 mb-3"[31m[33m>[31m[0m[39m
+  Plugin: [35mvite:react-babel[39m
+  File: [36mC:/Users/mirek/.gemini/antigravity/scratch/costframe/src/components/jobs/JobInvoicesTab.tsx[39m:593:44
+[33m  595 |                                                      <td colSpan={9} className="p-4">
+  596 |                                                          <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-...
+  597 |  ...der-gray-300 rounded text-sm" value={editForm.invoiceNumber} onChange={e => setEditForm({ ...editForm, invoiceNumb...
+      |                                                                 ^
+  598 |                                                              <div><label className="block text-xs font-medium text-gra...
+  599 |                                                              <div><label className="block text-xs font-medium text-gra...[39m
+      at constructor (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:365:19)
+      at TypeScriptParserMixin.raise (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:6599:19)
+      at TypeScriptParserMixin.unexpected (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:6619:16)
+      at TypeScriptParserMixin.expect (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:6899:12)
+      at TypeScriptParserMixin.parseParenAndDistinguishExpression (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:11661:14)
+      at TypeScriptParserMixin.parseExprAtom (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:11331:23)
+      at TypeScriptParserMixin.parseExprAtom (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:4764:20)
+      at TypeScriptParserMixin.parseExprSubscripts (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:11081:23)
+      at TypeScriptParserMixin.parseUpdate (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:11066:21)
+      at TypeScriptParserMixin.parseMaybeUnary (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:11046:23)
+      at TypeScriptParserMixin.parseMaybeUnary (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:9837:18)
+      at TypeScriptParserMixin.parseMaybeUnaryOrPrivate (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:10899:61)
+      at TypeScriptParserMixin.parseExprOps (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:10904:23)
+      at TypeScriptParserMixin.parseMaybeConditional (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:10881:23)
+      at TypeScriptParserMixin.parseMaybeAssign (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:10831:21)
+      at TypeScriptParserMixin.parseMaybeAssign (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:9786:20)
+      at TypeScriptParserMixin.parseFunctionBody (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:12093:24)
+      at TypeScriptParserMixin.parseArrowExpression (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:12075:10)
+      at TypeScriptParserMixin.parseExprAtom (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:11438:25)
+      at TypeScriptParserMixin.parseExprAtom (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:4764:20)
+      at TypeScriptParserMixin.parseExprSubscripts (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:11081:23)
+      at TypeScriptParserMixin.parseUpdate (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:11066:21)
+      at TypeScriptParserMixin.parseMaybeUnary (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:11046:23)
+      at TypeScriptParserMixin.parseMaybeUnary (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:9837:18)
+      at TypeScriptParserMixin.parseMaybeUnaryOrPrivate (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:10899:61)
+      at TypeScriptParserMixin.parseExprOps (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:10904:23)
+      at TypeScriptParserMixin.parseMaybeConditional (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:10881:23)
+      at TypeScriptParserMixin.parseMaybeAssign (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:10831:21)
+      at TypeScriptParserMixin.parseMaybeAssign (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:9786:20)
+      at D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:10800:39
+      at TypeScriptParserMixin.allowInAnd (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:12426:12)
+      at TypeScriptParserMixin.parseMaybeAssignAllowIn (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:10800:17)
+      at TypeScriptParserMixin.parseMaybeAssignAllowInOrVoidPattern (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:12493:17)
+      at TypeScriptParserMixin.parseExprListItem (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:12175:18)
+      at TypeScriptParserMixin.parseCallExpressionArguments (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:11252:22)
+      at TypeScriptParserMixin.parseCoverCallAndAsyncArrowHead (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:11186:29)
+      at TypeScriptParserMixin.parseSubscript (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:11120:19)
+      at TypeScriptParserMixin.parseSubscript (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:9272:18)
+      at TypeScriptParserMixin.parseSubscripts (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:11094:19)
+      at TypeScriptParserMixin.parseExprSubscripts (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:11085:17)
+      at TypeScriptParserMixin.parseUpdate (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:11066:21)
+      at TypeScriptParserMixin.parseMaybeUnary (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:11046:23)
+      at TypeScriptParserMixin.parseMaybeUnary (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:9837:18)
+      at TypeScriptParserMixin.parseMaybeUnaryOrPrivate (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:10899:61)
+      at TypeScriptParserMixin.parseExprOps (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:10904:23)
+      at TypeScriptParserMixin.parseMaybeConditional (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:10881:23)
+      at TypeScriptParserMixin.parseMaybeAssign (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:10831:21)
+      at TypeScriptParserMixin.parseMaybeAssign (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:9786:20)
+      at TypeScriptParserMixin.parseExpressionBase (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:10784:23)
+      at D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:10780:39
+[2m14:30:38[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/index.css, /src/components/jobs/JobInvoicesTab.tsx[22m
+[2m14:30:38[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/index.css[22m
+[2m14:30:38[22m [31m[1m[vite][22m[39m [31mInternal server error: C:\Users\mirek\.gemini\antigravity\scratch\costframe\src\components\jobs\JobInvoicesTab.tsx: Unexpected token, expected "," (642:44)
+
+[0m [90m 640 |[31m                                                 [33m<[31m[33m/[31m[33mtd[31m[33m>[31m
+ [90m 641 |[31m                                             [33m<[31m[33m/[31m[33mtr[31m[33m>[31m
+[31m[1m>[22m[31m[90m 642 |[31m                                             { editingId [33m===[31m exp[33m.[31mid [33m&&[31m (
+ [90m     |[31m                                             [31m[1m^[22m[31m
+ [90m 643 |[31m                                                 [33m<[31m[33mtr[31m className[33m=[31m[32m"bg-amber-50 border-b border-amber-200"[31m[33m>[31m
+ [90m 644 |[31m                                                     [33m<[31m[33mtd[31m colSpan[33m=[31m{[35m9[31m} className[33m=[31m[32m"p-4"[31m[33m>[31m
+ [90m 645 |[31m                                                         [33m<[31m[33mdiv[31m className[33m=[31m[32m"grid grid-cols-2 md:grid-cols-4 lg:grid-cols-6 gap-3 mb-3"[31m[33m>[31m[0m[39m
+  Plugin: [35mvite:react-babel[39m
+  File: [36mC:/Users/mirek/.gemini/antigravity/scratch/costframe/src/components/jobs/JobInvoicesTab.tsx[39m:642:44
+[33m  644 |                                                      <td colSpan={9} className="p-4">
+  645 |                                                          <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-...
+  646 |  ...nvoiceNumber} onChange={e => setEditForm({ ...editForm, invoiceNumber: e.target.value })} /></div>
+      |                                                                 ^
+  647 |                                                              <div><label className="block text-xs font-medium text-gra...
+  648 |                                                              <div><label className="block text-xs font-medium text-gra...[39m
+      at constructor (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:365:19)
+      at TypeScriptParserMixin.raise (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:6599:19)
+      at TypeScriptParserMixin.unexpected (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:6619:16)
+      at TypeScriptParserMixin.expect (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:6899:12)
+      at TypeScriptParserMixin.parseParenAndDistinguishExpression (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:11661:14)
+      at TypeScriptParserMixin.parseExprAtom (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:11331:23)
+      at TypeScriptParserMixin.parseExprAtom (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:4764:20)
+      at TypeScriptParserMixin.parseExprSubscripts (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:11081:23)
+      at TypeScriptParserMixin.parseUpdate (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:11066:21)
+      at TypeScriptParserMixin.parseMaybeUnary (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:11046:23)
+      at TypeScriptParserMixin.parseMaybeUnary (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:9837:18)
+      at TypeScriptParserMixin.parseMaybeUnaryOrPrivate (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:10899:61)
+      at TypeScriptParserMixin.parseExprOps (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:10904:23)
+      at TypeScriptParserMixin.parseMaybeConditional (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:10881:23)
+      at TypeScriptParserMixin.parseMaybeAssign (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:10831:21)
+      at TypeScriptParserMixin.parseMaybeAssign (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:9786:20)
+      at TypeScriptParserMixin.parseFunctionBody (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:12093:24)
+      at TypeScriptParserMixin.parseArrowExpression (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:12075:10)
+      at TypeScriptParserMixin.parseExprAtom (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:11438:25)
+      at TypeScriptParserMixin.parseExprAtom (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:4764:20)
+      at TypeScriptParserMixin.parseExprSubscripts (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:11081:23)
+      at TypeScriptParserMixin.parseUpdate (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:11066:21)
+      at TypeScriptParserMixin.parseMaybeUnary (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:11046:23)
+      at TypeScriptParserMixin.parseMaybeUnary (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:9837:18)
+      at TypeScriptParserMixin.parseMaybeUnaryOrPrivate (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:10899:61)
+      at TypeScriptParserMixin.parseExprOps (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:10904:23)
+      at TypeScriptParserMixin.parseMaybeConditional (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:10881:23)
+      at TypeScriptParserMixin.parseMaybeAssign (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:10831:21)
+      at TypeScriptParserMixin.parseMaybeAssign (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:9786:20)
+      at D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:10800:39
+      at TypeScriptParserMixin.allowInAnd (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:12426:12)
+      at TypeScriptParserMixin.parseMaybeAssignAllowIn (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:10800:17)
+      at TypeScriptParserMixin.parseMaybeAssignAllowInOrVoidPattern (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:12493:17)
+      at TypeScriptParserMixin.parseExprListItem (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:12175:18)
+      at TypeScriptParserMixin.parseCallExpressionArguments (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:11252:22)
+      at TypeScriptParserMixin.parseCoverCallAndAsyncArrowHead (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:11186:29)
+      at TypeScriptParserMixin.parseSubscript (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:11120:19)
+      at TypeScriptParserMixin.parseSubscript (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:9272:18)
+      at TypeScriptParserMixin.parseSubscripts (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:11094:19)
+      at TypeScriptParserMixin.parseExprSubscripts (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:11085:17)
+      at TypeScriptParserMixin.parseUpdate (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:11066:21)
+      at TypeScriptParserMixin.parseMaybeUnary (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:11046:23)
+      at TypeScriptParserMixin.parseMaybeUnary (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:9837:18)
+      at TypeScriptParserMixin.parseMaybeUnaryOrPrivate (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:10899:61)
+      at TypeScriptParserMixin.parseExprOps (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:10904:23)
+      at TypeScriptParserMixin.parseMaybeConditional (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:10881:23)
+      at TypeScriptParserMixin.parseMaybeAssign (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:10831:21)
+      at TypeScriptParserMixin.parseMaybeAssign (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:9786:20)
+      at TypeScriptParserMixin.parseExpressionBase (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:10784:23)
+      at D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:10780:39
+[2m14:31:33[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/index.css, /src/components/jobs/JobInvoicesTab.tsx[22m
+[2m14:31:33[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/index.css[22m
+[2m14:40:47[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/pages/OrdersPage.tsx, /src/index.css[22m
+[2m14:40:47[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/index.css[22m
+[2m14:47:31[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/pages/OrdersPage.tsx, /src/index.css[22m
+[2m14:47:31[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/index.css[22m
+[2m14:58:54[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/pages/OrdersPage.tsx, /src/index.css[22m
+[2m14:58:54[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/index.css[22m
+[2m15:02:46[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/index.css, /src/components/jobs/JobInvoicesTab.tsx[22m
+[2m15:02:46[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/index.css[22m
+[2m15:03:10[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/pages/OrdersPage.tsx, /src/index.css[22m
+[2m15:03:10[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/index.css[22m
+[2m15:03:20[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/pages/OrdersPage.tsx, /src/index.css[22m
+[2m15:03:20[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/index.css[22m
+[2m15:06:24[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/pages/OrdersPage.tsx, /src/index.css[22m
+[2m15:06:24[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/index.css[22m
+[2m15:07:24[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/pages/OrdersPage.tsx, /src/index.css[22m
+[2m15:07:24[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/index.css[22m
+[2m15:14:13[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/pages/OrdersPage.tsx, /src/index.css[22m
+[2m15:14:13[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/index.css[22m
+[2m15:16:29[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/index.css, /src/components/jobs/JobInvoicesTab.tsx[22m
+[2m15:16:29[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/index.css[22m
+[2m15:17:32[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/index.css, /src/components/jobs/JobInvoicesTab.tsx[22m
+[2m15:17:32[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/index.css[22m
+[2m15:23:16[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/pages/OrdersPage.tsx, /src/index.css[22m
+[2m15:23:16[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/index.css[22m
+[2m15:31:36[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/index.css, /src/components/jobs/JobMaterialsTab.tsx, /src/components/jobs/stages/JobStageDetail.tsx[22m
+[2m15:31:36[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/index.css[22m
+[2m15:31:54[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/index.css[22m
+[2m15:31:54[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/index.css[22m
+[2m15:32:39[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/index.css, /src/context/JobLogContext.tsx, /src/context/JobsContext.tsx, /src/context/CalendarContext.tsx, /src/context/SubcontractorContractsContext.tsx, /src/context/ClientReportsContext.tsx, /src/context/OffersContext.tsx, /src/pages/OffersPage.tsx, /src/components/offers/OfferForm.tsx, /src/pages/JobDetailsPage.tsx, /src/context/TiCoContext.tsx, /src/components/offers/OfferPrintView.tsx, /src/components/offers/ConstructionModal.tsx, /src/components/jobs/JobMaterialsTab.tsx, /src/components/jobs/stages/JobStageDetail.tsx[22m
+[2m15:32:39[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/index.css[22m
+[2m15:32:39[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [33mhmr invalidate [39m[2m/src/context/JobLogContext.tsx[22m Could not Fast Refresh ("jobLogStorage" export is incompatible). Learn more at https://github.com/vitejs/vite-plugin-react/tree/main/packages/plugin-react#consistent-components-exports
+[2m15:32:39[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/App.tsx, /src/context/ClientReportsContext.tsx, /src/components/reports/SiteEventsReportsPanel.tsx, /src/components/jobs/diary/JobLogEntryModal.tsx, /src/pages/GlobalDiaryPage.tsx[22m
+[2m15:32:39[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [33mhmr invalidate [39m[2m/src/context/JobsContext.tsx[22m Could not Fast Refresh ("JobsContext" export is incompatible). Learn more at https://github.com/vitejs/vite-plugin-react/tree/main/packages/plugin-react#consistent-components-exports
+[2m15:32:39[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/App.tsx, /src/components/jobs/reports/EditReportView.tsx, /src/components/layout/AppLayout.tsx, /src/components/layout/GlobalSearch.tsx, /src/components/jobs/wizard/CreateJobWizard.tsx, /src/pages/JobsPage.tsx, /src/pages/JobDetailsPage.tsx, /src/components/jobs/JobScheduleTab.tsx, /src/components/jobs/JobMaterialsTab.tsx, /src/components/jobs/JobDocumentsTab.tsx, /src/components/jobs/JobStagesTab.tsx, /src/components/jobs/JobSubcontractorsTab.tsx, /src/components/jobs/JobFinancialTab.tsx, /src/components/jobs/JobTeamTab.tsx, /src/components/jobs/stages/JobStageDetail.tsx, /src/components/reports/JobsReportsPanel.tsx, /src/components/reports/ClosedJobsReportPanel.tsx, /src/components/reports/DifficultyReportsPanel.tsx, /src/components/reports/EmployeeReportsPanel.tsx, /src/components/reports/SiteEventsReportsPanel.tsx, /src/pages/GlobalDiaryPage.tsx, /src/pages/tico/views/ReportsView.tsx, /src/pages/tico/views/ApprovalsView.tsx, /src/pages/tico/views/TimeRegistrationView.tsx, /src/pages/OrdersPage.tsx, /src/components/jobs/JobInvoicesTab.tsx, /src/components/dashboard/KpiStrip.tsx, /src/components/dashboard/FinancialChart.tsx, /src/components/dashboard/AnalyticsWidgets.tsx, /src/components/dashboard/OperationalWidgets.tsx[22m
+[2m15:32:39[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [33mhmr invalidate [39m[2m/src/context/CalendarContext.tsx[22m Could not Fast Refresh ("useCalendar" export is incompatible). Learn more at https://github.com/vitejs/vite-plugin-react/tree/main/packages/plugin-react#consistent-components-exports
+[2m15:32:39[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/App.tsx[22m
+[2m15:32:39[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [33mhmr invalidate [39m[2m/src/context/SubcontractorContractsContext.tsx[22m Could not Fast Refresh ("useSubcontractorContracts" export is incompatible). Learn more at https://github.com/vitejs/vite-plugin-react/tree/main/packages/plugin-react#consistent-components-exports
+[2m15:32:39[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/App.tsx, /src/components/jobs/JobSubcontractorsTab.tsx[22m
+[2m15:32:39[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [33mhmr invalidate [39m[2m/src/context/ClientReportsContext.tsx[22m Could not Fast Refresh ("useClientReports" export is incompatible). Learn more at https://github.com/vitejs/vite-plugin-react/tree/main/packages/plugin-react#consistent-components-exports
+[2m15:32:39[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/App.tsx, /src/components/jobs/reports/EditReportView.tsx, /src/components/jobs/reports/ClientReportsTab.tsx, /src/components/jobs/reports/CreateReportWizard.tsx[22m
+[2m15:32:39[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [33mhmr invalidate [39m[2m/src/context/OffersContext.tsx[22m Could not Fast Refresh ("OffersContext" export is incompatible). Learn more at https://github.com/vitejs/vite-plugin-react/tree/main/packages/plugin-react#consistent-components-exports
+[2m15:32:39[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/App.tsx, /src/components/layout/GlobalSearch.tsx, /src/pages/OffersPage.tsx, /src/components/offers/OfferForm.tsx, /src/components/jobs/JobFinancialTab.tsx, /src/components/jobs/stages/JobStageDetail.tsx, /src/pages/JobDetailsPage.tsx, /src/components/dashboard/KpiStrip.tsx[22m
+[2m15:32:39[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [33mhmr invalidate [39m[2m/src/context/TiCoContext.tsx[22m Could not Fast Refresh ("TiCoContext" export is incompatible). Learn more at https://github.com/vitejs/vite-plugin-react/tree/main/packages/plugin-react#consistent-components-exports
+[2m15:32:39[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/App.tsx, /src/components/layout/AppLayout.tsx, /src/components/jobs/JobSubcontractorsTab.tsx, /src/components/jobs/JobFinancialTab.tsx, /src/components/jobs/JobTeamTab.tsx, /src/components/reports/JobsReportsPanel.tsx, /src/components/reports/ClosedJobsReportPanel.tsx, /src/components/reports/DifficultyReportsPanel.tsx, /src/components/reports/EmployeeReportsPanel.tsx, /src/components/reports/SiteEventsReportsPanel.tsx, /src/pages/GlobalDiaryPage.tsx, /src/pages/tico/views/ReportsView.tsx, /src/pages/tico/views/CommunicationView.tsx, /src/pages/tico/views/RequestsView.tsx, /src/pages/tico/views/SubcontractorsView.tsx, /src/pages/tico/views/ApprovalsView.tsx, /src/pages/tico/views/CrewsView.tsx, /src/pages/tico/views/EmployeesView.tsx, /src/pages/tico/views/TimeRegistrationView.tsx, /src/pages/tico/views/SettlementsListView.tsx, /src/pages/tico/views/SettlementDetailsView.tsx, /src/pages/tico/views/SettlementWizard.tsx, /src/components/dashboard/FinancialChart.tsx, /src/components/dashboard/AnalyticsWidgets.tsx[22m
+[2m15:46:50[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/index.css, /src/components/jobs/JobMaterialsTab.tsx, /src/components/jobs/stages/JobStageDetail.tsx[22m
+[2m15:46:50[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/index.css[22m
+[2m15:47:05[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/index.css, /src/components/jobs/JobMaterialsTab.tsx, /src/components/jobs/stages/JobStageDetail.tsx[22m
+[2m15:47:05[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/index.css[22m
+[2m15:51:43[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/index.css, /src/components/jobs/JobMaterialsTab.tsx[22m
+[2m15:51:43[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/index.css[22m
+[2m15:52:10[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/index.css, /src/components/jobs/JobMaterialsTab.tsx[22m
+[2m15:52:10[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/index.css[22m
+[2m15:52:10[22m [31m[1m[vite][22m[39m [31mInternal server error: C:\Users\mirek\.gemini\antigravity\scratch\costframe\src\components\jobs\JobMaterialsTab.tsx: Expected corresponding JSX closing tag for <div>. (123:20)
+
+[0m [90m 121 |[31m                             [33m<[31m[33m/[31m[33mdiv[31m[33m>[31m
+ [90m 122 |[31m                         )}
+[31m[1m>[22m[31m[90m 123 |[31m                     [33m<[31m[33m/[31m[33mp[31m[33m>[31m
+ [90m     |[31m                     [31m[1m^[22m[31m
+ [90m 124 |[31m                 [33m<[31m[33m/[31m[33mdiv[31m[33m>[31m
+ [90m 125 |[31m                 [33m<[31m[33mdiv[31m className[33m=[31m[32m"flex items-center gap-6 bg-gray-50 px-4 py-2 rounded-lg border border-gray-100"[31m[33m>[31m
+ [90m 126 |[31m                     [33m<[31m[33mdiv[31m className[33m=[31m[32m"text-right"[31m[33m>[31m[0m[39m
+  Plugin: [35mvite:react-babel[39m
+  File: [36mC:/Users/mirek/.gemini/antigravity/scratch/costframe/src/components/jobs/JobMaterialsTab.tsx[39m:123:20
+[33m  123 |                      </p>
+  124 |                  </div>
+  125 |                  <div className="flex items-center gap-6 bg-gray-50 px-4 py-2 rounded-lg border border-gray-100">
+      |                                                                                                ^
+  126 |                      <div className="text-right">
+  127 |                          <p className="text-xs text-gray-500 uppercase font-semibold">Pozycji</p>[39m
+      at constructor (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:365:19)
+      at TypeScriptParserMixin.raise (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:6599:19)
+      at TypeScriptParserMixin.jsxParseElementAt (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:4727:16)
+      at TypeScriptParserMixin.jsxParseElementAt (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:4698:32)
+      at TypeScriptParserMixin.jsxParseElementAt (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:4698:32)
+      at TypeScriptParserMixin.jsxParseElementAt (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:4698:32)
+      at TypeScriptParserMixin.jsxParseElement (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:4749:17)
+      at TypeScriptParserMixin.parseExprAtom (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:4759:19)
+      at TypeScriptParserMixin.parseExprSubscripts (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:11081:23)
+      at TypeScriptParserMixin.parseUpdate (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:11066:21)
+      at TypeScriptParserMixin.parseMaybeUnary (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:11046:23)
+      at TypeScriptParserMixin.parseMaybeUnary (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:9837:18)
+      at TypeScriptParserMixin.parseMaybeUnaryOrPrivate (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:10899:61)
+      at TypeScriptParserMixin.parseExprOps (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:10904:23)
+      at TypeScriptParserMixin.parseMaybeConditional (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:10881:23)
+      at TypeScriptParserMixin.parseMaybeAssign (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:10831:21)
+      at D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:9775:39
+      at TypeScriptParserMixin.tryParse (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:6907:20)
+      at TypeScriptParserMixin.parseMaybeAssign (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:9775:18)
+      at D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:10800:39
+      at TypeScriptParserMixin.allowInAnd (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:12426:12)
+      at TypeScriptParserMixin.parseMaybeAssignAllowIn (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:10800:17)
+      at TypeScriptParserMixin.parseMaybeAssignAllowInOrVoidPattern (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:12493:17)
+      at TypeScriptParserMixin.parseParenAndDistinguishExpression (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:11675:28)
+      at TypeScriptParserMixin.parseExprAtom (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:11331:23)
+      at TypeScriptParserMixin.parseExprAtom (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:4764:20)
+      at TypeScriptParserMixin.parseExprSubscripts (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:11081:23)
+      at TypeScriptParserMixin.parseUpdate (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:11066:21)
+      at TypeScriptParserMixin.parseMaybeUnary (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:11046:23)
+      at TypeScriptParserMixin.parseMaybeUnary (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:9837:18)
+      at TypeScriptParserMixin.parseMaybeUnaryOrPrivate (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:10899:61)
+      at TypeScriptParserMixin.parseExprOps (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:10904:23)
+      at TypeScriptParserMixin.parseMaybeConditional (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:10881:23)
+      at TypeScriptParserMixin.parseMaybeAssign (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:10831:21)
+      at TypeScriptParserMixin.parseMaybeAssign (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:9786:20)
+      at TypeScriptParserMixin.parseExpressionBase (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:10784:23)
+      at D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:10780:39
+      at TypeScriptParserMixin.allowInAnd (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:12421:16)
+      at TypeScriptParserMixin.parseExpression (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:10780:17)
+      at TypeScriptParserMixin.parseReturnStatement (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:13142:28)
+      at TypeScriptParserMixin.parseStatementContent (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:12798:21)
+      at TypeScriptParserMixin.parseStatementContent (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:9508:18)
+      at TypeScriptParserMixin.parseStatementLike (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:12767:17)
+      at TypeScriptParserMixin.parseStatementListItem (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:12747:17)
+      at TypeScriptParserMixin.parseBlockOrModuleBlockBody (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:13316:61)
+      at TypeScriptParserMixin.parseBlockBody (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:13309:10)
+      at TypeScriptParserMixin.parseBlock (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:13297:10)
+      at TypeScriptParserMixin.parseFunctionBody (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:12100:24)
+      at TypeScriptParserMixin.parseArrowExpression (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:12075:10)
+      at TypeScriptParserMixin.parseParenAndDistinguishExpression (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:11687:12)
+[2m15:52:33[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/index.css, /src/components/jobs/JobMaterialsTab.tsx[22m
+[2m15:52:33[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/index.css[22m
+[2m15:52:33[22m [31m[1m[vite][22m[39m [31mInternal server error: C:\Users\mirek\.gemini\antigravity\scratch\costframe\src\components\jobs\JobMaterialsTab.tsx: Unexpected token, expected "," (148:12)
+
+[0m [90m 146 |[31m         [33m<[31m[33m/[31m[33mdiv[31m[33m>[31m
+ [90m 147 |[31m
+[31m[1m>[22m[31m[90m 148 |[31m             {[90m/* Main Table */[31m }
+ [90m     |[31m             [31m[1m^[22m[31m
+ [90m 149 |[31m     [33m<[31m[33mdiv[31m className[33m=[31m[32m"bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden"[31m[33m>[31m
+ [90m 150 |[31m         [33m<[31m[33mdiv[31m className[33m=[31m[32m"overflow-x-auto"[31m[33m>[31m
+ [90m 151 |[31m             [33m<[31m[33mtable[31m className[33m=[31m[32m"w-full text-sm text-left"[31m[33m>[31m[0m[39m
+  Plugin: [35mvite:react-babel[39m
+  File: [36mC:/Users/mirek/.gemini/antigravity/scratch/costframe/src/components/jobs/JobMaterialsTab.tsx[39m:148:12
+[33m  148 |              {/* Main Table */ }
+  149 |      <div className="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
+  150 |          <div className="overflow-x-auto">
+      |                                      ^
+  151 |              <table className="w-full text-sm text-left">
+  152 |                  <thead className="bg-gray-50 text-gray-500 border-b border-gray-200 uppercase text-xs tracking-wider">[39m
+      at constructor (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:365:19)
+      at TypeScriptParserMixin.raise (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:6599:19)
+      at TypeScriptParserMixin.unexpected (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:6619:16)
+      at TypeScriptParserMixin.expect (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:6899:12)
+      at TypeScriptParserMixin.parseParenAndDistinguishExpression (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:11661:14)
+      at TypeScriptParserMixin.parseExprAtom (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:11331:23)
+      at TypeScriptParserMixin.parseExprAtom (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:4764:20)
+      at TypeScriptParserMixin.parseExprSubscripts (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:11081:23)
+      at TypeScriptParserMixin.parseUpdate (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:11066:21)
+      at TypeScriptParserMixin.parseMaybeUnary (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:11046:23)
+      at TypeScriptParserMixin.parseMaybeUnary (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:9837:18)
+      at TypeScriptParserMixin.parseMaybeUnaryOrPrivate (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:10899:61)
+      at TypeScriptParserMixin.parseExprOps (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:10904:23)
+      at TypeScriptParserMixin.parseMaybeConditional (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:10881:23)
+      at TypeScriptParserMixin.parseMaybeAssign (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:10831:21)
+      at TypeScriptParserMixin.parseMaybeAssign (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:9786:20)
+      at TypeScriptParserMixin.parseExpressionBase (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:10784:23)
+      at D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:10780:39
+      at TypeScriptParserMixin.allowInAnd (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:12421:16)
+      at TypeScriptParserMixin.parseExpression (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:10780:17)
+      at TypeScriptParserMixin.parseReturnStatement (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:13142:28)
+      at TypeScriptParserMixin.parseStatementContent (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:12798:21)
+      at TypeScriptParserMixin.parseStatementContent (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:9508:18)
+      at TypeScriptParserMixin.parseStatementLike (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:12767:17)
+      at TypeScriptParserMixin.parseStatementListItem (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:12747:17)
+      at TypeScriptParserMixin.parseBlockOrModuleBlockBody (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:13316:61)
+      at TypeScriptParserMixin.parseBlockBody (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:13309:10)
+      at TypeScriptParserMixin.parseBlock (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:13297:10)
+      at TypeScriptParserMixin.parseFunctionBody (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:12100:24)
+      at TypeScriptParserMixin.parseArrowExpression (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:12075:10)
+      at TypeScriptParserMixin.parseParenAndDistinguishExpression (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:11687:12)
+      at TypeScriptParserMixin.parseExprAtom (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:11331:23)
+      at TypeScriptParserMixin.parseExprAtom (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:4764:20)
+      at TypeScriptParserMixin.parseExprSubscripts (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:11081:23)
+      at TypeScriptParserMixin.parseUpdate (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:11066:21)
+      at TypeScriptParserMixin.parseMaybeUnary (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:11046:23)
+      at TypeScriptParserMixin.parseMaybeUnary (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:9837:18)
+      at TypeScriptParserMixin.parseMaybeUnaryOrPrivate (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:10899:61)
+      at TypeScriptParserMixin.parseExprOps (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:10904:23)
+      at TypeScriptParserMixin.parseMaybeConditional (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:10881:23)
+      at TypeScriptParserMixin.parseMaybeAssign (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:10831:21)
+      at TypeScriptParserMixin.parseMaybeAssign (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:9786:20)
+      at D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:10800:39
+      at TypeScriptParserMixin.allowInAnd (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:12421:16)
+      at TypeScriptParserMixin.parseMaybeAssignAllowIn (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:10800:17)
+      at TypeScriptParserMixin.parseVar (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:13384:91)
+      at TypeScriptParserMixin.parseVarStatement (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:13230:10)
+      at TypeScriptParserMixin.parseVarStatement (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:9408:31)
+      at TypeScriptParserMixin.parseStatementContent (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:12851:23)
+      at TypeScriptParserMixin.parseStatementContent (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:9508:18)
+[2m15:52:53[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/index.css, /src/components/jobs/JobMaterialsTab.tsx[22m
+[2m15:52:53[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/index.css[22m
+[2m15:52:53[22m [31m[1m[vite][22m[39m [31mInternal server error: C:\Users\mirek\.gemini\antigravity\scratch\costframe\src\components\jobs\JobMaterialsTab.tsx: Unexpected token, expected "," (148:12)
+
+[0m [90m 146 |[31m         [33m<[31m[33m/[31m[33mdiv[31m[33m>[31m
+ [90m 147 |[31m
+[31m[1m>[22m[31m[90m 148 |[31m             {[90m/* Main Table */[31m }
+ [90m     |[31m             [31m[1m^[22m[31m
+ [90m 149 |[31m     [33m<[31m[33mdiv[31m className[33m=[31m[32m"bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden"[31m[33m>[31m
+ [90m 150 |[31m         [33m<[31m[33mdiv[31m className[33m=[31m[32m"overflow-x-auto"[31m[33m>[31m
+ [90m 151 |[31m             [33m<[31m[33mtable[31m className[33m=[31m[32m"w-full text-sm text-left"[31m[33m>[31m[0m[39m
+  Plugin: [35mvite:react-babel[39m
+  File: [36mC:/Users/mirek/.gemini/antigravity/scratch/costframe/src/components/jobs/JobMaterialsTab.tsx[39m:148:12
+[33m  148 |              {/* Main Table */ }
+  149 |      <div className="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
+  150 |          <div className="overflow-x-auto">
+      |                                      ^
+  151 |              <table className="w-full text-sm text-left">
+  152 |                  <thead className="bg-gray-50 text-gray-500 border-b border-gray-200 uppercase text-xs tracking-wider">[39m
+      at constructor (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:365:19)
+      at TypeScriptParserMixin.raise (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:6599:19)
+      at TypeScriptParserMixin.unexpected (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:6619:16)
+      at TypeScriptParserMixin.expect (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:6899:12)
+      at TypeScriptParserMixin.parseParenAndDistinguishExpression (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:11661:14)
+      at TypeScriptParserMixin.parseExprAtom (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:11331:23)
+      at TypeScriptParserMixin.parseExprAtom (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:4764:20)
+      at TypeScriptParserMixin.parseExprSubscripts (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:11081:23)
+      at TypeScriptParserMixin.parseUpdate (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:11066:21)
+      at TypeScriptParserMixin.parseMaybeUnary (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:11046:23)
+      at TypeScriptParserMixin.parseMaybeUnary (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:9837:18)
+      at TypeScriptParserMixin.parseMaybeUnaryOrPrivate (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:10899:61)
+      at TypeScriptParserMixin.parseExprOps (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:10904:23)
+      at TypeScriptParserMixin.parseMaybeConditional (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:10881:23)
+      at TypeScriptParserMixin.parseMaybeAssign (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:10831:21)
+      at TypeScriptParserMixin.parseMaybeAssign (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:9786:20)
+      at TypeScriptParserMixin.parseExpressionBase (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:10784:23)
+      at D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:10780:39
+      at TypeScriptParserMixin.allowInAnd (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:12421:16)
+      at TypeScriptParserMixin.parseExpression (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:10780:17)
+      at TypeScriptParserMixin.parseReturnStatement (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:13142:28)
+      at TypeScriptParserMixin.parseStatementContent (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:12798:21)
+      at TypeScriptParserMixin.parseStatementContent (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:9508:18)
+      at TypeScriptParserMixin.parseStatementLike (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:12767:17)
+      at TypeScriptParserMixin.parseStatementListItem (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:12747:17)
+      at TypeScriptParserMixin.parseBlockOrModuleBlockBody (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:13316:61)
+      at TypeScriptParserMixin.parseBlockBody (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:13309:10)
+      at TypeScriptParserMixin.parseBlock (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:13297:10)
+      at TypeScriptParserMixin.parseFunctionBody (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:12100:24)
+      at TypeScriptParserMixin.parseArrowExpression (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:12075:10)
+      at TypeScriptParserMixin.parseParenAndDistinguishExpression (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:11687:12)
+      at TypeScriptParserMixin.parseExprAtom (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:11331:23)
+      at TypeScriptParserMixin.parseExprAtom (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:4764:20)
+      at TypeScriptParserMixin.parseExprSubscripts (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:11081:23)
+      at TypeScriptParserMixin.parseUpdate (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:11066:21)
+      at TypeScriptParserMixin.parseMaybeUnary (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:11046:23)
+      at TypeScriptParserMixin.parseMaybeUnary (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:9837:18)
+      at TypeScriptParserMixin.parseMaybeUnaryOrPrivate (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:10899:61)
+      at TypeScriptParserMixin.parseExprOps (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:10904:23)
+      at TypeScriptParserMixin.parseMaybeConditional (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:10881:23)
+      at TypeScriptParserMixin.parseMaybeAssign (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:10831:21)
+      at TypeScriptParserMixin.parseMaybeAssign (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:9786:20)
+      at D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:10800:39
+      at TypeScriptParserMixin.allowInAnd (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:12421:16)
+      at TypeScriptParserMixin.parseMaybeAssignAllowIn (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:10800:17)
+      at TypeScriptParserMixin.parseVar (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:13384:91)
+      at TypeScriptParserMixin.parseVarStatement (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:13230:10)
+      at TypeScriptParserMixin.parseVarStatement (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:9408:31)
+      at TypeScriptParserMixin.parseStatementContent (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:12851:23)
+      at TypeScriptParserMixin.parseStatementContent (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:9508:18)
+[2m15:55:50[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/index.css, /src/components/jobs/JobMaterialsTab.tsx[22m
+[2m15:55:50[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/index.css[22m
+[2m15:55:50[22m [31m[1m[vite][22m[39m [31mInternal server error: C:\Users\mirek\.gemini\antigravity\scratch\costframe\src\components\jobs\JobMaterialsTab.tsx: Expected corresponding JSX closing tag for <div>. (131:16)
+
+[0m [90m 129 |[31m                         [33m<[31m[33mth[31m className[33m=[31m[32m"px-6 py-3 font-semibold text-right"[31m[33m>[31m[33mWartość[31m[33m<[31m[33m/[31m[33mth[31m[33m>[31m
+ [90m 130 |[31m                     [33m<[31m[33m/[31m[33mtr[31m[33m>[31m
+[31m[1m>[22m[31m[90m 131 |[31m                 [33m<[31m[33m/[31m[33mthead[31m[33m>[31m
+ [90m     |[31m                 [31m[1m^[22m[31m
+ [90m 132 |[31m                 [33m<[31m[33mtbody[31m className[33m=[31m[32m"divide-y divide-gray-100"[31m[33m>[31m
+ [90m 133 |[31m                     {bomData[33m.[31mitems[33m.[31mmap((item) [33m=>[31m (
+ [90m 134 |[31m                         [33m<[31m[33m>[31m[0m[39m
+  Plugin: [35mvite:react-babel[39m
+  File: [36mC:/Users/mirek/.gemini/antigravity/scratch/costframe/src/components/jobs/JobMaterialsTab.tsx[39m:131:16
+[33m  132 |                  <tbody className="divide-y divide-gray-100">
+  133 |                      {bomData.items.map((item) => (
+  134 |                          <>
+      |           ^
+  135 |                              <tr
+  136 |                                  key={item.materialId}[39m
+      at constructor (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:365:19)
+      at TypeScriptParserMixin.raise (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:6599:19)
+      at TypeScriptParserMixin.jsxParseElementAt (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:4727:16)
+      at TypeScriptParserMixin.jsxParseElementAt (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:4698:32)
+      at TypeScriptParserMixin.jsxParseElementAt (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:4698:32)
+      at TypeScriptParserMixin.jsxParseElement (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:4749:17)
+      at TypeScriptParserMixin.parseExprAtom (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:4759:19)
+      at TypeScriptParserMixin.parseExprSubscripts (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:11081:23)
+      at TypeScriptParserMixin.parseUpdate (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:11066:21)
+      at TypeScriptParserMixin.parseMaybeUnary (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:11046:23)
+      at TypeScriptParserMixin.parseMaybeUnary (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:9837:18)
+      at TypeScriptParserMixin.parseMaybeUnaryOrPrivate (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:10899:61)
+      at TypeScriptParserMixin.parseExprOps (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:10904:23)
+      at TypeScriptParserMixin.parseMaybeConditional (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:10881:23)
+      at TypeScriptParserMixin.parseMaybeAssign (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:10831:21)
+      at D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:9775:39
+      at TypeScriptParserMixin.tryParse (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:6907:20)
+      at TypeScriptParserMixin.parseMaybeAssign (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:9775:18)
+      at D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:10800:39
+      at TypeScriptParserMixin.allowInAnd (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:12426:12)
+      at TypeScriptParserMixin.parseMaybeAssignAllowIn (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:10800:17)
+      at TypeScriptParserMixin.parseMaybeAssignAllowInOrVoidPattern (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:12493:17)
+      at TypeScriptParserMixin.parseParenAndDistinguishExpression (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:11675:28)
+      at TypeScriptParserMixin.parseExprAtom (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:11331:23)
+      at TypeScriptParserMixin.parseExprAtom (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:4764:20)
+      at TypeScriptParserMixin.parseExprSubscripts (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:11081:23)
+      at TypeScriptParserMixin.parseUpdate (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:11066:21)
+      at TypeScriptParserMixin.parseMaybeUnary (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:11046:23)
+      at TypeScriptParserMixin.parseMaybeUnary (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:9837:18)
+      at TypeScriptParserMixin.parseMaybeUnaryOrPrivate (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:10899:61)
+      at TypeScriptParserMixin.parseExprOps (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:10904:23)
+      at TypeScriptParserMixin.parseMaybeConditional (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:10881:23)
+      at TypeScriptParserMixin.parseMaybeAssign (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:10831:21)
+      at TypeScriptParserMixin.parseMaybeAssign (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:9786:20)
+      at TypeScriptParserMixin.parseExpressionBase (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:10784:23)
+      at D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:10780:39
+      at TypeScriptParserMixin.allowInAnd (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:12421:16)
+      at TypeScriptParserMixin.parseExpression (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:10780:17)
+      at TypeScriptParserMixin.parseReturnStatement (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:13142:28)
+      at TypeScriptParserMixin.parseStatementContent (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:12798:21)
+      at TypeScriptParserMixin.parseStatementContent (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:9508:18)
+      at TypeScriptParserMixin.parseStatementLike (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:12767:17)
+      at TypeScriptParserMixin.parseStatementListItem (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:12747:17)
+      at TypeScriptParserMixin.parseBlockOrModuleBlockBody (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:13316:61)
+      at TypeScriptParserMixin.parseBlockBody (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:13309:10)
+      at TypeScriptParserMixin.parseBlock (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:13297:10)
+      at TypeScriptParserMixin.parseFunctionBody (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:12100:24)
+      at TypeScriptParserMixin.parseArrowExpression (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:12075:10)
+      at TypeScriptParserMixin.parseParenAndDistinguishExpression (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:11687:12)
+      at TypeScriptParserMixin.parseExprAtom (D:\.gemini\antigravity\scratch\costframe\node_modules\@babel\parser\lib\index.js:11331:23)
+[2m15:56:47[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/index.css, /src/components/jobs/JobMaterialsTab.tsx[22m
+[2m15:56:47[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/index.css[22m
+[2m15:59:28[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/index.css, /src/components/jobs/JobMaterialsTab.tsx[22m
+[2m15:59:28[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/index.css[22m
+[2m16:01:38[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/index.css, /src/components/jobs/JobMaterialsTab.tsx[22m
+[2m16:01:38[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/index.css[22m
+[2m16:06:14[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/index.css, /src/context/JobsContext.tsx[22m
+[2m16:06:14[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/index.css[22m
+[2m16:06:14[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [33mhmr invalidate [39m[2m/src/context/JobsContext.tsx[22m Could not Fast Refresh ("JobsContext" export is incompatible). Learn more at https://github.com/vitejs/vite-plugin-react/tree/main/packages/plugin-react#consistent-components-exports
+[2m16:06:14[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/App.tsx, /src/components/jobs/reports/EditReportView.tsx, /src/components/layout/AppLayout.tsx, /src/components/layout/GlobalSearch.tsx, /src/components/jobs/wizard/CreateJobWizard.tsx, /src/pages/JobsPage.tsx, /src/pages/JobDetailsPage.tsx, /src/components/jobs/JobScheduleTab.tsx, /src/components/jobs/JobMaterialsTab.tsx, /src/components/jobs/JobDocumentsTab.tsx, /src/components/jobs/JobStagesTab.tsx, /src/components/jobs/JobSubcontractorsTab.tsx, /src/components/jobs/JobFinancialTab.tsx, /src/components/jobs/JobTeamTab.tsx, /src/components/jobs/stages/JobStageDetail.tsx, /src/components/reports/JobsReportsPanel.tsx, /src/components/reports/ClosedJobsReportPanel.tsx, /src/components/reports/DifficultyReportsPanel.tsx, /src/components/reports/EmployeeReportsPanel.tsx, /src/components/reports/SiteEventsReportsPanel.tsx, /src/pages/GlobalDiaryPage.tsx, /src/pages/tico/views/ReportsView.tsx, /src/pages/tico/views/ApprovalsView.tsx, /src/pages/tico/views/TimeRegistrationView.tsx, /src/pages/OrdersPage.tsx, /src/components/jobs/JobInvoicesTab.tsx, /src/components/dashboard/KpiStrip.tsx, /src/components/dashboard/FinancialChart.tsx, /src/components/dashboard/AnalyticsWidgets.tsx, /src/components/dashboard/OperationalWidgets.tsx[22m
+[2m16:06:44[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/index.css, /src/components/jobs/JobMaterialsTab.tsx[22m
+[2m16:06:44[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/index.css[22m
+[2m16:06:54[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/index.css, /src/components/jobs/JobMaterialsTab.tsx[22m
+[2m16:06:54[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/index.css[22m

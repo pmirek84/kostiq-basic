@@ -1,0 +1,41 @@
+[
+  {
+    "_id": "6a553a413b7272d5545e4abf",
+    "id": "2eac0c5b-76ee-4044-95f2-ec29f5271fed",
+    "number": "WZÓR-STD-01",
+    "clientId": "",
+    "location": "Koszalin",
+    "status": "draft",
+    "createdAt": "2026-07-13T19:19:29.026Z",
+    "updatedAt": "2026-07-13T19:19:29.026Z",
+    "materialsCost": 0,
+    "laborCost": 0,
+    "totalCost": 0,
+    "totalNet": 0,
+    "vatRate": 23,
+    "title": "Wzór Oferty",
+    "offerTemplateType": "detailed"
+  },
+  {
+    "_id": "6a553a413b7272d5545e4ac0",
+    "id": "offer-2026-05-budex",
+    "number": "OF/2026/05",
+    "clientId": "b6d091ed-bd8c-4efc-a93c-b4ea136b9504",
+    "location": "Warszawa",
+    "status": "converted",
+    "totalCost": 45000,
+    "createdAt": "2026-07-13T19:19:29.026Z",
+    "updatedAt": "2026-07-13T20:34:52.624Z"
+  },
+  {
+    "_id": "6a553a413b7272d5545e4ac1",
+    "id": "offer-2026-05-jan",
+    "number": "OF/2026/05",
+    "clientId": "7888bfc3-db12-4ce9-bc9e-605bbb715760",
+    "location": "Warszawa",
+    "status": "sent",
+    "totalCost": 45000,
+    "createdAt": "2026-07-13T19:19:29.026Z",
+    "updatedAt": "2026-07-13T19:19:29.026Z"
+  }
+]

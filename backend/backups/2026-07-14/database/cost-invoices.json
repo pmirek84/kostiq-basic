@@ -1,0 +1,18 @@
+[
+  {
+    "_id": "6a54c2976afcdc548dcd70c0",
+    "id": "56917f48-8a21-42a9-8015-10692326d89b",
+    "jobId": "65f784ea-4f31-45da-bcd6-6c23fec49610",
+    "invoiceNumber": "FV-M-001",
+    "vendorName": "Hurtownia",
+    "category": "material",
+    "amountNet": 300,
+    "amountGross": 369,
+    "vatRate": 23,
+    "status": "paid",
+    "issueDate": "2026-07-13",
+    "createdAt": "2026-07-13T10:48:55.570Z",
+    "updatedAt": "2026-07-13T10:49:17.737Z",
+    "paidDate": "2026-07-13T10:49:17.723Z"
+  }
+]

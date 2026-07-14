@@ -1,0 +1,101 @@
+[
+  {
+    "_id": "6a553a413b7272d5545e4ac2",
+    "id": "admin-dev-id",
+    "type": "employee",
+    "firstName": "Paweł",
+    "lastName": "Mirek",
+    "email": "admin@kostiq.pl",
+    "role": "admin",
+    "hourlyRate": 150,
+    "currency": "PLN",
+    "isActive": true,
+    "pwaPassword": "pass"
+  },
+  {
+    "_id": "6a553a413b7272d5545e4ac3",
+    "id": "emp-sasza-001",
+    "type": "employee",
+    "firstName": "Sasza",
+    "lastName": "",
+    "role": "worker",
+    "hourlyRate": 60,
+    "currency": "PLN",
+    "isActive": true,
+    "pwaPassword": "pass",
+    "crewId": "crew-ekipa-1"
+  },
+  {
+    "_id": "6a553a413b7272d5545e4ac4",
+    "id": "emp-kamil-001",
+    "type": "employee",
+    "firstName": "Kamil",
+    "lastName": "",
+    "role": "worker",
+    "hourlyRate": 60,
+    "currency": "PLN",
+    "isActive": true,
+    "pwaPassword": "pass",
+    "crewId": "crew-ekipa-1"
+  },
+  {
+    "_id": "6a553a413b7272d5545e4ac5",
+    "id": "37cfd266-e94c-48ce-9ce0-c18d75808888",
+    "type": "employee",
+    "firstName": "Lubczyk",
+    "lastName": "",
+    "role": "worker",
+    "hourlyRate": 60,
+    "currency": "PLN",
+    "isActive": true,
+    "pwaPassword": "pass"
+  },
+  {
+    "_id": "6a553a413b7272d5545e4ac6",
+    "id": "a80aea7a-4589-4546-8bfa-ab4775837c03",
+    "type": "employee",
+    "firstName": "Mateusz",
+    "lastName": "",
+    "role": "worker",
+    "hourlyRate": 60,
+    "currency": "PLN",
+    "isActive": true,
+    "pwaPassword": "pass"
+  },
+  {
+    "_id": "6a553a413b7272d5545e4ac7",
+    "id": "41bd6c9a-93bc-40fc-9048-62d1199d3acd",
+    "type": "employee",
+    "firstName": "Grzegorz",
+    "lastName": "",
+    "role": "worker",
+    "hourlyRate": 45,
+    "currency": "PLN",
+    "isActive": true,
+    "pwaPassword": "pass"
+  },
+  {
+    "_id": "6a553a413b7272d5545e4ac8",
+    "id": "a2a832d5-6e37-4e53-b15c-7e757960f4c3",
+    "type": "employee",
+    "firstName": "Jan",
+    "lastName": "Kowalski",
+    "role": "foreman",
+    "hourlyRate": 80,
+    "currency": "PLN",
+    "isActive": true,
+    "pwaPassword": "pass"
+  },
+  {
+    "_id": "6a553a413b7272d5545e4ac9",
+    "id": "6e1ceb05-9345-49df-886f-4d3cba35d1d0",
+    "type": "employee",
+    "firstName": "Piotr",
+    "lastName": "Nowak",
+    "role": "worker",
+    "hourlyRate": 60,
+    "currency": "PLN",
+    "isActive": true,
+    "pwaPassword": "pass"
+  }
+]

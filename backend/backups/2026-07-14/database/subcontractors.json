@@ -1,0 +1,18 @@
+[
+  {
+    "_id": "6a553a413b7272d5545e4acb",
+    "id": "e2259447-0bbb-4d69-bbb6-56cf289435c8",
+    "name": "Firma Budowlana \"Solid\"",
+    "email": "biuro@solid.pl",
+    "phone": "500 600 700",
+    "type": "company",
+    "hourlyRate": 100,
+    "currency": "PLN",
+    "specializations": [
+      "montaż",
+      "lekka mokra"
+    ],
+    "active": true,
+    "createdAt": "2026-07-13T19:19:29.052Z"
+  }
+]

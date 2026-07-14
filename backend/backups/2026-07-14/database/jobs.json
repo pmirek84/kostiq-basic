@@ -1,0 +1,213 @@
+[
+  {
+    "_id": "6a553a413b7272d5545e4ad3",
+    "id": "job-001",
+    "jobCode": "CF-2026-001",
+    "name": "Montaż hali magazynowej",
+    "clientId": "b6d091ed-bd8c-4efc-a93c-b4ea136b9504",
+    "clientName": "Budex Sp. z o.o.",
+    "location": "Poznań, ul. Magazynowa 4",
+    "status": "in_progress",
+    "riskFlag": "none",
+    "plannedStartDate": "2026-06-30",
+    "plannedEndDate": "2026-07-27",
+    "totalPlannedRevenueNet": 150000,
+    "laborPlannedNet": 960,
+    "materialsPlannedNet": 10000,
+    "logisticsPlannedNet": 1200,
+    "equipmentPlannedNet": 800,
+    "expenses": [
+      {
+        "id": "0d368f7f-59f5-44fe-88ed-d0cde9897692",
+        "category": "material",
+        "amountNet": 9500,
+        "description": "Profile stalowe i akcesoria"
+      },
+      {
+        "id": "c5dd9513-8efd-40ab-bdab-1b84c304c24e",
+        "category": "transport",
+        "amountNet": 1200,
+        "description": "Transport konstrukcji"
+      }
+    ],
+    "createdAt": "2026-07-13T19:19:29.074Z",
+    "updatedAt": "2026-07-13T19:23:09.193Z",
+    "stages": [
+      {
+        "id": "stage-j1-s1",
+        "jobId": "job-001",
+        "name": "Konstrukcja główna",
+        "type": "podstawowy",
+        "status": "w_toku",
+        "plannedRevenueNet": 100000,
+        "billingType": "hourly",
+        "startPlanned": "2026-06-30",
+        "endPlanned": "2026-07-27",
+        "assignedTeams": [
+          "Ekipa 1"
+        ]
+      }
+    ],
+    "actualLaborCost": 960,
+    "actualLaborHours": 16,
+    "settledLaborCost": 0
+  },
+  {
+    "_id": "6a553a413b7272d5545e4ad4",
+    "id": "job-002",
+    "jobCode": "CF-2026-002",
+    "name": "Remont fasady biurowca",
+    "clientId": "b6d091ed-bd8c-4efc-a93c-b4ea136b9504",
+    "clientName": "Budex Sp. z o.o.",
+    "location": "Warszawa, ul. Prosta 20",
+    "status": "planned",
+    "riskFlag": "warning",
+    "plannedStartDate": "2026-06-30",
+    "plannedEndDate": "2026-07-27",
+    "totalPlannedRevenueNet": 85000,
+    "laborPlannedNet": 8000,
+    "materialsPlannedNet": 45000,
+    "logisticsPlannedNet": 2500,
+    "equipmentPlannedNet": 5000,
+    "expenses": [],
+    "createdAt": "2026-07-13T19:19:29.074Z",
+    "updatedAt": "2026-07-13T19:19:29.074Z",
+    "stages": [
+      {
+        "id": "stage-j2-s1",
+        "jobId": "job-002",
+        "name": "Prace przygotowawcze",
+        "type": "podstawowy",
+        "status": "planowany",
+        "plannedRevenueNet": 25000,
+        "billingType": "hourly",
+        "startPlanned": "2026-06-30",
+        "endPlanned": "2026-07-27"
+      }
+    ]
+  },
+  {
+    "_id": "6a553a413b7272d5545e4ad5",
+    "id": "job-003",
+    "jobCode": "CF-2026-003",
+    "name": "Montaż stolarki w willi",
+    "clientId": "b6d091ed-bd8c-4efc-a93c-b4ea136b9504",
+    "clientName": "Budex Sp. z o.o.",
+    "location": "Warszawa, ul. Leśna 5",
+    "status": "done",
+    "riskFlag": "none",
+    "plannedStartDate": "2026-06-01",
+    "plannedEndDate": "2026-06-15",
+    "totalPlannedRevenueNet": 50000,
+    "laborPlannedNet": 12000,
+    "materialsPlannedNet": 15000,
+    "logisticsPlannedNet": 2000,
+    "equipmentPlannedNet": 3000,
+    "actualRevenue": 52000,
+    "createdAt": "2026-06-13T19:19:29.074Z",
+    "updatedAt": "2026-07-13T19:23:09.193Z",
+    "closedAt": "2026-06-28T19:19:29.074Z",
+    "expenses": [
+      {
+        "id": "1a57466a-f98d-4e5f-a7ba-7ce92d6cbd3b",
+        "category": "material",
+        "amountNet": 14200,
+        "description": "Okna i uszczelki"
+      },
+      {
+        "id": "9ac2aca8-48ca-4acf-85b4-cc9c93f9aca5",
+        "category": "transport",
+        "amountNet": 1800,
+        "description": "Dostawa na budowę"
+      },
+      {
+        "id": "45957499-1597-4ed0-83d8-e0c6ebee2ead",
+        "category": "equipment",
+        "amountNet": 2500,
+        "description": "Wynajem podnośnika"
+      }
+    ],
+    "stages": [
+      {
+        "id": "stage-j3-s1",
+        "jobId": "job-003",
+        "name": "Instalacja okien",
+        "type": "podstawowy",
+        "status": "zakończony",
+        "plannedRevenueNet": 50000,
+        "billingType": "hourly",
+        "startPlanned": "2026-06-01",
+        "endPlanned": "2026-06-15"
+      }
+    ],
+    "actualLaborCost": 10200,
+    "actualLaborHours": 170,
+    "settledLaborCost": 0
+  },
+  {
+    "_id": "6a554bec6afcdc548dcd70c7",
+    "name": "Zlecenie z oferty OF/2026/05Testowe zlecenie z oferty",
+    "clientId": "b6d091ed-bd8c-4efc-a93c-b4ea136b9504",
+    "location": "WarszawaPozna",
+    "revenuePlannedNet": 15344,
+    "totalPlannedRevenueNet": 15344,
+    "materialsPlannedNet": 0,
+    "laborPlannedNet": 0,
+    "logisticsPlannedNet": 0,
+    "equipmentPlannedNet": 0,
+    "otherCostsNet": 0,
+    "plannedTotalCost": 0,
+    "marginPlannedPercent": 100,
+    "priority": "normal",
+    "status": "planned",
+    "id": "ddb57b6d-e7aa-4ff5-847c-f44363ac9b47",
+    "jobCode": "CF-2026-004",
+    "createdAt": "2026-07-13T20:34:52.461Z",
+    "updatedAt": "2026-07-13T20:34:52.461Z",
+    "riskFlag": "none",
+    "clientName": "",
+    "plannedLaborHours": 0,
+    "plannedLaborCost": 0,
+    "stages": [
+      {
+        "id": "218cf48a-f976-4256-a928-1f07de2cad0f",
+        "name": "Etap podstawowyEtap 1",
+        "type": "podstawowy",
+        "status": "planowany",
+        "plannedRevenueNet": 15344,
+        "jobId": "ddb57b6d-e7aa-4ff5-847c-f44363ac9b47",
+        "billingType": "hourly",
+        "plannedCostNet": 0,
+        "plannedLaborHours": 0,
+        "plannedLaborCost": 0,
+        "revenueSharePercent": 100
+      }
+    ],
+    "allocations": [
+      {
+        "id": "1cfaa8de-4174-4a61-ac69-cc14f81ceac2",
+        "offerItemId": "1e6ce963-19b7-4a21-81a8-9920c51e74d1",
+        "jobStageId": "218cf48a-f976-4256-a928-1f07de2cad0f",
+        "jobId": "ddb57b6d-e7aa-4ff5-847c-f44363ac9b47",
+        "allocatedValueNet": 7840,
+        "offerItemName": "Okno PVC Drutex Iglo 5",
+        "originalQuantity": 8
+      },
+      {
+        "id": "292fa701-0a1b-4bd5-8ec0-3083d0e2fc28",
+        "offerItemId": "9df65aea-b974-4e0c-8bb9-ad3225d300e1",
+        "jobStageId": "218cf48a-f976-4256-a928-1f07de2cad0f",
+        "jobId": "ddb57b6d-e7aa-4ff5-847c-f44363ac9b47",
+        "allocatedValueNet": 7504,
+        "offerItemName": "Drzwi Aluminiowe Aluprof MB-86",
+        "originalQuantity": 2
+      }
+    ],
+    "laborBudget": {
+      "totalPlannedNet": 0,
+      "ownPlannedNet": 0,
+      "subcontractorPlannedNet": 0
+    },
+    "stageLaborBudgets": []
+  }
+]

@@ -1,0 +1,47 @@
+[
+  {
+    "_id": "6a52a3e0ebdfd3ccca224dd2",
+    "id": "1",
+    "name": "Parapet zewnętrzny stalowy",
+    "type": "Parapet",
+    "material": "Stal ocynkowana",
+    "finishing": "Lakier PVD",
+    "thickness": 0.7,
+    "width": 200,
+    "length": 1000,
+    "color": "RAL 9016",
+    "unitPrice": 35,
+    "unit": "mb",
+    "category": "Parapety"
+  },
+  {
+    "_id": "6a52a3e0ebdfd3ccca224dd3",
+    "id": "2",
+    "name": "Parapet zewnętrzny aluminiowy",
+    "type": "Parapet",
+    "material": "Aluminium",
+    "finishing": "Lakier proszkowy",
+    "thickness": 1,
+    "width": 200,
+    "length": 1000,
+    "color": "RAL 9016",
+    "unitPrice": 50,
+    "unit": "mb",
+    "category": "Parapety"
+  },
+  {
+    "_id": "6a52a3e0ebdfd3ccca224dd4",
+    "id": "3",
+    "name": "Listwa maskująca",
+    "type": "Listwa",
+    "material": "Aluminium",
+    "finishing": "Lakier proszkowy",
+    "thickness": 1.2,
+    "width": 30,
+    "length": 2000,
+    "color": "RAL 9016",
+    "unitPrice": 45,
+    "unit": "mb",
+    "category": "Listwy"
+  }
+]

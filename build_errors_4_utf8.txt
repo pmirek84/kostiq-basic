@@ -1,0 +1,16 @@
+﻿src/pages/tico/views/CrewsView.tsx(1,3): error TS1443: Module declaration names may only use ' or " quoted strings.
+src/pages/tico/views/CrewsView.tsx(38,29): error TS1434: Unexpected keyword or identifier.
+src/pages/tico/views/CrewsView.tsx(38,33): error TS1434: Unexpected keyword or identifier.
+src/pages/tico/views/CrewsView.tsx(38,46): error TS1434: Unexpected keyword or identifier.
+src/pages/tico/views/CrewsView.tsx(132,59): error TS1005: ';' expected.
+src/pages/tico/views/CrewsView.tsx(132,66): error TS1005: ';' expected.
+src/pages/tico/views/CrewsView.tsx(132,73): error TS1005: ';' expected.
+src/pages/tico/views/CrewsView.tsx(132,91): error TS1005: ';' expected.
+src/pages/tico/views/CrewsView.tsx(195,79): error TS1005: ';' expected.
+src/pages/tico/views/CrewsView.tsx(195,101): error TS1434: Unexpected keyword or identifier.
+src/pages/tico/views/CrewsView.tsx(199,78): error TS1005: ';' expected.
+src/pages/tico/views/CrewsView.tsx(199,84): error TS1005: ';' expected.
+src/pages/tico/views/CrewsView.tsx(199,104): error TS1005: ';' expected.
+src/pages/tico/views/CrewsView.tsx(199,122): error TS1005: ';' expected.
+src/pages/tico/views/CrewsView.tsx(199,144): error TS1005: ';' expected.
+src/pages/tico/views/CrewsView.tsx(228,1): error TS1160: Unterminated template literal.

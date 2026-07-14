@@ -1,0 +1,62 @@
+[
+  {
+    "_id": "6a553a413b7272d5545e4ae1",
+    "id": "415b39e6-9a8c-48d1-8df1-6d475e9fdb57",
+    "jobId": "job-001",
+    "date": "2026-07-12",
+    "authorId": "emp-sasza-001",
+    "type": "work_day",
+    "title": "Montaż pierwszego rzędu słupów",
+    "text": "Pogoda sprzyjająca. Zmontowano wszystkie stopy fundamentowe i rozpoczęto montaż konstrukcji stalowej pionowej. Wszystkie elementy zgodne ze specyfikacją.",
+    "photos": [],
+    "visibleToClient": true,
+    "source": "pwa",
+    "createdAt": "2026-07-13T19:19:29.107Z",
+    "updatedAt": "2026-07-13T19:19:29.108Z"
+  },
+  {
+    "_id": "6a553a413b7272d5545e4ae2",
+    "id": "0bd6d5ef-43af-42a1-8a53-bb93014e1930",
+    "jobId": "job-001",
+    "date": "2026-07-12",
+    "authorId": "emp-kamil-001",
+    "type": "issue",
+    "title": "Opóźnienie w dostawie dźwigu",
+    "text": "Wynajęty dźwig przyjechał na budowę z 2-godzinnym opóźnieniem z powodu awarii na trasie. Spowodowało to niewielki przestój ekipy montażowej.",
+    "photos": [],
+    "visibleToClient": true,
+    "source": "pwa",
+    "createdAt": "2026-07-13T19:19:29.108Z",
+    "updatedAt": "2026-07-13T19:19:29.108Z"
+  },
+  {
+    "_id": "6a553a413b7272d5545e4ae3",
+    "id": "187f3c44-f753-49c9-950d-9bd04e4f9779",
+    "jobId": "job-003",
+    "date": "2026-06-10",
+    "authorId": "emp-sasza-001",
+    "type": "milestone",
+    "title": "Zakończenie stanu surowego zamkniętego",
+    "text": "Wszystkie okna i drzwi w willi zostały pomyślnie zamontowane i uszczelnione pianą poliuretanową. Dokonano odbioru technicznego.",
+    "photos": [],
+    "visibleToClient": true,
+    "source": "pwa",
+    "createdAt": "2026-06-23T19:19:29.074Z",
+    "updatedAt": "2026-06-23T19:19:29.074Z"
+  },
+  {
+    "_id": "6a553be66afcdc548dcd70c4",
+    "jobId": "job-001",
+    "date": "2026-07-13",
+    "type": "work_day",
+    "title": "",
+    "text": "stoooop",
+    "visibleToClient": true,
+    "photos": [],
+    "authorId": "Admin",
+    "source": "pwa",
+    "id": "52922a26-826d-4cf9-a15b-526183df455e",
+    "createdAt": "2026-07-13T19:26:30.552Z",
+    "updatedAt": "2026-07-13T19:26:30.552Z"
+  }
+]

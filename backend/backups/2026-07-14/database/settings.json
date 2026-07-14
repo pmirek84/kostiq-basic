@@ -1,0 +1,14 @@
+[
+  {
+    "_id": "6a54c02f6afcdc548dcd70b7",
+    "id": "default",
+    "companyName": "STOK Sp. z o.o.",
+    "address": "ul. Józefa Mireckiego 2, 75-506 Koszalin",
+    "taxId": "6692562868",
+    "defaultVatRate": 23,
+    "defaultHourlyRate": 120,
+    "defaultMarginPercent": 30,
+    "createdAt": "2026-07-13T10:30:15.026Z",
+    "updatedAt": "2026-07-13T10:38:41.943Z"
+  }
+]
