@@ -1,2 +1,0 @@
-﻿src/components/NotificationsPanel.tsx(3,28): error TS2459: Module '"../context/CalendarContext"' declares 'CalendarEvent' locally, but it is not exported.
-src/utils/pdfGenerator.ts(272,17): error TS6133: 'startY' is declared but its value is never read.

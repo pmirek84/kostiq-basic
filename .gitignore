@@ -7,6 +7,23 @@ yarn-error.log*
 pnpm-debug.log*
 lerna-debug.log*
 
+# Diagnostic logs, lint reports, and test outputs
+*_log.txt
+*log.txt
+*_errors*.txt
+*errors*.txt
+*_output*.txt
+*output*.txt
+*_report*.txt
+*report*.txt
+*_results.*
+*results.*
+*lint*.json
+*lint*.txt
+*test*.txt
+db-results.txt
+
+
 node_modules
 dist
 dist-ssr

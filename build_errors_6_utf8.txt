@@ -1,5 +1,0 @@
-﻿src/components/calendar/TeamSelectionDialog.tsx(2,13): error TS6133: 'Search' is declared but its value is never read.
-src/components/calendar/TeamSelectionDialog.tsx(2,38): error TS6133: 'HardHat' is declared but its value is never read.
-src/components/NotificationsPanel.tsx(3,28): error TS2459: Module '"../context/CalendarContext"' declares 'CalendarEvent' locally, but it is not exported.
-src/components/offers/OfferTemplateEditor.tsx(2,1): error TS6133: 'Input' is declared but its value is never read.
-src/utils/pdfGenerator.ts(272,17): error TS6133: 'startY' is declared but its value is never read.
