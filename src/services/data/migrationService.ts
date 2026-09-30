@@ -12,12 +12,15 @@ export interface MigrationItemPreview {
 }
 
 export interface MigrationPreviewReport {
+    snapshotId: string;
+    snapshotHash: string;
     timestamp: string;
     totalLocal: number;
     toCreateCount: number;
     identicalCount: number;
     conflictCount: number;
     items: MigrationItemPreview[];
+    storeFingerprints: Record<string, string>;
 }
 
 export interface MigrationOptions {
@@ -33,6 +36,7 @@ export interface MigrationRecordResult {
 }
 
 export interface MigrationExecutionReport {
+    snapshotId: string;
     timestamp: string;
     total: number;
     created: number;
@@ -87,103 +91,213 @@ export function detectConflictFields(local: any, remote: any): string[] {
     return conflicts;
 }
 
+export function computeStoreFingerprint(remoteItems: any[]): string {
+    if (!Array.isArray(remoteItems)) return 'empty';
+    const sorted = [...remoteItems].sort((a, b) => String(a?.id || '').localeCompare(String(b?.id || '')));
+    let hash = 0;
+    for (const item of sorted) {
+        const str = `${item?.id || ''}:${item?.updatedAt || item?._lastUpdatedAt || ''}:${item?.name || item?.title || ''}`;
+        for (let i = 0; i < str.length; i++) {
+            hash = ((hash << 5) - hash + str.charCodeAt(i)) | 0;
+        }
+    }
+    return hash.toString(36);
+}
+
+function computeSnapshotHash(storeFingerprints: Record<string, string>, items: MigrationItemPreview[]): string {
+    const baseStr = Object.entries(storeFingerprints).sort().map(([k, v]) => `${k}=${v}`).join(';') +
+        '|' + items.map(i => `${i.entity}:${i.id}:${i.status}:${i.conflictFields.join(',')}`).join(';');
+    let hash = 0;
+    for (let i = 0; i < baseStr.length; i++) {
+        hash = ((hash << 5) - hash + baseStr.charCodeAt(i)) | 0;
+    }
+    return Math.abs(hash).toString(16).padStart(8, '0');
+}
+
+/**
+ * Administrative Migration API Client
+ * Uses POST /api/migration/admin-record with full document replacement (replaceOne)
+ * and bypasses optimistic locking constraints.
+ */
+export async function adminMigrateRecord(payload: { collection: string; action: 'create' | 'replace'; record: any }): Promise<any> {
+    const token = localStorage.getItem('kostiq_token');
+    const baseUrl = (import.meta as any).env?.VITE_API_URL || 'http://localhost:3000/api';
+    const res = await fetch(`${baseUrl}/migration/admin-record`, {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+            ...(token ? { Authorization: `Bearer ${token}` } : {})
+        },
+        body: JSON.stringify(payload)
+    });
+    if (!res.ok) {
+        let errorMsg = `Błąd API migracji: HTTP ${res.status}`;
+        try {
+            const errJson = await res.json();
+            errorMsg = errJson.error || errorMsg;
+        } catch (_) {}
+        const err: any = new Error(errorMsg);
+        err.status = res.status;
+        throw err;
+    }
+    return res.json();
+}
+
 export const migrationService = {
     async previewMigration(): Promise<MigrationPreviewReport> {
         console.log('[Migration] Generating migration conflict preview...');
         const db = await getDB();
         const items: MigrationItemPreview[] = [];
+        const storeFingerprints: Record<string, string> = {};
 
         for (const store of MIGRATION_STORES) {
+            // 1. Read local items from IndexedDB
+            // @ts-ignore - store.name is in DB
+            const localList = await db.getAll(store.name);
+
+            // 2. Read remote items from MongoDB
+            const adapter = getAdapter<any>(store.name, store.endpoint);
+            let remoteList: any[];
             try {
-                // @ts-ignore - store.name is in DB
-                const localList = await db.getAll(store.name);
-                if (!Array.isArray(localList) || localList.length === 0) continue;
+                remoteList = await adapter.getAll();
+            } catch (err: any) {
+                // P1 FIX: If reading MongoDB fails, abort immediately!
+                // NEVER swallow errors and pretend MongoDB is empty.
+                console.error(`[Migration] Błąd odczytu MongoDB dla kolekcji '${store.name}':`, err);
+                throw new Error(`Nie można odczytać danych MongoDB dla kolekcji '${store.name}': ${err?.message || 'Brak odpowiedzi'}. Podgląd migracji przerwany w celu ochrony integralności danych.`);
+            }
 
-                const adapter = getAdapter<any>(store.name, store.endpoint);
-                let remoteList: any[] = [];
-                try {
-                    remoteList = await adapter.getAll();
-                } catch (e) {
-                    console.warn(`[Migration] Could not load remote list for store ${store.name}`, e);
-                }
+            storeFingerprints[store.name] = computeStoreFingerprint(remoteList);
 
-                const remoteMap = new Map<string, any>();
-                for (const r of remoteList) {
-                    if (r && r.id) remoteMap.set(r.id, r);
-                }
+            if (!Array.isArray(localList) || localList.length === 0) continue;
 
-                for (const localItem of localList) {
-                    if (!localItem || !localItem.id) continue;
+            const remoteMap = new Map<string, any>();
+            for (const r of remoteList) {
+                if (r && r.id) remoteMap.set(r.id, r);
+            }
 
-                    const remoteItem = remoteMap.get(localItem.id);
-                    if (!remoteItem) {
+            for (const localItem of localList) {
+                if (!localItem || !localItem.id) continue;
+
+                const remoteItem = remoteMap.get(localItem.id);
+                if (!remoteItem) {
+                    items.push({
+                        id: localItem.id,
+                        entity: store.name,
+                        status: 'to_create',
+                        summary: localItem.name || localItem.title || localItem.number || localItem.id,
+                        conflictFields: [],
+                        localData: localItem
+                    });
+                } else {
+                    const conflictFields = detectConflictFields(localItem, remoteItem);
+                    if (conflictFields.length > 0) {
                         items.push({
                             id: localItem.id,
                             entity: store.name,
-                            status: 'to_create',
+                            status: 'conflict',
                             summary: localItem.name || localItem.title || localItem.number || localItem.id,
-                            conflictFields: [],
-                            localData: localItem
+                            conflictFields,
+                            localData: localItem,
+                            remoteData: remoteItem
                         });
                     } else {
-                        const conflictFields = detectConflictFields(localItem, remoteItem);
-                        if (conflictFields.length > 0) {
-                            items.push({
-                                id: localItem.id,
-                                entity: store.name,
-                                status: 'conflict',
-                                summary: localItem.name || localItem.title || localItem.number || localItem.id,
-                                conflictFields,
-                                localData: localItem,
-                                remoteData: remoteItem
-                            });
-                        } else {
-                            items.push({
-                                id: localItem.id,
-                                entity: store.name,
-                                status: 'identical',
-                                summary: localItem.name || localItem.title || localItem.number || localItem.id,
-                                conflictFields: [],
-                                localData: localItem,
-                                remoteData: remoteItem
-                            });
-                        }
+                        items.push({
+                            id: localItem.id,
+                            entity: store.name,
+                            status: 'identical',
+                            summary: localItem.name || localItem.title || localItem.number || localItem.id,
+                            conflictFields: [],
+                            localData: localItem,
+                            remoteData: remoteItem
+                        });
                     }
                 }
-            } catch (storeErr) {
-                console.error(`[Migration] Error reading store ${store.name}:`, storeErr);
             }
         }
 
+        const snapshotHash = computeSnapshotHash(storeFingerprints, items);
+        const snapshotId = typeof crypto !== 'undefined' && crypto.randomUUID ? crypto.randomUUID() : 'snap-' + Date.now();
+
         const report: MigrationPreviewReport = {
+            snapshotId,
+            snapshotHash,
             timestamp: new Date().toISOString(),
             totalLocal: items.length,
             toCreateCount: items.filter(i => i.status === 'to_create').length,
             identicalCount: items.filter(i => i.status === 'identical').length,
             conflictCount: items.filter(i => i.status === 'conflict').length,
-            items
+            items,
+            storeFingerprints
         };
 
         return report;
     },
 
-    async migrateAll(options: MigrationOptions = {}): Promise<MigrationExecutionReport> {
-        const { conflictStrategy = 'skip', onProgress } = options;
-        console.log(`[Migration] Starting migration with strategy: ${conflictStrategy}`);
+    /**
+     * Verifies that MongoDB state has not drifted since the approved snapshot was created.
+     */
+    async verifySnapshotDrift(preview: MigrationPreviewReport): Promise<{ valid: boolean; driftedStore?: string; reason?: string }> {
+        if (!preview || !preview.storeFingerprints) {
+            return { valid: false, reason: 'Brak sygnatury snapshotu w podglądzie.' };
+        }
 
-        const preview = await this.previewMigration();
+        for (const store of MIGRATION_STORES) {
+            const expectedFingerprint = preview.storeFingerprints[store.name];
+            if (expectedFingerprint === undefined) continue;
+
+            const adapter = getAdapter<any>(store.name, store.endpoint);
+            let currentRemote: any[];
+            try {
+                currentRemote = await adapter.getAll();
+            } catch (err: any) {
+                return {
+                    valid: false,
+                    driftedStore: store.name,
+                    reason: `Błąd weryfikacji MongoDB dla '${store.name}': ${err.message}`
+                };
+            }
+
+            const currentFingerprint = computeStoreFingerprint(currentRemote);
+            if (currentFingerprint !== expectedFingerprint) {
+                return {
+                    valid: false,
+                    driftedStore: store.name,
+                    reason: `Stan kolekcji '${store.name}' w MongoDB uległ zmianie od momentu podglądu (drift danych).`
+                };
+            }
+        }
+
+        return { valid: true };
+    },
+
+    /**
+     * Executes migration tied directly to an approved preview snapshot.
+     */
+    async migrateAll(approvedPreview: MigrationPreviewReport, options: MigrationOptions = {}): Promise<MigrationExecutionReport> {
+        const { conflictStrategy = 'skip', onProgress } = options;
+
+        if (!approvedPreview || !approvedPreview.snapshotHash) {
+            throw new Error('Wymagany jest zatwierdzony podgląd migracji ze snapshotem. Uruchom najpierw podgląd spójności.');
+        }
+
+        console.log(`[Migration] Verifying snapshot ${approvedPreview.snapshotId} before execution...`);
+        const driftCheck = await this.verifySnapshotDrift(approvedPreview);
+        if (!driftCheck.valid) {
+            throw new Error(`Snapshot migracji unieważniony: ${driftCheck.reason} Wygeneruj nowy podgląd przed wykonaniem migracji.`);
+        }
+
+        console.log(`[Migration] Snapshot verified. Executing migration with strategy: ${conflictStrategy}`);
         const results: MigrationRecordResult[] = [];
 
         let current = 0;
-        const total = preview.items.length;
+        const total = approvedPreview.items.length;
 
-        for (const item of preview.items) {
+        for (const item of approvedPreview.items) {
             current++;
             if (onProgress) {
                 onProgress({ current, total, entity: item.entity, id: item.id });
             }
-
-            const adapter = getAdapter<any>(item.entity);
 
             if (item.status === 'identical') {
                 results.push({
@@ -207,20 +321,29 @@ export const migrationService = {
 
             try {
                 if (item.status === 'to_create') {
-                    await adapter.create(item.localData);
+                    await adminMigrateRecord({
+                        collection: item.entity,
+                        action: 'create',
+                        record: item.localData
+                    });
                     results.push({
                         id: item.id,
                         entity: item.entity,
                         status: 'created',
-                        message: 'Pomyślnie utworzono w MongoDB'
+                        message: 'Pomyślnie utworzono w MongoDB (admin-record)'
                     });
                 } else if (item.status === 'conflict' && conflictStrategy === 'overwrite') {
-                    await adapter.save(item.localData);
+                    // Full document replacement via admin endpoint (replaces document, removes MongoDB-only fields, bypasses optimistic lock)
+                    await adminMigrateRecord({
+                        collection: item.entity,
+                        action: 'replace',
+                        record: item.localData
+                    });
                     results.push({
                         id: item.id,
                         entity: item.entity,
                         status: 'updated',
-                        message: `Nadpisano MongoDB wersją lokalną (rozwiązano konflikt: ${item.conflictFields.join(', ')})`
+                        message: `Nadpisano pełną wersją z IndexedDB (usunięto nieistniejące pola z MongoDB; rozwiązano: ${item.conflictFields.join(', ')})`
                     });
                 }
             } catch (err: any) {
@@ -229,12 +352,13 @@ export const migrationService = {
                     id: item.id,
                     entity: item.entity,
                     status: 'failed',
-                    message: err.message || 'Nieznany błąd zapisu'
+                    message: err.message || 'Nieznany błąd zapisu administracyjnego'
                 });
             }
         }
 
         const executionReport: MigrationExecutionReport = {
+            snapshotId: approvedPreview.snapshotId,
             timestamp: new Date().toISOString(),
             total: results.length,
             created: results.filter(r => r.status === 'created').length,

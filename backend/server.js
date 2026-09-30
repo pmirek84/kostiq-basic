@@ -330,138 +330,262 @@ async function reconcileDuplicatesAndEnsureIndexes(database) {
 // ==========================================
 async function seedInitialDataIfEmpty(targetDb) {
     if (!targetDb) return { seeded: false, reason: 'No db instance' };
-    const summary = { standards: 0, offers: 0, constructions: 0 };
+    const migrationsColl = targetDb.collection('system_migrations');
+    
+    // Check persistent migration version marker - prevents re-seeding if user intentionally empties data
+    const migrationId = 'initial_standards_and_templates_v1';
+    const alreadyApplied = await migrationsColl.findOne({ id: migrationId });
+    if (alreadyApplied) {
+        return { seeded: false, reason: 'Migration already applied', migrationId, appliedAt: alreadyApplied.appliedAt };
+    }
+
+    const summary = { materials: 0, standards: 0, offers: 0, constructions: 0 };
+    const now = new Date().toISOString();
+
     try {
-        const standardsColl = targetDb.collection('standards');
-        const stdCount = await standardsColl.countDocuments();
-        if (stdCount === 0) {
-            const now = new Date().toISOString();
-            const defaultStandards = [
-                {
-                    id: 'std-pvc-01',
-                    name: 'Standard PVC – Piana + Taśma 3-warstwowa',
-                    description: 'Montaż okien PVC z pianką PU, taśmą rozprężną 3-warstw. i folią paroprzepuszczalną',
-                    applicableTypes: ['okno_pvc', 'drzwi_pvc', 'hs_pvc'],
-                    isDefault: true,
-                    rules: [
-                        { id: 'rule-pvc-01', edge: 'perimeter', usagePerMeter: 1, basis: 'mb' }
-                    ],
-                    createdAt: now,
-                    updatedAt: now
-                },
-                {
-                    id: 'std-alu-01',
-                    name: 'Standard ALU – Montaż na konsolach + EPDM',
-                    description: 'Montaż konstrukcji aluminiowych na konsolach z folią EPDM i klejem hybrydowym',
-                    applicableTypes: ['okno_alu', 'drzwi_alu', 'fasada_alu'],
-                    isDefault: false,
-                    rules: [
-                        { id: 'rule-alu-01', edge: 'perimeter', usagePerMeter: 1, basis: 'mb' }
-                    ],
-                    createdAt: now,
-                    updatedAt: now
-                }
-            ];
-
-            for (const std of defaultStandards) {
-                await standardsColl.updateOne(
-                    { id: std.id },
-                    { $setOnInsert: std },
-                    { upsert: true }
-                );
-                summary.standards++;
-            }
-        }
-
-        const offersColl = targetDb.collection('offers');
-        const templateOfferCount = await offersColl.countDocuments({ number: 'WZÓR-STD-01' });
-        if (templateOfferCount === 0) {
-            const now = new Date().toISOString();
-            const templateOfferId = 'offer-template-std-01';
-            const standardTemplateOffer = {
-                id: templateOfferId,
-                number: 'WZÓR-STD-01',
-                clientId: '',
-                location: 'Koszalin',
-                status: 'draft',
-                createdAt: now,
-                updatedAt: now,
-                materialsCost: 0,
-                laborCost: 0,
-                totalCost: 0,
-                totalNet: 0,
-                vatRate: 23,
-                discountType: 'percent',
-                discountValue: 0,
-                subtotalNet: 0,
-                discountAmount: 0,
-                vatAmount: 0,
-                totalGross: 0,
-                offerTemplateType: 'detailed',
-                title: 'Oferta montażu konstrukcji aluminiowych',
-                scopeOfWork: [
-                    'Montaż konstrukcji aluminiowych zgodnie z załącznikiem nr 1',
-                    'Usługa odbędzie się na terenie zakładu produkcyjnego klienta Zleceniodawcy pod adresem: Koszalin, ul. Lniana 16',
-                    'Dokładny pomiar produkcyjny i przygotowanie konstrukcji do montażu jest po stronie Zleceniodawcy.',
-                    'Po stronie Zleceniodawcy jest przygotowanie otworów montażowych w konstrukcjach aluminiowych zgodnie z wymaganiami systemodawcy.',
-                    'Zleceniodawca jest zobowiązany do poinformowania na 1 tydzień przed planowanym montażem o możliwości rozpoczęcia montażu w danym terminie.',
-                    'Montaż odbędzie się 1-etapowo i w ciągłości dlatego Zleceniodawca gwarantuje dostawę wszystkich niezbędnych konstrukcji, elementów i materiałów w ustalonym terminie.'
-                ],
-                customMaterials: {
-                    providedByUs: ['śruby do mocowania oraz folia EPDM wraz z klejem'],
-                    providedByClient: ['taśma rozprężna 3-warstwowa, dopasowana do profilu i wymiarów otworów']
-                },
-                notes: [
-                    'Oferta nie obejmuje obróbek blacharskich.'
-                ],
-                settings: {
-                    margin: 0,
-                    discount: 0,
-                    workTime: { workTime: 0, workerCount: 0, hourlyRate: 0 },
-                    installationRates: {}
-                },
-                rentalItems: []
-            };
-
-            await offersColl.updateOne(
-                { number: 'WZÓR-STD-01' },
-                { $setOnInsert: standardTemplateOffer },
-                { upsert: true }
-            );
-            summary.offers++;
-
-            const constructionsColl = targetDb.collection('constructions');
-            const standardConstruction = {
-                id: 'const-template-std-01',
-                offerId: templateOfferId,
-                number: 1,
-                name: 'Witryna W1',
-                type: 'witryna',
-                width: 1500,
-                height: 2200,
-                quantity: 5,
-                area: 3.3,
-                perimeter: 7.4,
-                installationLocation: 'zew',
-                weight: 50,
-                totalArea: 16.5,
-                totalPerimeter: 37,
-                totalCost: 0,
-                materialCosts: { items: [], total: 0 },
-                installationCosts: { rate: 0, total: 0 },
+        // 1. Seed base materials with valid IDs
+        const materialsColl = targetDb.collection('materials');
+        const defaultMaterials = [
+            {
+                id: 'mat-pur-low-750',
+                name: 'Pianka PUR niskoprężna 750ml',
+                category: 'izolacyjne',
+                unit: 'szt',
+                defaultUnitPrice: 24.50,
+                isActive: true,
+                wastePercent: 10,
                 createdAt: now,
                 updatedAt: now
-            };
+            },
+            {
+                id: 'mat-tasma-rozprezna-10',
+                name: 'Taśma rozprężna 10/4-9mm 8m',
+                category: 'izolacyjne',
+                unit: 'm',
+                defaultUnitPrice: 3.20,
+                isActive: true,
+                wastePercent: 5,
+                createdAt: now,
+                updatedAt: now
+            },
+            {
+                id: 'mat-folia-epdm-zew',
+                name: 'Folia EPDM zewnętrzna paroprzepuszczalna',
+                category: 'izolacyjne',
+                unit: 'm',
+                defaultUnitPrice: 5.80,
+                isActive: true,
+                wastePercent: 5,
+                createdAt: now,
+                updatedAt: now
+            },
+            {
+                id: 'mat-klej-hybrydowy',
+                name: 'Klej hybrydowy do EPDM 600ml',
+                category: 'uszczelniajace',
+                unit: 'szt',
+                defaultUnitPrice: 38.00,
+                isActive: true,
+                wastePercent: 10,
+                createdAt: now,
+                updatedAt: now
+            },
+            {
+                id: 'mat-konsola-montazowa-l',
+                name: 'Konsola montażowa ścienna L',
+                category: 'elementy_zlacze',
+                unit: 'szt',
+                defaultUnitPrice: 8.50,
+                isActive: true,
+                wastePercent: 0,
+                createdAt: now,
+                updatedAt: now
+            }
+        ];
 
-            await constructionsColl.updateOne(
-                { id: standardConstruction.id },
-                { $setOnInsert: standardConstruction },
+        for (const mat of defaultMaterials) {
+            await materialsColl.updateOne(
+                { id: mat.id },
+                { $setOnInsert: mat },
                 { upsert: true }
             );
-            summary.constructions++;
+            summary.materials++;
         }
 
-        console.log(`[SEED] Idempotent seeding completed: ${summary.standards} standards, ${summary.offers} offer templates, ${summary.constructions} constructions.`);
+        // 2. Seed standards with complete schema (valid materialId, edge, usagePerMeter, basis)
+        const standardsColl = targetDb.collection('standards');
+        const defaultStandards = [
+            {
+                id: 'std-pvc-01',
+                name: 'Standard PVC – Piana + Taśma 3-warstwowa',
+                description: 'Montaż okien PVC z pianką PU, taśmą rozprężną 3-warstw. i folią paroprzepuszczalną',
+                applicableTypes: ['okno_pvc', 'drzwi_pvc', 'hs_pvc'],
+                isDefault: true,
+                rules: [
+                    {
+                        id: 'rule-pvc-piana',
+                        edge: 'perimeter',
+                        materialId: 'mat-pur-low-750',
+                        usagePerMeter: 0.25,
+                        usageUnit: 'szt/mb',
+                        basis: 'mb',
+                        wastePercent: 10
+                    },
+                    {
+                        id: 'rule-pvc-tasma',
+                        edge: 'perimeter',
+                        materialId: 'mat-tasma-rozprezna-10',
+                        usagePerMeter: 1.0,
+                        usageUnit: 'm/mb',
+                        basis: 'mb',
+                        wastePercent: 5
+                    }
+                ],
+                createdAt: now,
+                updatedAt: now
+            },
+            {
+                id: 'std-alu-01',
+                name: 'Standard ALU – Montaż na konsolach + EPDM',
+                description: 'Montaż konstrukcji aluminiowych na konsolach z folią EPDM i klejem hybrydowym',
+                applicableTypes: ['okno_alu', 'drzwi_alu', 'fasada_alu'],
+                isDefault: false,
+                rules: [
+                    {
+                        id: 'rule-alu-konsole',
+                        edge: 'perimeter',
+                        materialId: 'mat-konsola-montazowa-l',
+                        usagePerMeter: 1.5,
+                        usageUnit: 'szt/mb',
+                        basis: 'mb',
+                        wastePercent: 0
+                    },
+                    {
+                        id: 'rule-alu-epdm',
+                        edge: 'perimeter',
+                        materialId: 'mat-folia-epdm-zew',
+                        usagePerMeter: 1.0,
+                        usageUnit: 'm/mb',
+                        basis: 'mb',
+                        wastePercent: 5
+                    },
+                    {
+                        id: 'rule-alu-klej',
+                        edge: 'perimeter',
+                        materialId: 'mat-klej-hybrydowy',
+                        usagePerMeter: 0.15,
+                        usageUnit: 'szt/mb',
+                        basis: 'mb',
+                        wastePercent: 10
+                    }
+                ],
+                createdAt: now,
+                updatedAt: now
+            }
+        ];
+
+        for (const std of defaultStandards) {
+            await standardsColl.updateOne(
+                { id: std.id },
+                { $setOnInsert: std },
+                { upsert: true }
+            );
+            summary.standards++;
+        }
+
+        // 3. Seed template offer and construction
+        const offersColl = targetDb.collection('offers');
+        const templateOfferId = 'offer-template-std-01';
+        const standardTemplateOffer = {
+            id: templateOfferId,
+            number: 'WZÓR-STD-01',
+            clientId: '',
+            location: 'Koszalin',
+            status: 'draft',
+            createdAt: now,
+            updatedAt: now,
+            materialsCost: 0,
+            laborCost: 0,
+            totalCost: 0,
+            totalNet: 0,
+            vatRate: 23,
+            discountType: 'percent',
+            discountValue: 0,
+            subtotalNet: 0,
+            discountAmount: 0,
+            vatAmount: 0,
+            totalGross: 0,
+            offerTemplateType: 'detailed',
+            title: 'Oferta montażu konstrukcji aluminiowych',
+            scopeOfWork: [
+                'Montaż konstrukcji aluminiowych zgodnie z załącznikiem nr 1',
+                'Usługa odbędzie się na terenie zakładu produkcyjnego klienta Zleceniodawcy pod adresem: Koszalin, ul. Lniana 16',
+                'Dokładny pomiar produkcyjny i przygotowanie konstrukcji do montażu jest po stronie Zleceniodawcy.',
+                'Po stronie Zleceniodawcy jest przygotowanie otworów montażowych w konstrukcjach aluminiowych zgodnie z wymaganiami systemodawcy.',
+                'Zleceniodawca jest zobowiązany do poinformowania na 1 tydzień przed planowanym montażem o możliwości rozpoczęcia montażu w danym terminie.',
+                'Montaż odbędzie się 1-etapowo i w ciągłości dlatego Zleceniodawca gwarantuje dostawę wszystkich niezbędnych konstrukcji, elementów i materiałów w ustalonym terminie.'
+            ],
+            customMaterials: {
+                providedByUs: ['śruby do mocowania oraz folia EPDM wraz z klejem'],
+                providedByClient: ['taśma rozprężna 3-warstwowa, dopasowana do profilu i wymiarów otworów']
+            },
+            notes: [
+                'Oferta nie obejmuje obróbek blacharskich.'
+            ],
+            settings: {
+                margin: 0,
+                discount: 0,
+                workTime: { workTime: 0, workerCount: 0, hourlyRate: 0 },
+                installationRates: {}
+            },
+            rentalItems: []
+        };
+
+        await offersColl.updateOne(
+            { number: 'WZÓR-STD-01' },
+            { $setOnInsert: standardTemplateOffer },
+            { upsert: true }
+        );
+        summary.offers++;
+
+        const constructionsColl = targetDb.collection('constructions');
+        const standardConstruction = {
+            id: 'const-template-std-01',
+            offerId: templateOfferId,
+            number: 1,
+            name: 'Witryna W1',
+            type: 'witryna',
+            width: 1500,
+            height: 2200,
+            quantity: 5,
+            area: 3.3,
+            perimeter: 7.4,
+            installationLocation: 'zew',
+            weight: 50,
+            totalArea: 16.5,
+            totalPerimeter: 37,
+            totalCost: 0,
+            materialCosts: { items: [], total: 0 },
+            installationCosts: { rate: 0, total: 0 },
+            createdAt: now,
+            updatedAt: now
+        };
+
+        await constructionsColl.updateOne(
+            { id: standardConstruction.id },
+            { $setOnInsert: standardConstruction },
+            { upsert: true }
+        );
+        summary.constructions++;
+
+        // Mark migration as applied in persistent system_migrations
+        await migrationsColl.updateOne(
+            { id: migrationId },
+            { $setOnInsert: { id: migrationId, appliedAt: now, version: 1, summary } },
+            { upsert: true }
+        );
+
+        console.log(`[SEED] Initial database seeding completed and marked as applied: ${summary.materials} materials, ${summary.standards} standards, ${summary.offers} offer templates, ${summary.constructions} constructions.`);
         return { seeded: true, summary };
     } catch (err) {
         console.error('[SEED ERROR] Idempotent seeding encountered error:', err.message);
@@ -1126,6 +1250,49 @@ async function recalculateJobRevenue(jobId) {
 // ==========================================
 // Batch update (time-entries) — with trigger
 // ==========================================
+
+// ==========================================
+// Administrative Migration Endpoint
+// Allows full document replacement (PUT-semantics, removing MongoDB-only fields)
+// and bypasses optimistic locking constraints as an explicit administrative migration.
+// ==========================================
+app.post('/api/migration/admin-record', verifyToken, requireRole('admin'), async (req, res) => {
+    try {
+        if (!db) return res.status(503).json({ error: 'Database not connected' });
+        const { collection, action, record } = req.body;
+        if (!collection || !ALL_SYSTEM_COLLECTIONS.includes(collection)) {
+            return res.status(400).json({ error: `Niedozwolona lub nieznana kolekcja: '${collection}'` });
+        }
+        if (!record || typeof record !== 'object' || !record.id) {
+            return res.status(400).json({ error: 'Rekord musi być obiektem zawierającym niepuste pole id' });
+        }
+        if (!['create', 'replace'].includes(action)) {
+            return res.status(400).json({ error: "Akcja musi być 'create' lub 'replace'" });
+        }
+
+        const coll = db.collection(collection);
+        const cleanDoc = { ...record };
+        delete cleanDoc._id;
+
+        if (action === 'create') {
+            const existing = await coll.findOne({ id: record.id });
+            if (existing) {
+                return res.status(409).json({ error: `Dokument o id '${record.id}' już istnieje w kolekcji '${collection}'` });
+            }
+            await coll.insertOne(cleanDoc);
+            return res.json({ success: true, action: 'created', id: record.id, collection });
+        } else if (action === 'replace') {
+            // Full replacement: replaces the whole document, cleans fields removed in IndexedDB,
+            // and bypasses optimistic locking constraints as an explicit administrative migration.
+            await coll.replaceOne({ id: record.id }, cleanDoc, { upsert: true });
+            return res.json({ success: true, action: 'replaced', id: record.id, collection });
+        }
+    } catch (err) {
+        console.error('[MIGRATION ADMIN ERROR]:', err);
+        return res.status(500).json({ error: err.message || 'Wewnętrzny błąd migracji rekordu' });
+    }
+});
+
 app.post('/api/time-entries/batch-update', verifyToken, requireRole('admin', 'manager'), async (req, res) => {
     try {
         if (!db) return res.status(503).json({ error: 'Database not connected' });

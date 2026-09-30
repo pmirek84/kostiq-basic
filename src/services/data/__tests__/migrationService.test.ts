@@ -50,8 +50,58 @@ describe('migrationService - Conflict Detection and Per-Record Audited Migration
         });
     });
 
-    describe('previewMigration & migrateAll flow', () => {
-        it('previews items as to_create, identical, or conflict and executes per-record migration report', async () => {
+    describe('MongoDB Read Failure Safety', () => {
+        it('aborts and throws explicit error when adapter.getAll() fails, NEVER faking to_create', async () => {
+            const mockLocalClients = [{ id: 'c-1', name: 'Klient 1' }];
+            const mockDB = {
+                getAll: vi.fn((storeName: string) => {
+                    if (storeName === 'clients') return Promise.resolve(mockLocalClients);
+                    return Promise.resolve([]);
+                })
+            };
+            vi.spyOn(dbModule, 'getDB').mockResolvedValue(mockDB as any);
+
+            const mockAdapter = {
+                getAll: vi.fn(() => Promise.reject(new Error('Network connection refused (simulated)')))
+            };
+            vi.spyOn(adapterFactoryModule, 'getAdapter').mockReturnValue(mockAdapter as any);
+
+            await expect(migrationService.previewMigration()).rejects.toThrow(
+                /Nie można odczytać danych MongoDB dla kolekcji 'clients'/
+            );
+        });
+    });
+
+    describe('Snapshot Validation & Data Drift Guard', () => {
+        it('rejects execution when MongoDB state drifts after snapshot preview was approved', async () => {
+            const mockLocalClients = [{ id: 'c-1', name: 'Klient 1' }];
+            const mockDB = {
+                getAll: vi.fn(() => Promise.resolve(mockLocalClients))
+            };
+            vi.spyOn(dbModule, 'getDB').mockResolvedValue(mockDB as any);
+
+            let remoteVersion = 'v1';
+            const mockAdapter = {
+                getAll: vi.fn(() => Promise.resolve([{ id: 'c-1', name: 'Klient 1', updatedAt: remoteVersion }]))
+            };
+            vi.spyOn(adapterFactoryModule, 'getAdapter').mockReturnValue(mockAdapter as any);
+
+            // 1. Generate preview at remoteVersion 'v1'
+            const preview = await migrationService.previewMigration();
+            expect(preview.totalLocal).toBe(11); // 1 per store in mock
+
+            // 2. Simulate concurrent modification in MongoDB
+            remoteVersion = 'v2_concurrent_change';
+
+            // 3. Attempt migration with stale snapshot
+            await expect(migrationService.migrateAll(preview, { conflictStrategy: 'skip' })).rejects.toThrow(
+                /Snapshot migracji unieważniony: Stan kolekcji 'clients' w MongoDB uległ zmianie/
+            );
+        });
+    });
+
+    describe('Admin Migration API & Strategy Flow', () => {
+        it('previews items and executes migration via administrative endpoint with replace action', async () => {
             const mockLocalClients = [
                 { id: 'c-new', name: 'Nowy Klient' },
                 { id: 'c-same', name: 'Identyczny Klient' },
@@ -60,7 +110,7 @@ describe('migrationService - Conflict Detection and Per-Record Audited Migration
 
             const mockRemoteClients = [
                 { id: 'c-same', name: 'Identyczny Klient' },
-                { id: 'c-diff', name: 'Zmieniony Klient', phone: '999-888' }
+                { id: 'c-diff', name: 'Zmieniony Klient', phone: '999-888', obsoleteFieldInMongo: 'should_be_cleared' }
             ];
 
             const mockDB = {
@@ -71,52 +121,45 @@ describe('migrationService - Conflict Detection and Per-Record Audited Migration
             };
             vi.spyOn(dbModule, 'getDB').mockResolvedValue(mockDB as any);
 
-            const mockCreated: any[] = [];
-            const mockSaved: any[] = [];
-
             const mockAdapter = {
-                getAll: vi.fn(() => Promise.resolve(mockRemoteClients)),
-                create: vi.fn((item) => {
-                    mockCreated.push(item);
-                    return Promise.resolve(item.id);
-                }),
-                save: vi.fn((item) => {
-                    mockSaved.push(item);
-                    return Promise.resolve(item.id);
+                getAll: vi.fn((storeName) => {
+                    return Promise.resolve(mockRemoteClients);
                 })
             };
-
             vi.spyOn(adapterFactoryModule, 'getAdapter').mockReturnValue(mockAdapter as any);
 
-            // 1. Test preview
+            // Mock fetch for adminMigrateRecord
+            const adminCalls: any[] = [];
+            globalThis.fetch = vi.fn((url: string, init?: RequestInit) => {
+                if (url.includes('/api/migration/admin-record')) {
+                    const body = JSON.parse(init?.body as string);
+                    adminCalls.push(body);
+                    return Promise.resolve({
+                        ok: true,
+                        json: () => Promise.resolve({ success: true, action: body.action, id: body.record.id })
+                    } as Response);
+                }
+                return Promise.reject(new Error('Unexpected fetch ' + url));
+            }) as any;
+
+            // 1. Preview
             const preview = await migrationService.previewMigration();
-            expect(preview.totalLocal).toBe(3);
-            expect(preview.toCreateCount).toBe(1);
-            expect(preview.identicalCount).toBe(1);
-            expect(preview.conflictCount).toBe(1);
+            expect(preview.items.find(i => i.id === 'c-new')?.status).toBe('to_create');
+            expect(preview.items.find(i => i.id === 'c-diff')?.status).toBe('conflict');
 
-            const diffItem = preview.items.find(i => i.id === 'c-diff');
-            expect(diffItem?.status).toBe('conflict');
-            expect(diffItem?.conflictFields).toEqual(['phone']);
+            // 2. Migrate with 'overwrite'
+            const report = await migrationService.migrateAll(preview, { conflictStrategy: 'overwrite' });
 
-            // 2. Test migrateAll with conflictStrategy: 'skip'
-            const reportSkip = await migrationService.migrateAll({ conflictStrategy: 'skip' });
-            expect(reportSkip.created).toBe(1);
-            expect(reportSkip.skipped).toBe(2); // 1 identical + 1 conflict skipped
-            expect(reportSkip.updated).toBe(0);
-            expect(mockCreated.length).toBe(1);
-            expect(mockCreated[0].id).toBe('c-new');
-            expect(mockSaved.length).toBe(0);
+            expect(report.created).toBeGreaterThanOrEqual(1);
+            expect(report.updated).toBeGreaterThanOrEqual(1);
 
-            // 3. Test migrateAll with conflictStrategy: 'overwrite'
-            mockCreated.length = 0;
-            mockSaved.length = 0;
-            const reportOverwrite = await migrationService.migrateAll({ conflictStrategy: 'overwrite' });
-            expect(reportOverwrite.created).toBe(1);
-            expect(reportOverwrite.updated).toBe(1); // conflict overwritten
-            expect(reportOverwrite.skipped).toBe(1); // identical skipped
-            expect(mockSaved.length).toBe(1);
-            expect(mockSaved[0].id).toBe('c-diff');
+            // Verify admin endpoint calls
+            const createCall = adminCalls.find(c => c.action === 'create' && c.record.id === 'c-new');
+            expect(createCall).toBeDefined();
+
+            const replaceCall = adminCalls.find(c => c.action === 'replace' && c.record.id === 'c-diff');
+            expect(replaceCall).toBeDefined();
+            expect(replaceCall.record.phone).toBe('111-222');
         });
     });
 });

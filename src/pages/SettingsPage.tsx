@@ -249,7 +249,12 @@ function SystemTab() {
     };
 
     const handleRunMigration = async () => {
-        if (!confirm(`Czy na pewno chcesz wykonać migrację? Wybrana strategia konfliktów: ${conflictStrategy === 'skip' ? 'Bezpieczne pominięcie (MongoDB jako prawda)' : 'Nadpisanie danymi z IndexedDB'}.`)) {
+        if (!preview) {
+            toast.error('Najpierw wykonaj analizę spójności danych.');
+            return;
+        }
+
+        if (!confirm(`Czy na pewno chcesz wykonać migrację powiązaną z zatwierdzonym snapshotem (${preview.snapshotHash})? Wybrana strategia: ${conflictStrategy === 'skip' ? 'Bezpieczne pominięcie (MongoDB jako prawda)' : 'Nadpisanie danymi z IndexedDB'}.`)) {
             return;
         }
 
@@ -257,7 +262,7 @@ function SystemTab() {
         setProgress(null);
         try {
             const { migrationService } = await import('../services/data/migrationService');
-            const execReport = await migrationService.migrateAll({
+            const execReport = await migrationService.migrateAll(preview, {
                 conflictStrategy,
                 onProgress: (p) => setProgress(p)
             });
@@ -268,7 +273,12 @@ function SystemTab() {
             setPreview(updatedPreview);
         } catch (e: any) {
             console.error('Błąd wykonania migracji:', e);
-            toast.error('Błąd migracji: ' + (e.message || 'Nieznany błąd'));
+            if (e.message && e.message.includes('Snapshot migracji unieważniony')) {
+                toast.error(e.message);
+                await handleRunPreview();
+            } else {
+                toast.error('Błąd migracji: ' + (e.message || 'Nieznany błąd'));
+            }
         } finally {
             setIsMigrating(false);
             setProgress(null);
@@ -315,7 +325,7 @@ function SystemTab() {
 
                         <button
                             onClick={handleRunMigration}
-                            disabled={isMigrating || isLoadingPreview}
+                            disabled={isMigrating || isLoadingPreview || !preview}
                             className="px-5 py-2.5 bg-black hover:bg-zinc-800 text-white rounded-xl text-xs font-semibold flex items-center gap-2 transition-all disabled:opacity-50">
                             {isMigrating ? <Loader2 className="h-4 w-4 animate-spin text-white" /> : <ArrowRight className="h-4 w-4 text-white" />}
                             Rozpocznij migrację
