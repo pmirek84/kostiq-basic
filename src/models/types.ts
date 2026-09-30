@@ -1,3 +1,23 @@
+import {
+    type TimeEntryStatus,
+    type BillingType,
+    type TimeEntryType,
+    TIME_ENTRY_STATUSES,
+    WORKER_ALLOWED_TIME_ENTRY_STATUSES,
+    FOREMAN_ALLOWED_TIME_ENTRY_STATUSES,
+    BILLING_TYPES,
+    TIME_ENTRY_TYPES
+} from '../../shared/contracts';
+
+export type { TimeEntryStatus, BillingType, TimeEntryType };
+export {
+    TIME_ENTRY_STATUSES,
+    WORKER_ALLOWED_TIME_ENTRY_STATUSES,
+    FOREMAN_ALLOWED_TIME_ENTRY_STATUSES,
+    BILLING_TYPES,
+    TIME_ENTRY_TYPES
+};
+
 export type ConstructionType =
     | 'okno_pvc'
     | 'okno_alu'
@@ -337,7 +357,7 @@ export interface Crew {
     active: boolean;
 }
 
-export type TimeEntryType = 'drive' | 'work' | 'other' | 'employee' | 'subcontractor';
+// TimeEntryType is derived and re-exported from shared/contracts above
 
 export type WorkerType = 'employee' | 'subcontractor';
 export type SettlementMethod = 'hourly' | 'fixed' | 'per_m2' | 'per_mb';
@@ -405,12 +425,12 @@ export interface TimeEntry {
 
     date: string;
     hours: number;
-    billingType: 'hourly' | 'fixed' | 'm2' | 'mb';
+    billingType: BillingType;
     hourlyRate?: number;         // Snapshot of rate at time of log
     cost: number;                // Calculated: hours * rate
 
     description?: string;
-    status: 'draft' | 'pending' | 'submitted' | 'approved' | 'rejected' | 'foreman_approved' | 'foreman_rejected' | 'admin_approved' | 'admin_rejected';
+    status: TimeEntryStatus;
 
     crewId?: string | null;
     foremanId?: string | null;

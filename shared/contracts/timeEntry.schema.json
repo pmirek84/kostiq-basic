@@ -1,0 +1,489 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://kostiq.pl/schemas/time-entry.json",
+  "title": "TimeEntryContracts",
+  "description": "Canonical domain contract and JSON Schemas for TimeEntry, statuses, and API payloads.",
+  "definitions": {
+    "TimeEntryStatus": {
+      "type": "string",
+      "enum": [
+        "draft",
+        "pending",
+        "submitted",
+        "approved",
+        "rejected",
+        "foreman_approved",
+        "foreman_rejected",
+        "admin_approved",
+        "admin_rejected"
+      ]
+    },
+    "WorkerAllowedStatus": {
+      "type": "string",
+      "enum": [
+        "draft",
+        "pending",
+        "submitted"
+      ]
+    },
+    "ForemanAllowedStatus": {
+      "type": "string",
+      "enum": [
+        "draft",
+        "pending",
+        "submitted",
+        "foreman_approved",
+        "foreman_rejected"
+      ]
+    },
+    "BillingType": {
+      "type": "string",
+      "enum": [
+        "hourly",
+        "fixed",
+        "m2",
+        "mb"
+      ]
+    },
+    "TimeEntryType": {
+      "type": "string",
+      "enum": [
+        "drive",
+        "work",
+        "other",
+        "employee",
+        "subcontractor"
+      ]
+    },
+    "TimeEntry": {
+      "type": "object",
+      "required": [
+        "id",
+        "employeeId",
+        "jobId",
+        "jobCode",
+        "jobName",
+        "stageId",
+        "stageName",
+        "date",
+        "hours",
+        "billingType",
+        "cost",
+        "status",
+        "createdAt",
+        "updatedAt"
+      ],
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "employeeId": {
+          "type": "string"
+        },
+        "employeeName": {
+          "type": "string"
+        },
+        "jobId": {
+          "type": "string"
+        },
+        "jobCode": {
+          "type": "string"
+        },
+        "jobName": {
+          "type": "string"
+        },
+        "stageId": {
+          "type": "string"
+        },
+        "stageName": {
+          "type": "string"
+        },
+        "date": {
+          "type": "string"
+        },
+        "hours": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 24
+        },
+        "billingType": {
+          "$ref": "#/definitions/BillingType"
+        },
+        "hourlyRate": {
+          "type": "number",
+          "minimum": 0
+        },
+        "cost": {
+          "type": "number",
+          "minimum": 0
+        },
+        "description": {
+          "type": "string"
+        },
+        "status": {
+          "$ref": "#/definitions/TimeEntryStatus"
+        },
+        "crewId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "foremanId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "foremanApprovedAt": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "adminId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "adminApprovedAt": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "settlementId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "type": {
+          "$ref": "#/definitions/TimeEntryType"
+        },
+        "workType": {
+          "type": "string"
+        },
+        "quantity": {
+          "type": "number"
+        },
+        "rate": {
+          "type": "number"
+        },
+        "approved": {
+          "type": "boolean"
+        },
+        "createdAt": {
+          "type": "string"
+        },
+        "updatedAt": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": true
+    },
+    "TimeEntryPostPayload": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "employeeId": {
+          "type": "string"
+        },
+        "employee_id": {
+          "type": "string"
+        },
+        "jobId": {
+          "type": "string"
+        },
+        "project_id": {
+          "type": "string"
+        },
+        "jobCode": {
+          "type": "string"
+        },
+        "jobName": {
+          "type": "string"
+        },
+        "stageId": {
+          "type": "string"
+        },
+        "stageName": {
+          "type": "string"
+        },
+        "date": {
+          "type": "string"
+        },
+        "hours": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 24
+        },
+        "billingType": {
+          "$ref": "#/definitions/BillingType"
+        },
+        "hourlyRate": {
+          "type": "number",
+          "minimum": 0
+        },
+        "cost": {
+          "type": "number",
+          "minimum": 0
+        },
+        "description": {
+          "type": "string"
+        },
+        "status": {
+          "$ref": "#/definitions/TimeEntryStatus"
+        },
+        "crewId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "foremanId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "foremanApprovedAt": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "adminId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "adminApprovedAt": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "settlementId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "type": {
+          "$ref": "#/definitions/TimeEntryType"
+        },
+        "workType": {
+          "type": "string"
+        },
+        "quantity": {
+          "type": "number"
+        },
+        "rate": {
+          "type": "number"
+        }
+      },
+      "anyOf": [
+        {
+          "required": [
+            "employeeId"
+          ]
+        },
+        {
+          "required": [
+            "employee_id"
+          ]
+        }
+      ],
+      "additionalProperties": true
+    },
+    "TimeEntryPatchPayload": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "employeeId": {
+          "type": "string"
+        },
+        "employee_id": {
+          "type": "string"
+        },
+        "jobId": {
+          "type": "string"
+        },
+        "project_id": {
+          "type": "string"
+        },
+        "jobCode": {
+          "type": "string"
+        },
+        "jobName": {
+          "type": "string"
+        },
+        "stageId": {
+          "type": "string"
+        },
+        "stageName": {
+          "type": "string"
+        },
+        "date": {
+          "type": "string"
+        },
+        "hours": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 24
+        },
+        "billingType": {
+          "$ref": "#/definitions/BillingType"
+        },
+        "hourlyRate": {
+          "type": "number",
+          "minimum": 0
+        },
+        "cost": {
+          "type": "number",
+          "minimum": 0
+        },
+        "description": {
+          "type": "string"
+        },
+        "status": {
+          "$ref": "#/definitions/TimeEntryStatus"
+        },
+        "crewId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "foremanId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "foremanApprovedAt": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "adminId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "adminApprovedAt": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "settlementId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "type": {
+          "$ref": "#/definitions/TimeEntryType"
+        },
+        "workType": {
+          "type": "string"
+        },
+        "quantity": {
+          "type": "number"
+        },
+        "rate": {
+          "type": "number"
+        },
+        "_lastUpdatedAt": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": true
+    },
+    "TimeEntryBatchImportPayload": {
+      "type": "object",
+      "required": [
+        "entries"
+      ],
+      "properties": {
+        "entries": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/TimeEntryPostPayload"
+          }
+        }
+      },
+      "additionalProperties": true
+    },
+    "TimeEntryBatchImportResult": {
+      "type": "object",
+      "required": [
+        "status",
+        "succeeded",
+        "failed",
+        "succeededIds",
+        "failedIds",
+        "errors"
+      ],
+      "properties": {
+        "status": {
+          "type": "string",
+          "enum": [
+            "success",
+            "partial_success",
+            "error"
+          ]
+        },
+        "succeeded": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "upserted": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "modified": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "matched": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "failed": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "succeededIds": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "failedIds": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "errors": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": true
+    }
+  }
+}

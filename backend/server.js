@@ -1792,27 +1792,49 @@ app.post('/api/auth/set-password', verifyToken, requireRole('admin'), async (req
 const toCents = (val) => Math.round((Number(val) || 0) * 100);
 const toCurrency = (cents) => Math.round(cents) / 100;
 
-// TimeEntry domain statuses matching exactly src/models/types.ts:
-// status: 'draft' | 'pending' | 'submitted' | 'approved' | 'rejected' | 'foreman_approved' | 'foreman_rejected' | 'admin_approved' | 'admin_rejected'
-const VALID_TIME_ENTRY_STATUSES = [
-    'draft',
-    'pending',
-    'submitted',
-    'approved',
-    'rejected',
-    'foreman_approved',
-    'foreman_rejected',
-    'admin_approved',
-    'admin_rejected'
-];
+// TimeEntry domain contracts & JSON Schema validator imported from shared/contracts
+const Ajv = require('ajv');
+const {
+    timeEntrySchema,
+    TIME_ENTRY_STATUSES: VALID_TIME_ENTRY_STATUSES,
+    WORKER_ALLOWED_TIME_ENTRY_STATUSES,
+    FOREMAN_ALLOWED_TIME_ENTRY_STATUSES,
+    BILLING_TYPES,
+    TIME_ENTRY_TYPES
+} = require('../shared/contracts/index.cjs');
 
-const WORKER_ALLOWED_TIME_ENTRY_STATUSES = ['draft', 'pending', 'submitted'];
-const FOREMAN_ALLOWED_TIME_ENTRY_STATUSES = ['draft', 'pending', 'submitted', 'foreman_approved', 'foreman_rejected'];
+const ajv = new Ajv({ allErrors: true, coerceTypes: false });
+ajv.addSchema(timeEntrySchema, 'timeEntry');
+const validateTimeEntryPostSchema = ajv.getSchema('timeEntry#/definitions/TimeEntryPostPayload');
+const validateTimeEntryPatchSchema = ajv.getSchema('timeEntry#/definitions/TimeEntryPatchPayload');
+const validateTimeEntryBatchSchema = ajv.getSchema('timeEntry#/definitions/TimeEntryBatchImportPayload');
 
 // Shared validation & normalization for time entries (used by single POST/PATCH and batch-import)
 async function validateAndNormalizeTimeEntryDoc(doc, { db, user, isBatch = false, isPatch = false }) {
     if (!doc || typeof doc !== 'object') {
         return { error: 'Nieprawidłowy obiekt wpisu czasu.' };
+    }
+
+    // JSON Schema validation via Ajv from shared/contracts
+    const schemaValidator = isPatch ? validateTimeEntryPatchSchema : validateTimeEntryPostSchema;
+    const isValidSchema = schemaValidator(doc);
+    if (!isValidSchema) {
+        const firstErr = schemaValidator.errors?.[0];
+        if (firstErr) {
+            if (firstErr.keyword === 'required' || firstErr.params?.missingProperty === 'employeeId') {
+                return { error: 'Pole employeeId jest wymagane.' };
+            }
+            if (firstErr.keyword === 'required' || firstErr.params?.missingProperty === 'jobId') {
+                return { error: 'Pole jobId jest wymagane.' };
+            }
+            if (firstErr.instancePath.includes('hours')) {
+                if (firstErr.keyword === 'minimum') return { error: 'Godziny nie mogą być ujemne.' };
+                if (firstErr.keyword === 'maximum') return { error: 'Godziny nie mogą przekraczać 24h na jeden wpis.' };
+            }
+            if (firstErr.instancePath.includes('status')) {
+                return { error: `Nieprawidłowy status wpisu czasu: '${doc.status}'. Dozwolone: ${VALID_TIME_ENTRY_STATUSES.join(', ')}.` };
+            }
+        }
     }
     const effectiveEmpId = doc.employeeId || doc.employee_id;
     const effectiveJobId = doc.jobId || doc.project_id;
@@ -2848,6 +2870,14 @@ module.exports = {
     seedInitialDataIfEmpty,
     repairLegacyC4c2ac3Standards,
     repairIncompleteStandards,
+    VALID_TIME_ENTRY_STATUSES,
+    WORKER_ALLOWED_TIME_ENTRY_STATUSES,
+    FOREMAN_ALLOWED_TIME_ENTRY_STATUSES,
+    BILLING_TYPES,
+    TIME_ENTRY_TYPES,
+    validateTimeEntryPostSchema,
+    validateTimeEntryPatchSchema,
+    validateTimeEntryBatchSchema,
     computeCanonicalDocHash,
     toCanonicalJson,
     ALL_SYSTEM_COLLECTIONS,
