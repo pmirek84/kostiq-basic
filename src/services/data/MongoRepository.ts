@@ -5,10 +5,7 @@ import type { Employee, Subcontractor, TimeEntry, Settlement, Crew, Message, Req
  * MongoRepository (Adapter)
  *
  * Implements TiCoRepository by consuming a REST API backed by MongoDB.
- *
- * FIX: fetchJson() now unwraps paginated envelopes { data, pagination }
- * so all getXxx() methods always return T[] regardless of whether the
- * backend uses pagination (Fix #4) or returns a plain array.
+ * Ensures full pagination traversal for collections without silent 100-record truncation.
  */
 export class MongoRepository implements TiCoRepository {
     private baseUrl: string;
@@ -23,9 +20,7 @@ export class MongoRepository implements TiCoRepository {
     }
 
     /**
-     * Core fetch helper.
-     * Automatically unwraps paginated envelopes { data: T[], pagination: any }
-     * into plain T[] — callers always get an array back for collection endpoints.
+     * Core fetch helper for single entity endpoints (POST, PATCH, DELETE, GET by id).
      */
     private async fetchJson<T>(endpoint: string, options?: RequestInit): Promise<T> {
         const url = `${this.baseUrl}${endpoint}`;
@@ -39,7 +34,9 @@ export class MongoRepository implements TiCoRepository {
         });
 
         if (!response.ok) {
-            throw new Error(`API Error: ${response.status} ${response.statusText} for ${url}`);
+            const err: any = new Error(`API Error: ${response.status} ${response.statusText} for ${url}`);
+            err.status = response.status;
+            throw err;
         }
 
         if (response.status === 204) {
@@ -48,9 +45,7 @@ export class MongoRepository implements TiCoRepository {
 
         const json = await response.json();
 
-        // FIX: Unwrap paginated envelope { data: T[], pagination: {...} }
-        // Backend (Fix #4) returns this format for large collections.
-        // Non-paginated endpoints return plain arrays — leave those untouched.
+        // If returned as paginated envelope, unwrap data
         if (json && typeof json === 'object' && !Array.isArray(json) && Array.isArray(json.data)) {
             return json.data as unknown as T;
         }
@@ -58,10 +53,73 @@ export class MongoRepository implements TiCoRepository {
         return json as T;
     }
 
+    /**
+     * Traverses all pages sequentially, ensuring no record truncation and preventing duplicates.
+     */
+    private async fetchCollectionAllPages<T extends { id?: string }>(endpoint: string, params?: Record<string, string>): Promise<T[]> {
+        const limit = 500;
+        let page = 1;
+        const allItems: T[] = [];
+        const seenIds = new Set<string>();
+        let hasMore = true;
+
+        while (hasMore) {
+            const qs = new URLSearchParams({ page: String(page), limit: String(limit), ...params }).toString();
+            const sep = endpoint.includes('?') ? '&' : '?';
+            const url = `${this.baseUrl}${endpoint}${sep}${qs}`;
+
+            const response = await fetch(url, {
+                headers: {
+                    'Content-Type': 'application/json',
+                    ...this.getAuthHeaders(),
+                },
+            });
+
+            if (!response.ok) {
+                const err: any = new Error(`API Error: ${response.status} ${response.statusText} for ${url}`);
+                err.status = response.status;
+                throw err;
+            }
+
+            if (response.status === 204) {
+                return allItems;
+            }
+
+            const json = await response.json();
+            if (Array.isArray(json)) {
+                // Non-paginated collection
+                return json;
+            }
+
+            if (json && Array.isArray(json.data)) {
+                for (const item of json.data) {
+                    if (item && item.id) {
+                        if (!seenIds.has(item.id)) {
+                            seenIds.add(item.id);
+                            allItems.push(item);
+                        }
+                    } else if (item) {
+                        allItems.push(item);
+                    }
+                }
+
+                if (json.pagination && json.pagination.hasMore && page < json.pagination.totalPages) {
+                    page++;
+                } else {
+                    hasMore = false;
+                }
+            } else {
+                hasMore = false;
+            }
+        }
+
+        return allItems;
+    }
+
     // --- Employees ---
 
     async getEmployees(): Promise<Employee[]> {
-        return this.fetchJson<Employee[]>('/employees');
+        return this.fetchCollectionAllPages<Employee>('/employees');
     }
 
     async createEmployee(employee: Employee): Promise<Employee> {
@@ -87,7 +145,7 @@ export class MongoRepository implements TiCoRepository {
     // --- Subcontractors ---
 
     async getSubcontractors(): Promise<Subcontractor[]> {
-        return this.fetchJson<Subcontractor[]>('/subcontractors');
+        return this.fetchCollectionAllPages<Subcontractor>('/subcontractors');
     }
 
     async createSubcontractor(subcontractor: Subcontractor): Promise<Subcontractor> {
@@ -113,7 +171,7 @@ export class MongoRepository implements TiCoRepository {
     // --- Crews ---
 
     async getCrews(): Promise<Crew[]> {
-        return this.fetchJson<Crew[]>('/crews');
+        return this.fetchCollectionAllPages<Crew>('/crews');
     }
 
     async createCrew(crew: Crew): Promise<Crew> {
@@ -133,9 +191,7 @@ export class MongoRepository implements TiCoRepository {
     // --- TimeEntries ---
 
     async getTimeEntries(): Promise<TimeEntry[]> {
-        // time-entries is a large paginated collection (Fix #4).
-        // fetchJson() will unwrap { data: TimeEntry[], pagination } automatically.
-        return this.fetchJson<TimeEntry[]>('/time-entries');
+        return this.fetchCollectionAllPages<TimeEntry>('/time-entries');
     }
 
     async createTimeEntry(entry: TimeEntry): Promise<TimeEntry> {
@@ -168,7 +224,7 @@ export class MongoRepository implements TiCoRepository {
     // --- Settlements ---
 
     async getSettlements(): Promise<Settlement[]> {
-        return this.fetchJson<Settlement[]>('/settlements');
+        return this.fetchCollectionAllPages<Settlement>('/settlements');
     }
 
     async createSettlement(settlement: Settlement): Promise<Settlement> {
@@ -188,7 +244,7 @@ export class MongoRepository implements TiCoRepository {
     // --- Messages ---
 
     async getMessages(): Promise<Message[]> {
-        return this.fetchJson<Message[]>('/messages');
+        return this.fetchCollectionAllPages<Message>('/messages');
     }
 
     async createMessage(message: Message): Promise<Message> {
@@ -208,7 +264,7 @@ export class MongoRepository implements TiCoRepository {
     // --- Requests ---
 
     async getRequests(): Promise<Request[]> {
-        return this.fetchJson<Request[]>('/requests');
+        return this.fetchCollectionAllPages<Request>('/requests');
     }
 
     async createRequest(request: Request): Promise<Request> {

@@ -81,13 +81,13 @@ export default function ImportExportPage() {
     const handleImportTimeEntries = async (file: File) => {
         return new Promise<void>((resolve, reject) => {
             const reader = new FileReader();
-            reader.onload = (e) => {
+            reader.onload = async (e) => {
                 try {
                     const content = e.target?.result as string;
                     const data = JSON.parse(content) as TimeEntry[];
                     if (!Array.isArray(data)) throw new Error('Nieprawidłowy format danych');
 
-                    importTimeEntries(data);
+                    await importTimeEntries(data);
                     setSuccessMsg(`Zaimportowano ${data.length} wpisów czasu.`);
                     setError(null);
                     resolve();
@@ -319,9 +319,9 @@ export default function ImportExportPage() {
                     <Button
                         variant="secondary"
                         className="text-red-600 hover:text-red-800 hover:bg-red-50 border-red-200"
-                        onClick={() => {
+                        onClick={async () => {
                             if (window.confirm('Czy na pewno chcesz usunąć dane czasu pracy i wydajności?')) {
-                                clearTimeTrackingData();
+                                await clearTimeTrackingData();
                                 setSuccessMsg('Wyczyszczono dane operacyjne.');
                             }
                         }}

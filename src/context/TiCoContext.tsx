@@ -29,6 +29,8 @@ export type CreateContractSettlementInput = {
     notes?: string;
 };
 
+export type LoadStatus = 'loading' | 'complete' | 'failed';
+
 interface TiCoContextType {
     employees: Employee[];
     subcontractors: Subcontractor[];
@@ -38,6 +40,7 @@ interface TiCoContextType {
     messages: Message[];
     requests: Request[];
     isLoading: boolean;
+    loadStatus: LoadStatus;
 
     // Crew Actions
     createCrew: (input: { name: string; foremanId: string; memberIds: string[] }) => Promise<void>;
@@ -85,8 +88,8 @@ interface TiCoContextType {
     updateRequestStatus: (id: string, status: RequestStatus, comment?: string) => Promise<void>;
 
     // Legacy / Utils
-    importTimeEntries: (entries: TimeEntry[]) => void;
-    clearTimeEntries: () => void;
+    importTimeEntries: (entries: TimeEntry[]) => Promise<void>;
+    clearTimeEntries: () => Promise<void>;
 }
 
 export const TiCoContext = createContext<TiCoContextType | undefined>(undefined);
@@ -97,7 +100,8 @@ export const TiCoProvider = ({ children }: { children: ReactNode }) => {
         return USE_MONGO ? new MongoRepository() : new MockRepository();
     }, []);
 
-    const [isLoading, setIsLoading] = useState(true);
+    const [loadStatus, setLoadStatus] = useState<LoadStatus>('loading');
+    const isLoading = loadStatus === 'loading';
     const [employees, setEmployees] = useState<Employee[]>([]);
     const [subcontractors, setSubcontractors] = useState<Subcontractor[]>([]);
     const [timeEntries, setTimeEntries] = useState<TimeEntry[]>([]);
@@ -112,16 +116,21 @@ export const TiCoProvider = ({ children }: { children: ReactNode }) => {
     useEffect(() => {
         // Don't load if no token (not logged in)
         if (USE_MONGO && !token) {
-            setIsLoading(false);
+            setLoadStatus('complete');
             return;
         }
         const loadData = async () => {
-            setIsLoading(true);
+            setLoadStatus('loading');
             try {
-                // Fetch each collection independently so one 401/error doesn't abort all
+                let fetchFailed = false;
+                // Fetch each collection independently, tracking failures
                 const safe = async <T,>(fn: () => Promise<T[]>, fallback: T[] = []): Promise<T[]> => {
                     try { return await fn(); }
-                    catch (e) { console.warn('[TiCoContext] Collection fetch failed:', e); return fallback; }
+                    catch (e) { 
+                        console.warn('[TiCoContext] Collection fetch failed:', e); 
+                        fetchFailed = true;
+                        return fallback; 
+                    }
                 };
 
                 let [emps, subs, times, sets, crewList, msgs, reqs] = await Promise.all([
@@ -134,11 +143,17 @@ export const TiCoProvider = ({ children }: { children: ReactNode }) => {
                     safe(() => repository.getRequests()),
                 ]);
 
-                // SEEDING LOGIC: Seed if no employees exist at all (works for both Mock AND MongoDB)
-                const shouldSeed = emps.length === 0;
+                if (fetchFailed) {
+                    console.error('[TiCoContext] Data fetch encountered errors - marking loadStatus as failed');
+                    setLoadStatus('failed');
+                    return;
+                }
+
+                // In USE_MONGO mode, NEVER auto-seed client side upon empty state
+                const shouldSeed = !USE_MONGO && emps.length === 0;
 
                 if (shouldSeed) {
-                    console.log("[TiCoContext] No employees found — seeding default employees...");
+                    console.log("[TiCoContext] No employees found (mock mode) — seeding default employees...");
 
                     const JAN_ID = uuidv4();
                     const PIOTR_ID = uuidv4();
@@ -163,10 +178,7 @@ export const TiCoProvider = ({ children }: { children: ReactNode }) => {
                         emps = seedEmps;
                         crewList = seedCrews;
                     } catch (seedErr) {
-                        console.warn('[TiCoContext] Seeding failed (backend may not be up):', seedErr);
-                        // Still set in-memory so UI works
-                        emps = seedEmps;
-                        crewList = seedCrews;
+                        console.error("[TiCoContext] Failed to seed default data:", seedErr);
                     }
                 }
 
@@ -177,10 +189,10 @@ export const TiCoProvider = ({ children }: { children: ReactNode }) => {
                 setCrews(crewList);
                 setMessages(msgs);
                 setRequests(reqs);
+                setLoadStatus('complete');
             } catch (error) {
                 console.error("Failed to load TiCo data:", error);
-            } finally {
-                setIsLoading(false);
+                setLoadStatus('failed');
             }
         };
         loadData();
@@ -584,8 +596,37 @@ export const TiCoProvider = ({ children }: { children: ReactNode }) => {
     const getTimeEntriesByStage = (stageId: string) => timeEntries.filter(t => t.stageId === stageId);
 
     // --- Legacy / Utils ---
-    const importTimeEntries = (entries: TimeEntry[]) => setTimeEntries(prev => [...prev, ...entries]);
-    const clearTimeEntries = () => setTimeEntries([]);
+    const importTimeEntries = async (entries: TimeEntry[]) => {
+        const saved: TimeEntry[] = [];
+        for (const entry of entries) {
+            try {
+                const entryToSave = {
+                    ...entry,
+                    id: entry.id || uuidv4(),
+                    createdAt: entry.createdAt || new Date().toISOString(),
+                    updatedAt: entry.updatedAt || new Date().toISOString()
+                };
+                const created = await repository.createTimeEntry(entryToSave);
+                saved.push(created);
+            } catch (err) {
+                console.error('Failed to import time entry', entry, err);
+            }
+        }
+        if (saved.length > 0) {
+            setTimeEntries(prev => [...prev, ...saved]);
+        }
+    };
+
+    const clearTimeEntries = async () => {
+        for (const entry of timeEntries) {
+            try {
+                await repository.deleteTimeEntry(entry.id);
+            } catch (err) {
+                console.error(`Failed to delete time entry ${entry.id}`, err);
+            }
+        }
+        setTimeEntries([]);
+    };
 
     return (
         <TiCoContext.Provider value={{
@@ -597,6 +638,9 @@ export const TiCoProvider = ({ children }: { children: ReactNode }) => {
             messages,
             requests,
             isLoading,
+            loadStatus,
+
+            
 
             addEmployee,
             updateEmployee,

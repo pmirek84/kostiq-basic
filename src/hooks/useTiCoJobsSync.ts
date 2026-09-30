@@ -3,13 +3,20 @@ import { useTiCo } from '../context/TiCoContext';
 import { useJobs } from '../context/JobsContext';
 
 export const useTiCoJobsSync = () => {
-    const { timeEntries, settlements, employees } = useTiCo();
+    const { timeEntries, settlements, employees, loadStatus } = useTiCo();
     const { updateJobsLaborAggregates } = useJobs();
 
     // Debounce reference to avoid too frequent updates if timeEntries change rapidly
     const timeoutRef = useRef<any>(null);
 
     useEffect(() => {
+        // CRITICAL GUARD: Only calculate and sync aggregates when data loading is completely and successfully finished.
+        // Blocks on 'loading' or 'failed' to prevent wiping or corrupting jobs data.
+        // Legitimate empty lists (complete + 0 entries) will properly recalculate/zero out costs.
+        if (loadStatus !== 'complete') {
+            return;
+        }
+
         if (timeoutRef.current) {
             clearTimeout(timeoutRef.current);
         }

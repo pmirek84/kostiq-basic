@@ -60,12 +60,14 @@ export class MongoAdapter<T extends { id: string }> implements IStorageAdapter<T
                 } else if (response.status !== 404) {
                     toast.error(errorMsg);
                 }
-                throw new Error(errorMsg);
+                const err: any = new Error(errorMsg);
+                err.status = response.status;
+                throw err;
             }
             if (response.status === 204) return undefined as any;
             return response.json();
         } catch (err: any) {
-            if (err.message.includes('Failed to fetch')) {
+            if (err.message && err.message.includes('Failed to fetch')) {
                 toast.error('Błąd połączenia z serwerem. Sprawdź internet lub skontaktuj się z adminem.');
             }
             throw err;
@@ -83,12 +85,12 @@ export class MongoAdapter<T extends { id: string }> implements IStorageAdapter<T
         });
     }
 
+    /**
+     * Fetches ALL records across all pages.
+     * Prevents the critical >100 records truncation bug.
+     */
     async getAll(params?: Record<string, string>): Promise<T[]> {
-        const query = params ? `?${new URLSearchParams(params).toString()}` : '';
-        const result = await this.fetchJson<T[] | { data: T[]; pagination: any }>(`${this.url}${query}`);
-        // Handle both plain array (no-pagination collections) and paginated envelope
-        if (Array.isArray(result)) return result;
-        return (result as any).data ?? [];
+        return this.getAllPages(500, params);
     }
 
     /** Fetch a specific page (for large collections like time-entries, jobs, materials) */
@@ -102,14 +104,28 @@ export class MongoAdapter<T extends { id: string }> implements IStorageAdapter<T
         return result;
     }
 
-    /** Fetches ALL pages sequentially. Use only for small/medium collections. */
+    /** Fetches ALL pages sequentially, de-duplicating records by ID. */
     async getAllPages(limit = 500, params?: Record<string, string>): Promise<T[]> {
         const first = await this.getPage(1, limit, params);
-        if (!first.pagination.hasMore) return first.data;
-        const allData = [...first.data];
+        if (!first.pagination || !first.pagination.hasMore) return first.data || [];
+        
+        const allData: T[] = [...(first.data || [])];
+        const seenIds = new Set<string>(allData.map(item => item.id).filter(Boolean));
+
         for (let p = 2; p <= first.pagination.totalPages; p++) {
             const page = await this.getPage(p, limit, params);
-            allData.push(...page.data);
+            if (page && page.data && page.data.length > 0) {
+                for (const item of page.data) {
+                    if (item && item.id) {
+                        if (!seenIds.has(item.id)) {
+                            seenIds.add(item.id);
+                            allData.push(item);
+                        }
+                    } else if (item) {
+                        allData.push(item);
+                    }
+                }
+            }
         }
         return allData;
     }
@@ -117,8 +133,14 @@ export class MongoAdapter<T extends { id: string }> implements IStorageAdapter<T
     async getById(id: string): Promise<T | undefined> {
         try {
             return await this.fetchJson<T>(`${this.url}/${id}`);
-        } catch (e) {
-            return undefined;
+        } catch (e: any) {
+            // ONLY 404 indicates standard "record does not exist"
+            if (e?.status === 404 || (e?.message && e.message.includes('404'))) {
+                return undefined;
+            }
+            // Network failures or 5xx server errors must NOT be swallowed as undefined!
+            console.error(`[MongoAdapter] getById(${id}) failure:`, e);
+            throw e;
         }
     }
 
@@ -187,10 +209,6 @@ export class MongoAdapter<T extends { id: string }> implements IStorageAdapter<T
 
     async getByIndex(indexName: string, value: any): Promise<T[]> {
         const field = INDEX_MAPPING[indexName] || indexName;
-        const query = new URLSearchParams({ [field]: String(value) });
-        const result = await this.fetchJson<T[] | { data: T[]; pagination: any }>(`${this.url}?${query.toString()}`);
-        // Handle both plain array (no-pagination collections) and paginated envelope
-        if (Array.isArray(result)) return result;
-        return (result as any).data ?? [];
+        return this.getAllPages(500, { [field]: String(value) });
     }
 }
