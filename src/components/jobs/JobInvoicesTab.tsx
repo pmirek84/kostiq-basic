@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { Plus, FileText, CheckCircle, Clock, Trash2, CreditCard, RefreshCw, TrendingDown, TrendingUp, Edit2 } from 'lucide-react';
-import type { Job, JobExpense } from '../../models/types';
+import type { Job, JobExpense, ExtraWork } from '../../models/types';
 import { useJobs } from '../../context/JobsContext';
 import { v4 as uuidv4 } from 'uuid';
 
@@ -87,6 +87,24 @@ export default function JobInvoicesTab({ job }: JobInvoicesTabProps) {
     // ─── INCOME ────────────────────────────────────────────────────────────────
     const [incomeInvoices, setIncomeInvoices] = useState<InvoiceIncome[]>([]);
     const [incomeLoading, setIncomeLoading] = useState(true);
+    const [extraWorks, setExtraWorks] = useState<ExtraWork[]>([]);
+
+    const fetchExtraWorks = useCallback(async () => {
+        try {
+            const res = await fetch(`${API_BASE}/extra-works?jobId=${job.id}`, { headers: getAuthHeaders() });
+            if (res.ok) {
+                const raw = await res.json();
+                const arr: ExtraWork[] = Array.isArray(raw) ? raw : (raw?.data ?? []);
+                setExtraWorks(arr.filter((ew: ExtraWork) => ew.jobId === job.id));
+            }
+        } catch (e) {
+            console.error('Failed to fetch extra works for invoices tab:', e);
+        }
+    }, [job.id]);
+
+    useEffect(() => {
+        fetchExtraWorks();
+    }, [fetchExtraWorks]);
     const [showIncomeForm, setShowIncomeForm] = useState(false);
     const [newIncome, setNewIncome] = useState({
         invoiceNumber: '', description: '',

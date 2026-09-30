@@ -13,7 +13,6 @@ import { CalendarProvider } from './context/CalendarContext';
 import { TiCoProvider } from './context/TiCoContext';
 import { JobLogProvider } from './context/JobLogContext';
 import { ClientReportsProvider } from './context/ClientReportsContext';
-import { TimeTrackingProvider } from './context/TimeTrackingContext';
 import { AppLayout } from './components/layout/AppLayout';
 import { ToasterProvider } from './components/ui/ToasterProvider';
 
@@ -106,9 +105,7 @@ function App() {
                                 <JobLogProvider>
                                   <ClientReportsProvider>
                                     <CalendarProvider>
-                                      <TimeTrackingProvider>
-                                        <AppLayout />
-                                      </TimeTrackingProvider>
+                                      <AppLayout />
                                     </CalendarProvider>
                                   </ClientReportsProvider>
                                 </JobLogProvider>

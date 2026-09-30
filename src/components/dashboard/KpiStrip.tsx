@@ -1,14 +1,13 @@
 import { DollarSign, Briefcase, Percent, Clock, Info } from 'lucide-react';
 import { useOffers } from '../../context/OffersContext';
 import { useJobs } from '../../context/JobsContext';
-import { useTimeTracking } from '../../context/TimeTrackingContext';
+import { useTiCo } from '../../context/TiCoContext';
 import { useMemo } from 'react';
 
 export default function KpiStrip() {
     const { offers } = useOffers();
     const { jobs } = useJobs();
-    const ticoCtx = useTimeTracking();
-    const timeEntries = ticoCtx?.timeEntries || [];
+    const { timeEntries } = useTiCo();
 
     const stats = useMemo(() => {
         const acceptedOffersValue = offers.filter(o => o.status === 'accepted').reduce((sum, o) => sum + (o.totalNet || o.totalCost || 0), 0);
@@ -29,7 +28,7 @@ export default function KpiStrip() {
         const totalOffers = offers.length;
         const acceptanceRate = totalOffers > 0 ? Math.round((acceptedOffers / totalOffers) * 100) : 12;
 
-        return { totalRevenue, activeJobsCount, avgMargin, weeklyHours: weeklyHours || 18, acceptanceRate };
+        return { totalRevenue, activeJobsCount, avgMargin, weeklyHours: weeklyHours, acceptanceRate };
     }, [offers, jobs, timeEntries]);
 
     const { totalRevenue, activeJobsCount, avgMargin, weeklyHours, acceptanceRate } = stats;

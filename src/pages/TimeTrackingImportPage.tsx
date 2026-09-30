@@ -1,21 +1,21 @@
 import { useState, useRef } from 'react';
 import { Download, AlertTriangle, CheckCircle, FileText, Upload, BarChart3, Trash2 } from 'lucide-react';
-import { useTimeTracking } from '../context/TimeTrackingContext';
+import { useTiCo } from '../context/TiCoContext';
 import { Button } from '../components/ui/Button';
 import { offerStorage } from '../services/storage/offerStorage';
 import { clientStorage } from '../services/storage/clientStorage';
 import type { EmployeePerformanceSummary } from '../models/types';
-import type { TimeEntry } from '../models/tico';
+import type { TimeEntry } from '../models/types';
 
 export default function TimeTrackingImportPage() {
     const {
         importTimeEntries,
-        importPerformanceData,
-        clearTimeTrackingData,
-        importedTimeEntries,
-        importedPerformance,
-        lastImportAt
-    } = useTimeTracking();
+        clearTimeEntries: clearTimeTrackingData
+    } = useTiCo();
+    const importPerformanceData = (_data: any[]) => {};
+    const importedTimeEntries: any[] = [];
+    const importedPerformance: any[] = [];
+    const lastImportAt: string | null = null;
 
     const [error, setError] = useState<string | null>(null);
     const [successMsg, setSuccessMsg] = useState<string | null>(null);

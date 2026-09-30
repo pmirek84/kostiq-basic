@@ -19,9 +19,6 @@ interface JobsContextType {
     addJobStage: (jobId: string, stageData: any) => Promise<void>;
     updateJobStage: (jobId: string, stageId: string, updates: any) => Promise<void>;
     deleteJobStage: (jobId: string, stageId: string) => Promise<void>;
-    addSiteLogEntry: (jobId: string, entry: any) => Promise<void>;
-    addExtraWork: (jobId: string, workData: any) => Promise<void>;
-    updateExtraWorkStatus: (jobId: string, workId: string, status: any) => Promise<void>;
     updateJobsLaborAggregates: (
         jobAggregates: Map<string, { hours: number; cost: number; settledCost: number }>,
         stageAggregates: Map<string, { hours: number; cost: number }>
@@ -327,100 +324,7 @@ export function JobsProvider({ children }: { children: ReactNode }) {
     };
 
     // --- Site Log Management ---
-    const addSiteLogEntry = async (jobId: string, entry: any) => {
-        const job = jobs.find(j => j.id === jobId);
-        if (job) {
-            const newEntry = {
-                ...entry,
-                id: uuidv4(),
-                jobId: jobId,
-                createdAt: new Date().toISOString()
-            };
-            const updatedJob = {
-                ...job,
-                siteLogEntries: [newEntry, ...(job.siteLogEntries || [])],
-                updatedAt: new Date().toISOString()
-            };
-            await jobStorage.saveJob(updatedJob);
-            await refreshJobs();
-        }
-    };
-
-    // --- Extra Work Management ---
-    const addExtraWork = async (jobId: string, workData: any) => {
-        const job = jobs.find(j => j.id === jobId);
-        if (job) {
-            const newWork = {
-                ...workData,
-                id: uuidv4(),
-                jobId: jobId,
-                status: 'draft',
-                createdAt: new Date().toISOString()
-            };
-            const updatedJob = {
-                ...job,
-                extraWorks: [newWork, ...(job.extraWorks || [])],
-                updatedAt: new Date().toISOString()
-            };
-            await jobStorage.saveJob(updatedJob);
-            await refreshJobs();
-        }
-    };
-
-    const updateExtraWorkStatus = async (jobId: string, workId: string, status: any) => {
-        const job = jobs.find(j => j.id === jobId);
-        if (job) {
-            const workIndex = (job.extraWorks || []).findIndex(w => w.id === workId);
-            if (workIndex === -1) return;
-
-            let updatedWork = { ...(job.extraWorks![workIndex]), status };
-            let updatedJob = { ...job };
-
-            // Logic for 'accepted' status -> Create Stage
-            if (status === 'zaakceptowana' && updatedWork.status !== 'zaakceptowana' && !updatedWork.relatedStageId) {
-                const newStageId = uuidv4();
-
-                // Create new stage
-                const newStage = {
-                    id: newStageId,
-                    jobId: job.id,
-                    name: updatedWork.title + ' (Dodatkowe)',
-                    type: 'dodatkowy' as 'dodatkowy',
-                    status: 'planowany' as const,
-                    plannedRevenueNet: updatedWork.plannedRevenueNet || 0,
-                    plannedCostNet: updatedWork.plannedCostNet || 0,
-                    billingType: 'hourly' as const,
-                };
-
-                updatedWork.relatedStageId = newStageId;
-
-                // Update stages list
-                const newStages = [...(job.stages || []), newStage];
-                updatedJob.stages = newStages;
-
-                // Recalculate Totals & Shares
-                const totalRevenue = newStages.reduce((acc: number, s: any) => acc + (Number(s.plannedRevenueNet) || 0), 0);
-                updatedJob.totalPlannedRevenueNet = totalRevenue;
-
-                updatedJob.stages = newStages.map((s: any) => ({
-                    ...s,
-                    revenueSharePercent: totalRevenue > 0 ? ((Number(s.plannedRevenueNet) || 0) / totalRevenue) * 100 : 0
-                }));
-            }
-
-            updatedJob.extraWorks = [
-                ...job.extraWorks!.slice(0, workIndex),
-                updatedWork,
-                ...job.extraWorks!.slice(workIndex + 1)
-            ];
-            updatedJob.updatedAt = new Date().toISOString();
-
-            await jobStorage.saveJob(updatedJob);
-            await refreshJobs();
-        }
-    };
-
-    const updateJobsLaborAggregates = async (
+        const updateJobsLaborAggregates = async (
         jobAggregates: Map<string, { hours: number; cost: number; settledCost: number }>,
         stageAggregates: Map<string, { hours: number; cost: number }>
     ) => {
@@ -539,9 +443,6 @@ export function JobsProvider({ children }: { children: ReactNode }) {
             addJobStage,
             updateJobStage,
             deleteJobStage,
-            addSiteLogEntry,
-            addExtraWork,
-            updateExtraWorkStatus,
             updateJobsLaborAggregates,
             getJobStageItems,
             addJobStageItem,
