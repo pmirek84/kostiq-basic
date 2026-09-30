@@ -27,18 +27,20 @@ describe('Production timeTrackingBatchService - Partial Failure & Duplicate Prev
         expect(mockRepo.createTimeEntry).toHaveBeenCalledTimes(3);
     });
 
-    it('executeImportTimeEntries updates existing records on re-import to prevent MongoDB duplicates', async () => {
+    it('executeImportTimeEntries updates existing records on re-import, preserving original createdAt', async () => {
         const mockRepo = {
             createTimeEntry: vi.fn(),
             updateTimeEntry: vi.fn().mockImplementation(async (id, data) => ({ ...data, id }))
         };
 
+        const originalCreatedAt = '2026-08-15T10:00:00.000Z';
         const existingEntries = [
-            { id: 't1', hours: 4, date: '2026-09-01' }
+            { id: 't1', hours: 4, date: '2026-09-01', createdAt: originalCreatedAt }
         ] as TimeEntry[];
 
+        // Re-imported entry without createdAt or with new date
         const reimportedEntries = [
-            { id: 't1', hours: 8, date: '2026-09-01' } // same ID, updated hours
+            { id: 't1', hours: 8, date: '2026-09-01' } // same ID, updated hours, no createdAt in file
         ] as TimeEntry[];
 
         const { result, savedEntries } = await executeImportTimeEntries(reimportedEntries, existingEntries, mockRepo as any);
@@ -46,9 +48,14 @@ describe('Production timeTrackingBatchService - Partial Failure & Duplicate Prev
         expect(result.succeeded).toBe(1);
         expect(result.failed).toBe(0);
         // Verified: updateTimeEntry was called instead of createTimeEntry
-        expect(mockRepo.updateTimeEntry).toHaveBeenCalledWith('t1', expect.objectContaining({ id: 't1', hours: 8 }));
+        expect(mockRepo.updateTimeEntry).toHaveBeenCalledWith('t1', expect.objectContaining({
+            id: 't1',
+            hours: 8,
+            createdAt: originalCreatedAt
+        }));
         expect(mockRepo.createTimeEntry).not.toHaveBeenCalled();
         expect(savedEntries[0].hours).toBe(8);
+        expect(savedEntries[0].createdAt).toBe(originalCreatedAt);
     });
 
     it('executeClearTimeEntries removes only successfully deleted entries when some fail', async () => {

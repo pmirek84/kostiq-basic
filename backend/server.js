@@ -124,6 +124,26 @@ let db;
 let client;
 
 // Connect to MongoDB
+
+// Ensure unique index on { id: 1 } for all collections to guarantee uniqueness at the database level
+async function ensureIndexes(database) {
+    if (!database) return;
+    const COLLECTIONS = [
+        'jobs', 'offers', 'time-entries', 'settlements', 'employees',
+        'subcontractors', 'clients', 'crews', 'catalog-materials',
+        'materials', 'offer-templates', 'notifications', 'site-logs',
+        'messages', 'archived-reports', 'extra-works', 'company-settings',
+        'invoices', 'requests', 'payments', 'constructions', 'boms'
+    ];
+    for (const col of COLLECTIONS) {
+        try {
+            await database.collection(col).createIndex({ id: 1 }, { unique: true, sparse: true });
+        } catch (e) {
+            // Ignore index creation conflicts if any
+        }
+    }
+}
+
 async function connectDB() {
     try {
         console.log(`Attempting to connect to MongoDB at ${mongoUri}...`);
@@ -137,6 +157,7 @@ async function connectDB() {
 
         // Initialize Backup Schedule
         initBackupSchedule(db);
+        await ensureIndexes(db);
     } catch (err) {
         console.error('CRITICAL: Failed to connect to MongoDB', err.message);
     }
@@ -356,20 +377,66 @@ const createRouter = (collectionName) => {
         }
     });
 
-    // POST Create (with upsert protection if business id already exists)
+    // POST Create (pure creation; returns 409 Conflict if ID already exists, preventing silent overwrites)
     router.post('/', async (req, res) => {
         try {
             if (!db) return res.status(503).json({ error: 'Database not connected' });
             const newItem = req.body;
-            if (newItem && newItem.id) {
-                const existing = await db.collection(collectionName).findOne({ id: newItem.id });
-                if (existing) {
-                    await db.collection(collectionName).updateOne({ id: newItem.id }, { $set: newItem });
-                    return res.status(200).json({ ...existing, ...newItem });
-                }
+            if (!newItem.id) {
+                newItem.id = new ObjectId().toString();
             }
             const result = await db.collection(collectionName).insertOne(newItem);
             res.status(201).json({ ...newItem, _id: result.insertedId });
+        } catch (err) {
+            // MongoDB duplicate key error code 11000 or duplicate key pattern
+            if (err.code === 11000 || (err.message && err.message.includes('E11000'))) {
+                return res.status(409).json({
+                    error: `Rekord z identyfikatorem '${req.body?.id}' już istnieje. Użyj PATCH do aktualizacji lub endpointu importu.`
+                });
+            }
+            res.status(500).json({ error: err.message });
+        }
+    });
+
+    // POST Batch Import (explicit atomic upsert for bulk data / migrations; preserves createdAt)
+    router.post('/batch-import', async (req, res) => {
+        try {
+            if (!db) return res.status(503).json({ error: 'Database not connected' });
+            const { items } = req.body;
+            if (!Array.isArray(items) || items.length === 0) {
+                return res.status(400).json({ error: 'Brak tablicy items do zaimportowania.' });
+            }
+
+            const now = new Date().toISOString();
+            const operations = items.map(item => {
+                const itemId = item.id || new ObjectId().toString();
+                const { _id, createdAt, ...rest } = item;
+
+                return {
+                    updateOne: {
+                        filter: { id: itemId },
+                        update: {
+                            $set: {
+                                ...rest,
+                                id: itemId,
+                                updatedAt: now
+                            },
+                            $setOnInsert: {
+                                createdAt: createdAt || now
+                            }
+                        },
+                        upsert: true
+                    }
+                };
+            });
+
+            const result = await db.collection(collectionName).bulkWrite(operations, { ordered: false });
+            res.status(200).json({
+                succeeded: (result.upsertedCount || 0) + (result.matchedCount || 0),
+                upserted: result.upsertedCount || 0,
+                modified: result.modifiedCount || 0,
+                matched: result.matchedCount || 0
+            });
         } catch (err) {
             res.status(500).json({ error: err.message });
         }

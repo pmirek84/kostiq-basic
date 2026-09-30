@@ -19,24 +19,26 @@ export async function executeImportTimeEntries(
 ): Promise<{ result: BatchOperationResult; savedEntries: TimeEntry[] }> {
     const savedEntries: TimeEntry[] = [];
     const errors: string[] = [];
-    const existingIds = new Set(existingEntries.map(e => e.id));
+    const existingMap = new Map(existingEntries.map(e => [e.id, e]));
 
     for (const entry of entries) {
         try {
             const entryId = entry.id || uuidv4();
+            const existing = existingMap.get(entryId);
+
+            let saved: TimeEntry;
             const entryToSave: TimeEntry = {
                 ...entry,
                 id: entryId,
-                createdAt: entry.createdAt || new Date().toISOString(),
+                createdAt: (existing && existing.createdAt) || entry.createdAt || new Date().toISOString(),
                 updatedAt: new Date().toISOString()
             };
 
-            let saved: TimeEntry;
-            if (existingIds.has(entryId)) {
+            if (existing) {
                 saved = await repository.updateTimeEntry(entryId, entryToSave);
             } else {
                 saved = await repository.createTimeEntry(entryToSave);
-                existingIds.add(entryId);
+                existingMap.set(entryId, saved || entryToSave);
             }
             savedEntries.push(saved || entryToSave);
         } catch (err: any) {
