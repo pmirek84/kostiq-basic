@@ -95,8 +95,8 @@ test('seedInitialDataIfEmpty: verifies complete standard schema with valid mater
     assert.strictEqual(store.standards.size, 0, 'Wiped standards must remain 0 and not be unexpectedly re-seeded');
 });
 
-test('seedInitialDataIfEmpty: repairs existing standards created by commit c4c2ac3 lacking materialId', async () => {
-    // Exact data shape created by commit c4c2ac3 (standards with rules missing materialId, empty materials, no migration marker)
+test('seedInitialDataIfEmpty: repairs exact c4c2ac3 legacy standards without modifying custom user standards', async () => {
+    // Exact documents as defined in git show c4c2ac3:backend/server.js
     const store = {
         system_migrations: new Map(),
         materials: new Map(),
@@ -105,81 +105,54 @@ test('seedInitialDataIfEmpty: repairs existing standards created by commit c4c2a
         constructions: new Map()
     };
 
+    // Exact std-pvc-01 from c4c2ac3 (rules: [{ id: 'rule-pvc-01', edge: 'perimeter', usagePerMeter: 1, basis: 'mb' }])
     store.standards.set('std-pvc-01', {
         id: 'std-pvc-01',
-        name: 'Ciepły montaż PVC (standard)',
-        description: 'Trójwarstwowy montaż stolarki PVC z taśmami paroszczelną i paroprzepuszczalną',
-        systemType: 'pvc',
+        name: 'Standard PVC – Piana + Taśma 3-warstwowa',
+        description: 'Montaż okien PVC z pianką PU, taśmą rozprężną 3-warstw. i folią paroprzepuszczalną',
+        applicableTypes: ['okno_pvc', 'drzwi_pvc', 'hs_pvc'],
+        isDefault: true,
         rules: [
-            {
-                id: 'rule-pvc-pianka',
-                edge: 'perimeter',
-                usagePerMeter: 0.2,
-                usageUnit: 'puszka/mb',
-                basis: 'mb',
-                wastePercent: 5
-            },
-            {
-                id: 'rule-pvc-tasma-wew',
-                edge: 'perimeter',
-                usagePerMeter: 1.05,
-                usageUnit: 'mb',
-                basis: 'mb',
-                wastePercent: 5
-            },
-            {
-                id: 'rule-pvc-tasma-zew',
-                edge: 'perimeter',
-                usagePerMeter: 1.05,
-                usageUnit: 'mb',
-                basis: 'mb',
-                wastePercent: 5
-            }
+            { id: 'rule-pvc-01', edge: 'perimeter', usagePerMeter: 1, basis: 'mb' }
         ],
         createdAt: '2026-09-30T10:00:00Z',
         updatedAt: '2026-09-30T10:00:00Z'
     });
 
+    // Exact std-alu-01 from c4c2ac3 (rules: [{ id: 'rule-alu-01', edge: 'perimeter', usagePerMeter: 1, basis: 'mb' }])
     store.standards.set('std-alu-01', {
         id: 'std-alu-01',
-        name: 'Ciepły montaż Aluminium (standard)',
-        description: 'Montaż stolarki aluminiowej z taśmą rozprężną i klejem',
-        systemType: 'alu',
+        name: 'Standard ALU – Montaż na konsolach + EPDM',
+        description: 'Montaż konstrukcji aluminiowych na konsolach z folią EPDM i klejem hybrydowym',
+        applicableTypes: ['okno_alu', 'drzwi_alu', 'fasada_alu'],
+        isDefault: false,
         rules: [
-            {
-                id: 'rule-alu-pianka',
-                edge: 'perimeter',
-                usagePerMeter: 0.25,
-                usageUnit: 'puszka/mb',
-                basis: 'mb',
-                wastePercent: 5
-            },
-            {
-                id: 'rule-alu-tasma-rozprezna',
-                edge: 'perimeter',
-                usagePerMeter: 1.05,
-                usageUnit: 'mb',
-                basis: 'mb',
-                wastePercent: 5
-            },
-            {
-                id: 'rule-alu-klej',
-                edge: 'perimeter',
-                usagePerMeter: 0.15,
-                usageUnit: 'szt/mb',
-                basis: 'mb',
-                wastePercent: 10
-            }
+            { id: 'rule-alu-01', edge: 'perimeter', usagePerMeter: 1, basis: 'mb' }
         ],
         createdAt: '2026-09-30T10:00:00Z',
         updatedAt: '2026-09-30T10:00:00Z'
     });
+
+    // Custom user standard - must NEVER be touched or modified!
+    const customUserStandard = {
+        id: 'std-custom-user-01',
+        name: 'Własny standard montażu klienta',
+        description: 'Standard użytkownika z własną regułą',
+        applicableTypes: ['okno_drewno'],
+        isDefault: false,
+        rules: [
+            { id: 'custom-rule-drewno', edge: 'bottom', usagePerMeter: 2.5, basis: 'mb' }
+        ],
+        createdAt: '2026-09-30T11:00:00Z',
+        updatedAt: '2026-09-30T11:00:00Z'
+    };
+    store.standards.set('std-custom-user-01', JSON.parse(JSON.stringify(customUserStandard)));
 
     const mockDb = createMockDb(store);
 
-    // Verify rules do NOT have materialId before running migration
-    const beforePvc = store.standards.get('std-pvc-01');
-    assert.strictEqual(beforePvc.rules[0].materialId, undefined);
+    // Verify rule-pvc-01 and rule-alu-01 do NOT have materialId before running
+    assert.strictEqual(store.standards.get('std-pvc-01').rules[0].materialId, undefined);
+    assert.strictEqual(store.standards.get('std-alu-01').rules[0].materialId, undefined);
 
     // Run seed / migration
     const res = await seedInitialDataIfEmpty(mockDb);
@@ -188,41 +161,56 @@ test('seedInitialDataIfEmpty: repairs existing standards created by commit c4c2a
     // Verify materials were seeded
     assert.ok(store.materials.size >= 5, 'Materials must be seeded');
 
-    // Verify existing std-pvc-01 and std-alu-01 were repaired in-place
+    // 1. Verify std-pvc-01 received complete proper rules (2 rules) with proper materials
     const afterPvc = store.standards.get('std-pvc-01');
-    assert.ok(afterPvc.rules.length >= 3);
-    for (const rule of afterPvc.rules) {
-        assert.ok(rule.materialId, `Repaired rule ${rule.id} must have non-empty materialId`);
-        assert.ok(store.materials.has(rule.materialId), `Material ${rule.materialId} must exist`);
-    }
+    assert.strictEqual(afterPvc.rules.length, 2);
+    assert.strictEqual(afterPvc.rules[0].id, 'rule-pvc-piana');
+    assert.strictEqual(afterPvc.rules[0].materialId, 'mat-pur-low-750');
+    assert.strictEqual(afterPvc.rules[1].id, 'rule-pvc-tasma');
+    assert.strictEqual(afterPvc.rules[1].materialId, 'mat-tasma-rozprezna-10');
 
+    // 2. Verify std-alu-01 received complete proper rules (3 rules), NOT assigned to foam!
     const afterAlu = store.standards.get('std-alu-01');
-    assert.ok(afterAlu.rules.length >= 3);
-    for (const rule of afterAlu.rules) {
-        assert.ok(rule.materialId, `Repaired rule ${rule.id} must have non-empty materialId`);
-        assert.ok(store.materials.has(rule.materialId), `Material ${rule.materialId} must exist`);
-    }
+    assert.strictEqual(afterAlu.rules.length, 3);
+    assert.strictEqual(afterAlu.rules[0].id, 'rule-alu-konsole');
+    assert.strictEqual(afterAlu.rules[0].materialId, 'mat-konsola-montazowa-l');
+    assert.strictEqual(afterAlu.rules[1].id, 'rule-alu-epdm');
+    assert.strictEqual(afterAlu.rules[1].materialId, 'mat-folia-epdm-zew');
+    assert.strictEqual(afterAlu.rules[2].id, 'rule-alu-klej');
+    assert.strictEqual(afterAlu.rules[2].materialId, 'mat-klej-hybrydowy');
 
-    // Verify system_migrations marker was written
-    assert.ok(store.system_migrations.has('initial_standards_and_templates_v1'));
+    // 3. Verify custom user standard was COMPLETELY UNTOUCHED!
+    const afterCustom = store.standards.get('std-custom-user-01');
+    assert.deepStrictEqual(afterCustom.rules, customUserStandard.rules, 'User standard rules must not be modified');
+    assert.strictEqual(afterCustom.rules[0].materialId, undefined, 'User rule must not be assigned heuristic materialId');
 });
 
-test('seedInitialDataIfEmpty: repairs existing standards even if initial_standards_and_templates_v1 marker was already present', async () => {
-    // Simulates database where 2ece28e recorded marker before repairing standards
+test('seedInitialDataIfEmpty: repairs c4c2ac3 standards even if initial_standards_and_templates_v1 marker was already present', async () => {
+    // Simulates database where commit 2ece28e recorded marker before repairing standards
     const store = {
         system_migrations: new Map([
             ['initial_standards_and_templates_v1', { id: 'initial_standards_and_templates_v1', appliedAt: '2026-09-30T14:00:00Z' }]
         ]),
         materials: new Map([
             ['mat-pur-low-750', { id: 'mat-pur-low-750', name: 'Pianka PUR' }],
-            ['mat-tasma-rozprezna-10', { id: 'mat-tasma-rozprezna-10', name: 'Taśma' }]
+            ['mat-tasma-rozprezna-10', { id: 'mat-tasma-rozprezna-10', name: 'Taśma' }],
+            ['mat-konsola-montazowa-l', { id: 'mat-konsola-montazowa-l', name: 'Konsola' }],
+            ['mat-folia-epdm-zew', { id: 'mat-folia-epdm-zew', name: 'EPDM' }],
+            ['mat-klej-hybrydowy', { id: 'mat-klej-hybrydowy', name: 'Klej' }]
         ]),
         standards: new Map([
             ['std-pvc-01', {
                 id: 'std-pvc-01',
-                name: 'Ciepły montaż PVC',
+                name: 'Standard PVC',
                 rules: [
-                    { id: 'rule-pvc-pianka', edge: 'perimeter', usagePerMeter: 0.2 }
+                    { id: 'rule-pvc-01', edge: 'perimeter', usagePerMeter: 1, basis: 'mb' }
+                ]
+            }],
+            ['std-alu-01', {
+                id: 'std-alu-01',
+                name: 'Standard ALU',
+                rules: [
+                    { id: 'rule-alu-01', edge: 'perimeter', usagePerMeter: 1, basis: 'mb' }
                 ]
             }]
         ]),
@@ -236,7 +224,12 @@ test('seedInitialDataIfEmpty: repairs existing standards even if initial_standar
     assert.strictEqual(res.seeded, false);
     assert.strictEqual(res.reason, 'Migration already applied');
 
-    // Standard must still have been repaired
-    const std = store.standards.get('std-pvc-01');
-    assert.strictEqual(std.rules[0].materialId, 'mat-pur-low-750');
+    // Standards must still have been repaired
+    const pvc = store.standards.get('std-pvc-01');
+    assert.strictEqual(pvc.rules.length, 2);
+    assert.strictEqual(pvc.rules[0].materialId, 'mat-pur-low-750');
+
+    const alu = store.standards.get('std-alu-01');
+    assert.strictEqual(alu.rules.length, 3);
+    assert.strictEqual(alu.rules[0].materialId, 'mat-konsola-montazowa-l');
 });

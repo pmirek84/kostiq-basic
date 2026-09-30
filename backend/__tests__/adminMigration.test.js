@@ -19,7 +19,7 @@ const workerToken = jwt.sign(
     { expiresIn: '1h' }
 );
 
-test('POST /api/migration/admin-record: Administrative migration with full document replacement', async (t) => {
+test('POST /api/migration/admin-record: Administrative migration with mandatory CAS and atomic replacement', async (t) => {
     const store = new Map();
 
     const mockCollection = {
@@ -40,8 +40,11 @@ test('POST /api/migration/admin-record: Administrative migration with full docum
             if (!existing) {
                 return { acknowledged: true, matchedCount: 0, modifiedCount: 0 };
             }
-            if (filter.updatedAt !== undefined && existing.updatedAt !== filter.updatedAt) {
-                return { acknowledged: true, matchedCount: 0, modifiedCount: 0 };
+            // Check all filter conditions atomically (matches id, updatedAt, _fingerprint, or field matches)
+            for (const [k, v] of Object.entries(filter)) {
+                if (existing[k] !== v) {
+                    return { acknowledged: true, matchedCount: 0, modifiedCount: 0 };
+                }
             }
             store.set(filter.id, { ...doc });
             return { acknowledged: true, matchedCount: 1, modifiedCount: 1 };
@@ -77,7 +80,8 @@ test('POST /api/migration/admin-record: Administrative migration with full docum
             .send({
                 collection: 'clients',
                 action: 'replace',
-                record: { id: 'client-1', name: 'Firma ABC Nowa' }
+                record: { id: 'client-1', name: 'Firma ABC Nowa' },
+                expectedUpdatedAt: '2026-09-30T15:00:00Z'
             });
 
         assert.strictEqual(res.status, 403);
@@ -93,7 +97,8 @@ test('POST /api/migration/admin-record: Administrative migration with full docum
                 .send({
                     collection: col,
                     action: 'replace',
-                    record: { id: 'test-1', name: 'Test' }
+                    record: { id: 'test-1', name: 'Test' },
+                    expectedUpdatedAt: '2026-09-30T15:00:00Z'
                 });
 
             assert.strictEqual(res.status, 400, `Collection '${col}' must be rejected`);
@@ -101,7 +106,7 @@ test('POST /api/migration/admin-record: Administrative migration with full docum
         }
     });
 
-    await t.test('action=replace performs full document replacement, clearing obsolete fields', async () => {
+    await t.test('action=replace rejects requests without CAS parameters with 400 Bad Request', async () => {
         const res = await request(app)
             .post('/api/migration/admin-record')
             .set('Authorization', `Bearer ${adminToken}`)
@@ -109,29 +114,58 @@ test('POST /api/migration/admin-record: Administrative migration with full docum
             .send({
                 collection: 'clients',
                 action: 'replace',
-                record: { id: 'client-1', name: 'Firma ABC Po Migracji' }
+                record: { id: 'client-1', name: 'Firma ABC Bez CAS' }
+                // Omitting expectedFingerprint and expectedUpdatedAt
             });
 
-        assert.strictEqual(res.status, 200);
-        assert.strictEqual(res.body.success, true);
-        assert.strictEqual(res.body.action, 'replaced');
-
-        const saved = store.get('client-1');
-        assert.strictEqual(saved.name, 'Firma ABC Po Migracji');
-        assert.strictEqual(saved.obsoleteFieldInMongo, undefined, 'Obsolete fields must be deleted upon replace');
+        assert.strictEqual(res.status, 400);
+        assert.strictEqual(res.body.code, 'CAS_PARAMETERS_REQUIRED');
+        assert.match(res.body.error, /parametrów kontroli wersji CAS/);
     });
 
-    await t.test('action=replace detects concurrent modification (race condition) and returns 409', async () => {
+    await t.test('action=replace detects race condition for document WITHOUT updatedAt and returns 409', async () => {
+        // Document without updatedAt (legacy document)
+        const legacyDoc = {
+            id: 'client-no-updated-at',
+            name: 'Klient Bez Daty',
+            phone: '111-222-333'
+        };
+        store.set('client-no-updated-at', { ...legacyDoc });
+
+        // Preview took fingerprint of the original document
+        const previewFingerprint = computeCanonicalDocHash(legacyDoc);
+
+        // Concurrent modification mutated phone before replace executes
+        store.get('client-no-updated-at').phone = '999-888-777';
+
+        // Client attempts replace with approved fingerprint
+        const res = await request(app)
+            .post('/api/migration/admin-record')
+            .set('Authorization', `Bearer ${adminToken}`)
+            .set('x-test-role', 'admin')
+            .send({
+                collection: 'clients',
+                action: 'replace',
+                record: { id: 'client-no-updated-at', name: 'Klient Zastąpiony', phone: '111-222-333' },
+                expectedFingerprint: previewFingerprint
+            });
+
+        assert.strictEqual(res.status, 409);
+        assert.strictEqual(res.body.code, 'CONCURRENT_MODIFICATION');
+        assert.match(res.body.error, /Wykryto zmianę dokumentu|Współbieżna modyfikacja/);
+    });
+
+    await t.test('action=replace detects concurrent modification (race condition) for document WITH updatedAt and returns 409', async () => {
         store.set('client-race', {
             id: 'client-race',
             name: 'Klient Race Oryginalny',
             updatedAt: '2026-09-30T10:00:00Z'
         });
 
-        // 1. Concurrent modification bumped updatedAt
+        // Concurrent modification bumped updatedAt
         store.get('client-race').updatedAt = '2026-09-30T10:05:00Z';
 
-        // 2. Migration client attempts replace with stale expectedUpdatedAt
+        // Migration client attempts replace with stale expectedUpdatedAt
         const res = await request(app)
             .post('/api/migration/admin-record')
             .set('Authorization', `Bearer ${adminToken}`)
@@ -181,16 +215,9 @@ test('POST /api/migration/admin-record: Administrative migration with full docum
         assert.match(res.body.error, /fingerprint mismatch/i);
     });
 
-    await t.test('action=replace succeeds when expectedUpdatedAt and expectedFingerprint match', async () => {
-        const freshDoc = {
-            id: 'client-match',
-            name: 'Klient Match',
-            phone: '555-555',
-            updatedAt: '2026-09-30T12:00:00Z'
-        };
-        store.set('client-match', { ...freshDoc });
-
-        const fingerprint = computeCanonicalDocHash(freshDoc);
+    await t.test('action=replace succeeds when expectedUpdatedAt and expectedFingerprint match, clearing obsolete fields and setting persistent fingerprint', async () => {
+        const client1Doc = store.get('client-1');
+        const fingerprint = computeCanonicalDocHash(client1Doc);
 
         const res = await request(app)
             .post('/api/migration/admin-record')
@@ -199,14 +226,19 @@ test('POST /api/migration/admin-record: Administrative migration with full docum
             .send({
                 collection: 'clients',
                 action: 'replace',
-                record: { id: 'client-match', name: 'Klient Match Nowy', phone: '555-555', updatedAt: '2026-09-30T12:01:00Z' },
-                expectedUpdatedAt: '2026-09-30T12:00:00Z',
+                record: { id: 'client-1', name: 'Firma ABC Po Migracji', updatedAt: '2026-09-30T15:05:00Z' },
+                expectedUpdatedAt: '2026-09-30T15:00:00Z',
                 expectedFingerprint: fingerprint
             });
 
         assert.strictEqual(res.status, 200);
         assert.strictEqual(res.body.success, true);
-        assert.strictEqual(store.get('client-match').name, 'Klient Match Nowy');
+        assert.strictEqual(res.body.action, 'replaced');
+
+        const saved = store.get('client-1');
+        assert.strictEqual(saved.name, 'Firma ABC Po Migracji');
+        assert.strictEqual(saved.obsoleteFieldInMongo, undefined, 'Obsolete fields must be deleted upon replace');
+        assert.ok(saved._fingerprint, 'Persistent _fingerprint must be written on replace');
     });
 
     await t.test('action=create inserts new document or returns 409 if exists', async () => {

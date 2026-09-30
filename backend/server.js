@@ -373,65 +373,92 @@ async function reconcileDuplicatesAndEnsureIndexes(database) {
 // ==========================================
 // Idempotent Seeding on Database Connection
 // ==========================================
-const RULE_MATERIAL_MAP = {
-    'rule-pvc-pianka': 'mat-pur-low-750',
-    'rule-pvc-piana': 'mat-pur-low-750',
-    'rule-pvc-tasma-wew': 'mat-tasma-rozprezna-10',
-    'rule-pvc-tasma-zew': 'mat-tasma-rozprezna-10',
-    'rule-pvc-tasma': 'mat-tasma-rozprezna-10',
-    'rule-alu-pianka': 'mat-pur-low-750',
-    'rule-alu-tasma-rozprezna': 'mat-tasma-rozprezna-10',
-    'rule-alu-konsole': 'mat-konsola-montazowa-l',
-    'rule-alu-epdm': 'mat-folia-epdm-zew',
-    'rule-alu-klej': 'mat-klej-hybrydowy'
+const SEEDED_STANDARD_RULES = {
+    'std-pvc-01': [
+        {
+            id: 'rule-pvc-piana',
+            edge: 'perimeter',
+            materialId: 'mat-pur-low-750',
+            usagePerMeter: 0.25,
+            usageUnit: 'szt/mb',
+            basis: 'mb',
+            wastePercent: 10
+        },
+        {
+            id: 'rule-pvc-tasma',
+            edge: 'perimeter',
+            materialId: 'mat-tasma-rozprezna-10',
+            usagePerMeter: 1.0,
+            usageUnit: 'm/mb',
+            basis: 'mb',
+            wastePercent: 5
+        }
+    ],
+    'std-alu-01': [
+        {
+            id: 'rule-alu-konsole',
+            edge: 'perimeter',
+            materialId: 'mat-konsola-montazowa-l',
+            usagePerMeter: 1.5,
+            usageUnit: 'szt/mb',
+            basis: 'mb',
+            wastePercent: 0
+        },
+        {
+            id: 'rule-alu-epdm',
+            edge: 'perimeter',
+            materialId: 'mat-folia-epdm-zew',
+            usagePerMeter: 1.0,
+            usageUnit: 'm/mb',
+            basis: 'mb',
+            wastePercent: 5
+        },
+        {
+            id: 'rule-alu-klej',
+            edge: 'perimeter',
+            materialId: 'mat-klej-hybrydowy',
+            usagePerMeter: 0.15,
+            usageUnit: 'szt/mb',
+            basis: 'mb',
+            wastePercent: 10
+        }
+    ]
 };
 
 async function repairIncompleteStandards(targetDb) {
     if (!targetDb) return 0;
     const standardsColl = targetDb.collection('standards');
     let repairedCount = 0;
-    const standardIds = ['std-pvc-01', 'std-alu-01'];
-    const candidates = [];
-    for (const id of standardIds) {
+
+    // Strictly target only the exact recognized seeded standards ('std-pvc-01' and 'std-alu-01').
+    // NEVER mutate custom user standards or custom user rules!
+    for (const [stdId, expectedRules] of Object.entries(SEEDED_STANDARD_RULES)) {
         try {
-            const std = await standardsColl.findOne({ id });
-            if (std) candidates.push(std);
-        } catch (_) {}
-    }
-    if (standardsColl.find) {
-        try {
-            const all = await standardsColl.find({}).toArray();
-            for (const s of all) {
-                if (!candidates.some(c => c.id === s.id)) candidates.push(s);
+            const std = await standardsColl.findOne({ id: stdId });
+            if (!std) continue;
+
+            // Check if this seeded standard is in a broken/legacy state from commit c4c2ac3:
+            // e.g. has rule-pvc-01 / rule-alu-01, or any rule without materialId,
+            // or does not match the full expected rule set.
+            const isLegacySeed = !Array.isArray(std.rules) ||
+                std.rules.length !== expectedRules.length ||
+                std.rules.some(r => !r.materialId || r.id === 'rule-pvc-01' || r.id === 'rule-alu-01');
+
+            if (isLegacySeed) {
+                await standardsColl.updateOne(
+                    { id: stdId },
+                    { 
+                        $set: { 
+                            rules: expectedRules,
+                            updatedAt: new Date().toISOString()
+                        } 
+                    }
+                );
+                repairedCount++;
             }
         } catch (_) {}
     }
 
-    for (const std of candidates) {
-        if (!Array.isArray(std.rules)) continue;
-        let modified = false;
-        const updatedRules = std.rules.map(rule => {
-            if (!rule.materialId) {
-                modified = true;
-                const mappedId = RULE_MATERIAL_MAP[rule.id] ||
-                    (rule.id && rule.id.includes('pian') ? 'mat-pur-low-750' :
-                     rule.id && rule.id.includes('klej') ? 'mat-klej-hybrydowy' :
-                     rule.id && rule.id.includes('epdm') ? 'mat-folia-epdm-zew' :
-                     rule.id && rule.id.includes('konsol') ? 'mat-konsola-montazowa-l' :
-                     rule.id && rule.id.includes('tasm') ? 'mat-tasma-rozprezna-10' : 'mat-pur-low-750');
-                return { ...rule, materialId: mappedId };
-            }
-            return rule;
-        });
-
-        if (modified) {
-            await standardsColl.updateOne(
-                { id: std.id },
-                { $set: { rules: updatedRules, updatedAt: new Date().toISOString() } }
-            );
-            repairedCount++;
-        }
-    }
     return repairedCount;
 }
 
@@ -1406,6 +1433,14 @@ app.post('/api/migration/admin-record', verifyToken, requireRole('admin'), async
             await coll.insertOne(cleanDoc);
             return res.json({ success: true, action: 'created', id: record.id, collection });
         } else if (action === 'replace') {
+            // Require CAS parameters - do not permit blind, unconditional overwrites
+            if (!expectedFingerprint && !expectedUpdatedAt) {
+                return res.status(400).json({
+                    error: "Operacja 'replace' wymaga parametrów kontroli wersji CAS (oczekiwano 'expectedFingerprint' i/lub 'expectedUpdatedAt').",
+                    code: 'CAS_PARAMETERS_REQUIRED'
+                });
+            }
+
             const existing = await coll.findOne({ id: record.id });
             if (!existing) {
                 return res.status(404).json({ error: `Dokument o id '${record.id}' nie istnieje w kolekcji '${collection}'` });
@@ -1433,10 +1468,22 @@ app.post('/api/migration/admin-record', verifyToken, requireRole('admin'), async
             }
 
             // Atomic conditional replacement
+            // Protect both versioned records and legacy records lacking updatedAt:
             const filter = { id: record.id };
-            if (expectedUpdatedAt !== undefined && expectedUpdatedAt !== null && existing.updatedAt) {
+            if (existing._fingerprint) {
+                filter._fingerprint = expectedFingerprint || existing._fingerprint;
+            } else if (existing.updatedAt) {
                 filter.updatedAt = expectedUpdatedAt;
+            } else {
+                // Legacy document without updatedAt/version:
+                // Construct atomic match of all existing fields to prevent concurrent overwrite
+                for (const [k, v] of Object.entries(existing)) {
+                    if (k === '_id' || k === '__v') continue;
+                    filter[k] = v;
+                }
             }
+
+            cleanDoc._fingerprint = computeCanonicalDocHash(cleanDoc);
 
             const replaceRes = await coll.replaceOne(filter, cleanDoc);
             if (replaceRes && replaceRes.matchedCount === 0) {
