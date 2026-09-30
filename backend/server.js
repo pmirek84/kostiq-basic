@@ -1443,6 +1443,8 @@ app.post('/api/migration/admin-record', verifyToken, requireRole('admin'), async
         const coll = db.collection(collection);
         const cleanDoc = { ...record };
         delete cleanDoc._id;
+        delete cleanDoc.__v;
+        delete cleanDoc._fingerprint;
 
         if (action === 'create') {
             const existing = await coll.findOne({ id: record.id });
@@ -1488,21 +1490,18 @@ app.post('/api/migration/admin-record', verifyToken, requireRole('admin'), async
 
             // Atomic conditional replacement
             // Protect both versioned records and legacy records lacking updatedAt:
+            // Do NOT persist _fingerprint in documents to avoid stale fingerprints on standard PATCH/edits.
             const filter = { id: record.id };
-            if (existing._fingerprint) {
-                filter._fingerprint = expectedFingerprint || existing._fingerprint;
-            } else if (existing.updatedAt) {
-                filter.updatedAt = expectedUpdatedAt;
+            if (existing.updatedAt) {
+                filter.updatedAt = expectedUpdatedAt !== undefined ? expectedUpdatedAt : existing.updatedAt;
             } else {
                 // Legacy document without updatedAt/version:
                 // Construct atomic match of all existing fields to prevent concurrent overwrite
                 for (const [k, v] of Object.entries(existing)) {
-                    if (k === '_id' || k === '__v') continue;
+                    if (k === '_id' || k === '__v' || k === '_fingerprint') continue;
                     filter[k] = v;
                 }
             }
-
-            cleanDoc._fingerprint = computeCanonicalDocHash(cleanDoc);
 
             const replaceRes = await coll.replaceOne(filter, cleanDoc);
             if (replaceRes && replaceRes.matchedCount === 0) {

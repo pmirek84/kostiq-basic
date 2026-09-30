@@ -35,6 +35,16 @@ test('POST /api/migration/admin-record: Administrative migration with mandatory 
             store.set(doc.id, { ...doc });
             return { insertedId: doc.id };
         },
+        updateOne: async (filter, update) => {
+            const existing = store.get(filter.id);
+            if (!existing) {
+                return { acknowledged: true, matchedCount: 0, modifiedCount: 0 };
+            }
+            if (update.$set) {
+                Object.assign(existing, update.$set);
+            }
+            return { acknowledged: true, matchedCount: 1, modifiedCount: 1 };
+        },
         replaceOne: async (filter, doc, options) => {
             const existing = store.get(filter.id);
             if (!existing) {
@@ -243,10 +253,10 @@ test('POST /api/migration/admin-record: Administrative migration with mandatory 
         assert.strictEqual(res1.body.success, true);
         const saved1 = store.get('client-multi-cycle');
         assert.strictEqual(saved1.name, 'Wersja 2');
-        assert.ok(saved1._fingerprint, 'Document in MongoDB now has _fingerprint from Cycle 1');
+        assert.strictEqual(saved1._fingerprint, undefined, 'Document in MongoDB should NOT persist _fingerprint');
 
-        // --- Cycle 2: next preview -> replace on the document containing _fingerprint ---
-        // Preview computes canonical hash of the current document in DB (which now includes _fingerprint)
+        // --- Cycle 2: next preview -> replace on the document ---
+        // Preview computes canonical hash of the current document in DB
         const fp2 = computeCanonicalDocHash(saved1);
 
         const res2 = await request(app)
@@ -283,6 +293,75 @@ test('POST /api/migration/admin-record: Administrative migration with mandatory 
 
         assert.strictEqual(res3.status, 200, 'Cycle 3 must succeed smoothly');
         assert.strictEqual(store.get('client-multi-cycle').name, 'Wersja 4 (Final)');
+    });
+
+    
+    await t.test('migracja -> zwykly PATCH rekordu -> nowy podglad -> kolejna migracja succeeds without false 409', async () => {
+        // Initial state of document
+        const initialDoc = {
+            id: 'client-patch-cycle',
+            name: 'Klient v1',
+            phone: '111-111-111',
+            updatedAt: '2026-09-30T10:00:00Z'
+        };
+        store.set('client-patch-cycle', { ...initialDoc });
+
+        // 1. Migracja (replace)
+        const fp1 = computeCanonicalDocHash(store.get('client-patch-cycle'));
+        const resMigrate1 = await request(app)
+            .post('/api/migration/admin-record')
+            .set('Authorization', `Bearer ${adminToken}`)
+            .set('x-test-role', 'admin')
+            .send({
+                collection: 'clients',
+                action: 'replace',
+                record: { id: 'client-patch-cycle', name: 'Klient v2 po migracji', phone: '222-222-222', updatedAt: '2026-09-30T10:01:00Z' },
+                expectedUpdatedAt: '2026-09-30T10:00:00Z',
+                expectedFingerprint: fp1
+            });
+
+        assert.strictEqual(resMigrate1.status, 200);
+        assert.strictEqual(resMigrate1.body.success, true);
+        const docAfterMigrate1 = store.get('client-patch-cycle');
+        assert.strictEqual(docAfterMigrate1.name, 'Klient v2 po migracji');
+        assert.strictEqual(docAfterMigrate1._fingerprint, undefined, 'No persistent _fingerprint in doc');
+
+        // 2. Zwykly PATCH rekordu (standardowa edycja przez UI / API)
+        const resPatch = await request(app)
+            .patch('/api/clients/client-patch-cycle')
+            .set('Authorization', `Bearer ${adminToken}`)
+            .set('x-test-role', 'admin')
+            .send({
+                phone: '333-zwykly-patch'
+            });
+
+        assert.strictEqual(resPatch.status, 200);
+        const docAfterPatch = store.get('client-patch-cycle');
+        assert.strictEqual(docAfterPatch.phone, '333-zwykly-patch');
+        assert.notStrictEqual(docAfterPatch.updatedAt, '2026-09-30T10:01:00Z', 'PATCH bumped updatedAt');
+
+        // 3. Nowy podglad migracji (obliczenie fingerprintu ze stanu po zwyklym PATCH)
+        const fp2 = computeCanonicalDocHash(docAfterPatch);
+        const currentUpdatedAt = docAfterPatch.updatedAt;
+
+        // 4. Kolejna migracja tego samego dokumentu
+        const resMigrate2 = await request(app)
+            .post('/api/migration/admin-record')
+            .set('Authorization', `Bearer ${adminToken}`)
+            .set('x-test-role', 'admin')
+            .send({
+                collection: 'clients',
+                action: 'replace',
+                record: { id: 'client-patch-cycle', name: 'Klient v3 ostateczny', phone: '444-final', updatedAt: '2026-09-30T10:10:00Z' },
+                expectedUpdatedAt: currentUpdatedAt,
+                expectedFingerprint: fp2
+            });
+
+        assert.strictEqual(resMigrate2.status, 200, 'Second migration after standard PATCH must succeed without false 409');
+        assert.strictEqual(resMigrate2.body.success, true);
+        const finalDoc = store.get('client-patch-cycle');
+        assert.strictEqual(finalDoc.name, 'Klient v3 ostateczny');
+        assert.strictEqual(finalDoc.phone, '444-final');
     });
 
     await t.test('action=create inserts new document or returns 409 if exists', async () => {
