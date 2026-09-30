@@ -117,5 +117,5 @@ export const useTiCoJobsSync = () => {
         return () => {
             if (timeoutRef.current) clearTimeout(timeoutRef.current);
         };
-    }, [timeEntries, settlements, updateJobsLaborAggregates]);
+    }, [timeEntries, settlements, employees, loadStatus, updateJobsLaborAggregates]);
 };

@@ -29,6 +29,12 @@ export type CreateContractSettlementInput = {
     notes?: string;
 };
 
+export type BatchOperationResult = {
+    succeeded: number;
+    failed: number;
+    errors: string[];
+};
+
 export type LoadStatus = 'loading' | 'complete' | 'failed';
 
 interface TiCoContextType {
@@ -88,8 +94,8 @@ interface TiCoContextType {
     updateRequestStatus: (id: string, status: RequestStatus, comment?: string) => Promise<void>;
 
     // Legacy / Utils
-    importTimeEntries: (entries: TimeEntry[]) => Promise<void>;
-    clearTimeEntries: () => Promise<void>;
+    importTimeEntries: (entries: TimeEntry[]) => Promise<BatchOperationResult>;
+    clearTimeEntries: () => Promise<BatchOperationResult>;
 }
 
 export const TiCoContext = createContext<TiCoContextType | undefined>(undefined);
@@ -596,8 +602,10 @@ export const TiCoProvider = ({ children }: { children: ReactNode }) => {
     const getTimeEntriesByStage = (stageId: string) => timeEntries.filter(t => t.stageId === stageId);
 
     // --- Legacy / Utils ---
-    const importTimeEntries = async (entries: TimeEntry[]) => {
+        const importTimeEntries = async (entries: TimeEntry[]): Promise<BatchOperationResult> => {
         const saved: TimeEntry[] = [];
+        const errors: string[] = [];
+
         for (const entry of entries) {
             try {
                 const entryToSave = {
@@ -608,24 +616,49 @@ export const TiCoProvider = ({ children }: { children: ReactNode }) => {
                 };
                 const created = await repository.createTimeEntry(entryToSave);
                 saved.push(created);
-            } catch (err) {
+            } catch (err: any) {
+                const msg = err.message || `Błąd importu wpisu ${entry.id || 'bez id'}`;
                 console.error('Failed to import time entry', entry, err);
+                errors.push(msg);
             }
         }
+
         if (saved.length > 0) {
             setTimeEntries(prev => [...prev, ...saved]);
         }
+
+        return {
+            succeeded: saved.length,
+            failed: errors.length,
+            errors
+        };
     };
 
-    const clearTimeEntries = async () => {
+    const clearTimeEntries = async (): Promise<BatchOperationResult> => {
+        const deletedIds = new Set<string>();
+        const errors: string[] = [];
+
         for (const entry of timeEntries) {
             try {
                 await repository.deleteTimeEntry(entry.id);
-            } catch (err) {
+                deletedIds.add(entry.id);
+            } catch (err: any) {
+                const msg = err.message || `Błąd usuwania wpisu ${entry.id}`;
                 console.error(`Failed to delete time entry ${entry.id}`, err);
+                errors.push(msg);
             }
         }
-        setTimeEntries([]);
+
+        // Only remove entries that were actually deleted in the repository
+        if (deletedIds.size > 0) {
+            setTimeEntries(prev => prev.filter(e => !deletedIds.has(e.id)));
+        }
+
+        return {
+            succeeded: deletedIds.size,
+            failed: errors.length,
+            errors
+        };
     };
 
     return (

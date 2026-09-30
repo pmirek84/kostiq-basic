@@ -87,9 +87,16 @@ export default function ImportExportPage() {
                     const data = JSON.parse(content) as TimeEntry[];
                     if (!Array.isArray(data)) throw new Error('Nieprawidłowy format danych');
 
-                    await importTimeEntries(data);
-                    setSuccessMsg(`Zaimportowano ${data.length} wpisów czasu.`);
-                    setError(null);
+                    const result = await importTimeEntries(data);
+                    if (result.failed === 0) {
+                        setSuccessMsg(`Pomyślnie zaimportowano wszystkie ${result.succeeded} wpisów czasu.`);
+                        setError(null);
+                    } else if (result.succeeded > 0) {
+                        setSuccessMsg(`Częściowo zaimportowano: ${result.succeeded} z ${data.length} wpisów.`);
+                        setError(`Nie udało się zapisać ${result.failed} wpisów. Sprawdź logi konsoli.`);
+                    } else {
+                        setError(`Błąd importu: żadnego z ${data.length} wpisów nie udało się zapisać.`);
+                    }
                     resolve();
                 } catch (err) {
                     console.error(err);
@@ -321,8 +328,16 @@ export default function ImportExportPage() {
                         className="text-red-600 hover:text-red-800 hover:bg-red-50 border-red-200"
                         onClick={async () => {
                             if (window.confirm('Czy na pewno chcesz usunąć dane czasu pracy i wydajności?')) {
-                                await clearTimeTrackingData();
-                                setSuccessMsg('Wyczyszczono dane operacyjne.');
+                                const result = await clearTimeTrackingData();
+                                if (result.failed === 0) {
+                                    setSuccessMsg(`Wyczyszczono wszystkie wpisy operacyjne (${result.succeeded}).`);
+                                    setError(null);
+                                } else if (result.succeeded > 0) {
+                                    setSuccessMsg(`Usunięto ${result.succeeded} wpisów.`);
+                                    setError(`Nie udało się usunąć ${result.failed} wpisów. Pozostały w systemie.`);
+                                } else {
+                                    setError(`Błąd: nie udało się usunąć żadnego z ${result.failed} wpisów.`);
+                                }
                             }
                         }}
                     >

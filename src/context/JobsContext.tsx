@@ -434,31 +434,35 @@ export function JobsProvider({ children }: { children: ReactNode }) {
             let hasChanges = false;
             let updatedJob = { ...job };
 
-            if (jobAgg) {
-                if (updatedJob.actualLaborHours !== jobAgg.hours ||
-                    updatedJob.actualLaborCost !== jobAgg.cost ||
-                    updatedJob.settledLaborCost !== jobAgg.settledCost) {
+            // When entries exist, use their aggregate. When empty/deleted, zero out!
+            const targetHours = jobAgg ? jobAgg.hours : 0;
+            const targetCost = jobAgg ? jobAgg.cost : 0;
+            const targetSettledCost = jobAgg ? jobAgg.settledCost : 0;
 
-                    updatedJob.actualLaborHours = jobAgg.hours;
-                    updatedJob.actualLaborCost = jobAgg.cost;
-                    updatedJob.settledLaborCost = jobAgg.settledCost;
-                    hasChanges = true;
-                }
+            if ((updatedJob.actualLaborHours || 0) !== targetHours ||
+                (updatedJob.actualLaborCost || 0) !== targetCost ||
+                (updatedJob.settledLaborCost || 0) !== targetSettledCost) {
+
+                updatedJob.actualLaborHours = targetHours;
+                updatedJob.actualLaborCost = targetCost;
+                updatedJob.settledLaborCost = targetSettledCost;
+                hasChanges = true;
             }
 
-            // Update Stages
+            // Update Stages - zero out if stage entries were removed
             if (updatedJob.stages) {
                 const updatedStages = updatedJob.stages.map(stage => {
                     const stageAgg = stageAggregates.get(stage.id);
-                    if (stageAgg) {
-                        if (stage.actualLaborHours !== stageAgg.hours || stage.actualLaborCost !== stageAgg.cost) {
-                            hasChanges = true;
-                            return {
-                                ...stage,
-                                actualLaborHours: stageAgg.hours,
-                                actualLaborCost: stageAgg.cost
-                            };
-                        }
+                    const stageTargetHours = stageAgg ? stageAgg.hours : 0;
+                    const stageTargetCost = stageAgg ? stageAgg.cost : 0;
+                    if ((stage.actualLaborHours || 0) !== stageTargetHours ||
+                        (stage.actualLaborCost || 0) !== stageTargetCost) {
+                        hasChanges = true;
+                        return {
+                            ...stage,
+                            actualLaborHours: stageTargetHours,
+                            actualLaborCost: stageTargetCost
+                        };
                     }
                     return stage;
                 });
