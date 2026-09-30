@@ -1,3 +1,4 @@
+import { executeImportTimeEntries, executeClearTimeEntries } from '../services/domain/timeTrackingBatchService';
 import { createContext, useContext, useState, useEffect, useMemo, type ReactNode } from 'react';
 import type { Employee, Subcontractor, TimeEntry, Message, Request, RequestStatus, Settlement, WorkerType, Crew } from '../models/types';
 import { v4 as uuidv4 } from 'uuid';
@@ -602,63 +603,27 @@ export const TiCoProvider = ({ children }: { children: ReactNode }) => {
     const getTimeEntriesByStage = (stageId: string) => timeEntries.filter(t => t.stageId === stageId);
 
     // --- Legacy / Utils ---
-        const importTimeEntries = async (entries: TimeEntry[]): Promise<BatchOperationResult> => {
-        const saved: TimeEntry[] = [];
-        const errors: string[] = [];
-
-        for (const entry of entries) {
-            try {
-                const entryToSave = {
-                    ...entry,
-                    id: entry.id || uuidv4(),
-                    createdAt: entry.createdAt || new Date().toISOString(),
-                    updatedAt: entry.updatedAt || new Date().toISOString()
-                };
-                const created = await repository.createTimeEntry(entryToSave);
-                saved.push(created);
-            } catch (err: any) {
-                const msg = err.message || `Błąd importu wpisu ${entry.id || 'bez id'}`;
-                console.error('Failed to import time entry', entry, err);
-                errors.push(msg);
-            }
+            const importTimeEntries = async (entries: TimeEntry[]): Promise<BatchOperationResult> => {
+        const { result, savedEntries } = await executeImportTimeEntries(entries, timeEntries, repository);
+        if (savedEntries.length > 0) {
+            // Upsert / merge in local state by ID to prevent duplicate UI items
+            setTimeEntries(prev => {
+                const map = new Map(prev.map(e => [e.id, e]));
+                for (const s of savedEntries) {
+                    map.set(s.id, s);
+                }
+                return Array.from(map.values());
+            });
         }
-
-        if (saved.length > 0) {
-            setTimeEntries(prev => [...prev, ...saved]);
-        }
-
-        return {
-            succeeded: saved.length,
-            failed: errors.length,
-            errors
-        };
+        return result;
     };
 
     const clearTimeEntries = async (): Promise<BatchOperationResult> => {
-        const deletedIds = new Set<string>();
-        const errors: string[] = [];
-
-        for (const entry of timeEntries) {
-            try {
-                await repository.deleteTimeEntry(entry.id);
-                deletedIds.add(entry.id);
-            } catch (err: any) {
-                const msg = err.message || `Błąd usuwania wpisu ${entry.id}`;
-                console.error(`Failed to delete time entry ${entry.id}`, err);
-                errors.push(msg);
-            }
-        }
-
-        // Only remove entries that were actually deleted in the repository
+        const { result, deletedIds } = await executeClearTimeEntries(timeEntries, repository);
         if (deletedIds.size > 0) {
             setTimeEntries(prev => prev.filter(e => !deletedIds.has(e.id)));
         }
-
-        return {
-            succeeded: deletedIds.size,
-            failed: errors.length,
-            errors
-        };
+        return result;
     };
 
     return (

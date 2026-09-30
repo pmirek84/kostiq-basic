@@ -356,11 +356,18 @@ const createRouter = (collectionName) => {
         }
     });
 
-    // POST Create
+    // POST Create (with upsert protection if business id already exists)
     router.post('/', async (req, res) => {
         try {
             if (!db) return res.status(503).json({ error: 'Database not connected' });
             const newItem = req.body;
+            if (newItem && newItem.id) {
+                const existing = await db.collection(collectionName).findOne({ id: newItem.id });
+                if (existing) {
+                    await db.collection(collectionName).updateOne({ id: newItem.id }, { $set: newItem });
+                    return res.status(200).json({ ...existing, ...newItem });
+                }
+            }
             const result = await db.collection(collectionName).insertOne(newItem);
             res.status(201).json({ ...newItem, _id: result.insertedId });
         } catch (err) {

@@ -1,34 +1,78 @@
-import { describe, it, expect, vi } from 'vitest';
-import type { LoadStatus } from '../../context/TiCoContext';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { renderHook, act } from '@testing-library/react';
+import { useTiCoJobsSync } from '../useTiCoJobsSync';
+import { useTiCo } from '../../context/TiCoContext';
+import { useJobs } from '../../context/JobsContext';
 
-function shouldRunSync(status: LoadStatus): boolean {
-    return status === 'complete';
-}
+vi.mock('../../context/TiCoContext');
+vi.mock('../../context/JobsContext');
 
-describe('useTiCoJobsSync - Status Guards', () => {
+describe('useTiCoJobsSync - Production Hook Guard Tests', () => {
+    const mockUpdateJobsLaborAggregates = vi.fn();
+
+    beforeEach(() => {
+        vi.clearAllMocks();
+        vi.useFakeTimers();
+        (useJobs as any).mockReturnValue({
+            updateJobsLaborAggregates: mockUpdateJobsLaborAggregates
+        });
+    });
+
+    afterEach(() => {
+        vi.useRealTimers();
+    });
+
     it('blocks synchronization when loadStatus is loading', () => {
-        expect(shouldRunSync('loading')).toBe(false);
+        (useTiCo as any).mockReturnValue({
+            timeEntries: [],
+            settlements: [],
+            employees: [],
+            loadStatus: 'loading'
+        });
+
+        renderHook(() => useTiCoJobsSync());
+
+        act(() => {
+            vi.advanceTimersByTime(2000);
+        });
+
+        expect(mockUpdateJobsLaborAggregates).not.toHaveBeenCalled();
     });
 
     it('blocks synchronization when loadStatus is failed', () => {
-        expect(shouldRunSync('failed')).toBe(false);
+        (useTiCo as any).mockReturnValue({
+            timeEntries: [],
+            settlements: [],
+            employees: [],
+            loadStatus: 'failed'
+        });
+
+        renderHook(() => useTiCoJobsSync());
+
+        act(() => {
+            vi.advanceTimersByTime(2000);
+        });
+
+        expect(mockUpdateJobsLaborAggregates).not.toHaveBeenCalled();
     });
 
-    it('allows synchronization when loadStatus is complete', () => {
-        expect(shouldRunSync('complete')).toBe(true);
-    });
+    it('executes synchronization when loadStatus is complete, passing empty maps if timeEntries is empty', () => {
+        (useTiCo as any).mockReturnValue({
+            timeEntries: [],
+            settlements: [],
+            employees: [],
+            loadStatus: 'complete'
+        });
 
-    it('runs synchronization when loadStatus is complete, passing empty maps if timeEntries is empty', () => {
-        const updateJobsLaborAggregates = vi.fn();
-        const status: LoadStatus = 'complete';
+        renderHook(() => useTiCoJobsSync());
 
-        if (shouldRunSync(status)) {
-            const jobAggregates = new Map();
-            const stageAggregates = new Map();
-            updateJobsLaborAggregates(jobAggregates, stageAggregates);
-        }
+        act(() => {
+            vi.advanceTimersByTime(1500); // Exceed 1s debounce
+        });
 
-        expect(updateJobsLaborAggregates).toHaveBeenCalledTimes(1);
-        expect(updateJobsLaborAggregates).toHaveBeenCalledWith(expect.any(Map), expect.any(Map));
+        expect(mockUpdateJobsLaborAggregates).toHaveBeenCalledTimes(1);
+        const [jobAggs, stageAggs] = mockUpdateJobsLaborAggregates.mock.calls[0];
+        expect(jobAggs.size).toBe(0);
+        expect(stageAggs.size).toBe(0);
     });
 });

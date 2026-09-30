@@ -1,11 +1,19 @@
-import { describe, it, expect, vi } from 'vitest';
-import { jobStorage } from '../../services/storage/jobStorage';
+import { describe, it, expect } from 'vitest';
+import { applyLaborAggregatesToJobs, calculateLaborAggregates } from '../../services/domain/laborAggregatesService';
+import type { Job, TimeEntry, Settlement, Employee } from '../../models/types';
 
-describe('Jobs Labor Aggregates - Complete Zeroing on Deletion', () => {
-    it('properly resets actualLaborHours, costs and stages to 0 when entries are deleted', async () => {
+describe('Production laborAggregatesService - Zeroing on Deletion & Accurate Aggregation', () => {
+    it('applyLaborAggregatesToJobs resets actualLaborHours, costs and stages to 0 when entries are deleted', () => {
         const mockJob = {
             id: 'job-1',
+            jobCode: 'J-001',
+            clientId: 'c1',
+            clientName: 'Klient 1',
             name: 'Montaż stolarki',
+            status: 'in_progress',
+            location: 'Warszawa',
+            createdAt: '2026-09-01',
+            updatedAt: '2026-09-01',
             actualLaborHours: 35,
             actualLaborCost: 1575,
             settledLaborCost: 1200,
@@ -14,74 +22,83 @@ describe('Jobs Labor Aggregates - Complete Zeroing on Deletion', () => {
                     id: 'stage-1',
                     jobId: 'job-1',
                     name: 'Etap 1',
+                    type: 'podstawowy',
+                    status: 'w_toku',
+                    plannedRevenueNet: 5000,
                     actualLaborHours: 35,
-                    actualLaborCost: 1575
+                    actualLaborCost: 1575,
+                    billingType: 'hourly'
                 }
             ]
-        };
+        } as unknown as Job;
 
-        const savedJobs: any[] = [];
-        vi.spyOn(jobStorage, 'getAllJobs').mockResolvedValue([mockJob as any]);
-        vi.spyOn(jobStorage, 'saveJob').mockImplementation(async (j) => {
-            savedJobs.push(j);
-            return j.id;
-        });
+        // When all time entries are deleted, calculateLaborAggregates returns empty maps
+        const emptyJobAggregates = new Map();
+        const emptyStageAggregates = new Map();
 
-        // Simulate updateJobsLaborAggregates logic with empty maps (all time entries deleted)
-        const jobAggregates = new Map<string, { hours: number; cost: number; settledCost: number }>();
-        const stageAggregates = new Map<string, { hours: number; cost: number }>();
+        const { updatedJobs, changedJobs } = applyLaborAggregatesToJobs(
+            [mockJob],
+            emptyJobAggregates,
+            emptyStageAggregates
+        );
 
-        const allJobs = await jobStorage.getAllJobs();
-        await Promise.all(allJobs.map(async (job) => {
-            const jobAgg = jobAggregates.get(job.id);
-            let hasChanges = false;
-            let updatedJob = { ...job };
+        expect(changedJobs).toHaveLength(1);
+        expect(updatedJobs[0].actualLaborHours).toBe(0);
+        expect(updatedJobs[0].actualLaborCost).toBe(0);
+        expect(updatedJobs[0].settledLaborCost).toBe(0);
+        expect(updatedJobs[0].stages![0].actualLaborHours).toBe(0);
+        expect(updatedJobs[0].stages![0].actualLaborCost).toBe(0);
+    });
 
-            const targetHours = jobAgg ? jobAgg.hours : 0;
-            const targetCost = jobAgg ? jobAgg.cost : 0;
-            const targetSettledCost = jobAgg ? jobAgg.settledCost : 0;
+    it('calculateLaborAggregates accurately calculates labor and settled costs from approved time entries and contracts', () => {
+        const employees = [
+            { id: 'emp-1', type: 'employee', firstName: 'Jan', lastName: 'Kowalski', role: 'foreman', isActive: true, hourlyRate: 50 }
+        ] as unknown as Employee[];
 
-            if ((updatedJob.actualLaborHours || 0) !== targetHours ||
-                (updatedJob.actualLaborCost || 0) !== targetCost ||
-                (updatedJob.settledLaborCost || 0) !== targetSettledCost) {
-
-                updatedJob.actualLaborHours = targetHours;
-                updatedJob.actualLaborCost = targetCost;
-                updatedJob.settledLaborCost = targetSettledCost;
-                hasChanges = true;
+        const timeEntries = [
+            {
+                id: 'te-1',
+                employeeId: 'emp-1',
+                jobId: 'job-1',
+                jobCode: 'J-001',
+                jobName: 'Montaż stolarki',
+                stageId: 'stage-1',
+                stageName: 'Etap 1',
+                date: '2026-09-20',
+                hours: 8,
+                status: 'approved',
+                billingType: 'hourly',
+                settlementId: 'settle-1',
+                cost: 400,
+                createdAt: '2026-09-20',
+                updatedAt: '2026-09-20'
             }
+        ] as unknown as TimeEntry[];
 
-            if (updatedJob.stages) {
-                const updatedStages = updatedJob.stages.map(stage => {
-                    const stageAgg = stageAggregates.get(stage.id);
-                    const stageTargetHours = stageAgg ? stageAgg.hours : 0;
-                    const stageTargetCost = stageAgg ? stageAgg.cost : 0;
-                    if ((stage.actualLaborHours || 0) !== stageTargetHours ||
-                        (stage.actualLaborCost || 0) !== stageTargetCost) {
-                        hasChanges = true;
-                        return {
-                            ...stage,
-                            actualLaborHours: stageTargetHours,
-                            actualLaborCost: stageTargetCost
-                        };
-                    }
-                    return stage;
-                });
-                if (hasChanges) {
-                    updatedJob.stages = updatedStages;
-                }
+        const settlements = [
+            {
+                id: 'settle-1',
+                workerId: 'emp-1',
+                workerType: 'employee',
+                type: 'hourly',
+                status: 'closed', // closed => settled
+                totalAmount: 400,
+                periodFrom: '2026-09-01',
+                periodTo: '2026-09-30'
             }
+        ] as unknown as Settlement[];
 
-            if (hasChanges) {
-                await jobStorage.saveJob({ ...updatedJob, updatedAt: new Date().toISOString() });
-            }
-        }));
+        const { jobAggregates, stageAggregates } = calculateLaborAggregates(timeEntries, settlements, employees);
 
-        expect(savedJobs).toHaveLength(1);
-        expect(savedJobs[0].actualLaborHours).toBe(0);
-        expect(savedJobs[0].actualLaborCost).toBe(0);
-        expect(savedJobs[0].settledLaborCost).toBe(0);
-        expect(savedJobs[0].stages[0].actualLaborHours).toBe(0);
-        expect(savedJobs[0].stages[0].actualLaborCost).toBe(0);
+        const job1Agg = jobAggregates.get('job-1');
+        expect(job1Agg).toBeDefined();
+        expect(job1Agg?.hours).toBe(8);
+        expect(job1Agg?.cost).toBe(400);
+        expect(job1Agg?.settledCost).toBe(400);
+
+        const stage1Agg = stageAggregates.get('stage-1');
+        expect(stage1Agg).toBeDefined();
+        expect(stage1Agg?.hours).toBe(8);
+        expect(stage1Agg?.cost).toBe(400);
     });
 });

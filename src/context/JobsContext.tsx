@@ -1,3 +1,4 @@
+import { applyLaborAggregatesToJobs } from '../services/domain/laborAggregatesService';
 import { createContext, useContext, useState, useEffect, type ReactNode } from 'react';
 import type { Job, JobStage, JobStageItem, Offer, Construction } from '../models/types';
 import { v4 as uuidv4 } from 'uuid';
@@ -324,64 +325,17 @@ export function JobsProvider({ children }: { children: ReactNode }) {
     };
 
     // --- Site Log Management ---
-        const updateJobsLaborAggregates = async (
+            const updateJobsLaborAggregates = async (
         jobAggregates: Map<string, { hours: number; cost: number; settledCost: number }>,
         stageAggregates: Map<string, { hours: number; cost: number }>
     ) => {
-        // Bulk update optimization possible here, but for now iterate key map
-        // Better: iterate jobs, check if they exist in map
         const allJobs = await jobStorage.getAllJobs();
-        let anyChanges = false;
+        const { changedJobs } = applyLaborAggregatesToJobs(allJobs, jobAggregates, stageAggregates);
 
-        await Promise.all(allJobs.map(async (job) => {
-            const jobAgg = jobAggregates.get(job.id);
-            let hasChanges = false;
-            let updatedJob = { ...job };
-
-            // When entries exist, use their aggregate. When empty/deleted, zero out!
-            const targetHours = jobAgg ? jobAgg.hours : 0;
-            const targetCost = jobAgg ? jobAgg.cost : 0;
-            const targetSettledCost = jobAgg ? jobAgg.settledCost : 0;
-
-            if ((updatedJob.actualLaborHours || 0) !== targetHours ||
-                (updatedJob.actualLaborCost || 0) !== targetCost ||
-                (updatedJob.settledLaborCost || 0) !== targetSettledCost) {
-
-                updatedJob.actualLaborHours = targetHours;
-                updatedJob.actualLaborCost = targetCost;
-                updatedJob.settledLaborCost = targetSettledCost;
-                hasChanges = true;
-            }
-
-            // Update Stages - zero out if stage entries were removed
-            if (updatedJob.stages) {
-                const updatedStages = updatedJob.stages.map(stage => {
-                    const stageAgg = stageAggregates.get(stage.id);
-                    const stageTargetHours = stageAgg ? stageAgg.hours : 0;
-                    const stageTargetCost = stageAgg ? stageAgg.cost : 0;
-                    if ((stage.actualLaborHours || 0) !== stageTargetHours ||
-                        (stage.actualLaborCost || 0) !== stageTargetCost) {
-                        hasChanges = true;
-                        return {
-                            ...stage,
-                            actualLaborHours: stageTargetHours,
-                            actualLaborCost: stageTargetCost
-                        };
-                    }
-                    return stage;
-                });
-                if (hasChanges) {
-                    updatedJob.stages = updatedStages;
-                }
-            }
-
-            if (hasChanges) {
-                anyChanges = true;
-                await jobStorage.saveJob({ ...updatedJob, updatedAt: new Date().toISOString() });
-            }
-        }));
-
-        if (anyChanges) {
+        if (changedJobs.length > 0) {
+            await Promise.all(changedJobs.map(job =>
+                jobStorage.saveJob({ ...job, updatedAt: new Date().toISOString() })
+            ));
             await refreshJobs();
         }
     };
