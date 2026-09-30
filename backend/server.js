@@ -195,16 +195,27 @@ async function reconcileDuplicatesAndEnsureIndexes(database) {
                         const primaryDoc = fullDocs[0];
                         const duplicateDocs = fullDocs.slice(1);
 
-                        // 1. Snapshot / Quarantine: Archive discarded documents into _migration_quarantine
-                        const quarantineEntries = duplicateDocs.map(dup => ({
-                            quarantineId: new ObjectId().toString(),
-                            collectionName: col,
-                            documentId: group._id,
-                            originalDocId: dup._id,
-                            archivedAt: new Date().toISOString(),
-                            reason: 'duplicate_key_reconciliation',
-                            duplicateDoc: dup
-                        }));
+                        // 1. Snapshot / Quarantine: Archive pre-merge primary document AND discarded duplicates into _migration_quarantine
+                        const quarantineEntries = [
+                            {
+                                quarantineId: new ObjectId().toString(),
+                                collectionName: col,
+                                documentId: group._id,
+                                originalDocId: primaryDoc._id,
+                                archivedAt: new Date().toISOString(),
+                                reason: 'pre_merge_primary_snapshot',
+                                duplicateDoc: JSON.parse(JSON.stringify(primaryDoc))
+                            },
+                            ...duplicateDocs.map(dup => ({
+                                quarantineId: new ObjectId().toString(),
+                                collectionName: col,
+                                documentId: group._id,
+                                originalDocId: dup._id,
+                                archivedAt: new Date().toISOString(),
+                                reason: 'duplicate_key_reconciliation',
+                                duplicateDoc: dup
+                            }))
+                        ];
 
                         const quarantineCol = database.collection('_migration_quarantine');
                         if (quarantineCol && typeof quarantineCol.insertMany === 'function' && quarantineEntries.length > 0) {
@@ -583,6 +594,24 @@ const createRouter = (collectionName, options = {}) => {
                 }
                 if (items.length > 1000) {
                     return res.status(400).json({ error: 'Maksymalny rozmiar paczki importu to 1000 rekordów.' });
+                }
+
+                // Guard against duplicate IDs within the same batch (non-deterministic bulkWrite prevention)
+                const seenBatchIds = new Set();
+                const duplicateBatchIds = new Set();
+                for (const item of items) {
+                    if (item && item.id) {
+                        if (seenBatchIds.has(item.id)) {
+                            duplicateBatchIds.add(item.id);
+                        } else {
+                            seenBatchIds.add(item.id);
+                        }
+                    }
+                }
+                if (duplicateBatchIds.size > 0) {
+                    return res.status(400).json({
+                        error: `Wykryto zduplikowane identyfikatory w paczce importowej: [${Array.from(duplicateBatchIds).join(', ')}]. Każda pozycja w paczce musi posiadać unikalny identyfikator 'id'.`
+                    });
                 }
 
                 const now = new Date().toISOString();
@@ -1233,7 +1262,7 @@ async function validateAndNormalizeTimeEntryDoc(doc, { db, user, isBatch = false
         }
     }
 
-    // Shield #3 + FIX #2: UTC date normalization + Time Travel guard + Invalid Date check
+    // Shield #3 + FIX #2: UTC date normalization + Time Travel guard + Calendar validation
     if (doc.date) {
         let entryDate;
         const rawDate = String(doc.date);
@@ -1241,9 +1270,23 @@ async function validateAndNormalizeTimeEntryDoc(doc, { db, user, isBatch = false
         if (/^\d{4}-\d{2}-\d{2}$/.test(rawDate)) {
             const [year, month, day] = rawDate.split('-').map(Number);
             entryDate = new Date(Date.UTC(year, month - 1, day));
+            // Strict calendar validation (rejects invalid calendar days like 2026-02-31, 2025-02-29, 2026-04-31)
+            if (entryDate.getUTCFullYear() !== year || entryDate.getUTCMonth() !== month - 1 || entryDate.getUTCDate() !== day) {
+                return { error: `Nieprawidłowa data kalendarzowa: '${rawDate}'. Taki dzień nie istnieje w kalendarzu.` };
+            }
             doc.date = entryDate.toISOString();
         } else {
             entryDate = new Date(rawDate);
+            const isoMatch = rawDate.match(/^(\d{4})-(\d{2})-(\d{2})/);
+            if (isoMatch) {
+                const year = Number(isoMatch[1]);
+                const month = Number(isoMatch[2]);
+                const day = Number(isoMatch[3]);
+                const checkDate = new Date(Date.UTC(year, month - 1, day));
+                if (checkDate.getUTCFullYear() !== year || checkDate.getUTCMonth() !== month - 1 || checkDate.getUTCDate() !== day) {
+                    return { error: `Nieprawidłowa data kalendarzowa: '${rawDate}'. Taki dzień nie istnieje w kalendarzu.` };
+                }
+            }
         }
 
         if (isNaN(entryDate.getTime())) {
@@ -1342,6 +1385,34 @@ async function validateTimeEntryBatch(req, res, next) {
     const isWorker = req.user && (req.user.role === 'worker' || req.user.role === 'foreman');
     const userEmpId = req.user?.id || req.user?._id;
 
+    // Security check 1: Worker/foreman cannot overwrite or hijack an existing entry of another employee
+    if (isWorker && db && typeof db.collection === 'function') {
+        const itemIds = items.map(it => it && it.id).filter(Boolean);
+        if (itemIds.length > 0) {
+            try {
+                const existingEntries = await db.collection('time-entries').find(
+                    { id: { $in: itemIds } },
+                    { projection: { id: 1, employeeId: 1, employee_id: 1 } }
+                ).toArray();
+
+                for (const existing of existingEntries) {
+                    const existingEmpId = existing.employeeId || existing.employee_id;
+                    if (existingEmpId && String(existingEmpId) !== String(userEmpId)) {
+                        return res.status(403).json({
+                            error: `Brak uprawnień: Nie można zmodyfikować ani przejąć istniejącego wpisu innego pracownika (id: '${existing.id}', właściciel: '${existingEmpId}').`
+                        });
+                    }
+                }
+            } catch (err) {
+                console.error('[validateTimeEntryBatch] Ownership check error:', err.message);
+            }
+        }
+    }
+
+    const WORKER_ALLOWED_STATUSES = ['draft', 'submitted'];
+    const FOREMAN_ALLOWED_STATUSES = ['draft', 'submitted', 'foreman_approved'];
+    const allowedStatuses = req.user?.role === 'foreman' ? FOREMAN_ALLOWED_STATUSES : WORKER_ALLOWED_STATUSES;
+
     for (let i = 0; i < items.length; i++) {
         const item = items[i];
         if (!item || typeof item !== 'object') {
@@ -1350,14 +1421,15 @@ async function validateTimeEntryBatch(req, res, next) {
 
         const effectiveEmpId = item.employeeId || item.employee_id;
 
-        // Security check: workers may ONLY import entries for their own ID and cannot self-approve
+        // Security check 2: Worker may ONLY import entries for their own ID and only with allowed statuses
         if (isWorker) {
             if (effectiveEmpId && String(effectiveEmpId) !== String(userEmpId)) {
                 return res.status(403).json({
                     error: `Brak uprawnień: Pracownik może importować wpisy wyłącznie dla własnego identyfikatora (${userEmpId}). Wykryto: ${effectiveEmpId}.`
                 });
             }
-            if (item.status === 'approved' || item.status === 'settled') {
+            // Strict status whitelist: worker cannot set approved, admin_approved, settled, etc.
+            if (item.status && !allowedStatuses.includes(item.status)) {
                 item.status = 'submitted';
             }
         }
@@ -1383,6 +1455,40 @@ async function validateTimeEntry(req, res, next) {
     if (req.method !== 'POST' && req.method !== 'PATCH') return next();
     if (req.path === '/batch-import' || req.url === '/batch-import' || req.originalUrl?.endsWith('/batch-import')) {
         return validateTimeEntryBatch(req, res, next);
+    }
+
+    const isWorker = req.user && (req.user.role === 'worker' || req.user.role === 'foreman');
+    const userEmpId = req.user?.id || req.user?._id;
+
+    if (isWorker) {
+        const WORKER_ALLOWED_STATUSES = ['draft', 'submitted'];
+        const FOREMAN_ALLOWED_STATUSES = ['draft', 'submitted', 'foreman_approved'];
+        const allowedStatuses = req.user?.role === 'foreman' ? FOREMAN_ALLOWED_STATUSES : WORKER_ALLOWED_STATUSES;
+
+        if (req.body && req.body.status && !allowedStatuses.includes(req.body.status)) {
+            req.body.status = 'submitted';
+        }
+
+        // For PATCH/POST targeting an ID: verify ownership of existing record
+        const targetId = req.params?.id || req.body?.id;
+        if (targetId && db && typeof db.collection === 'function') {
+            try {
+                const existing = await db.collection('time-entries').findOne(
+                    { id: targetId },
+                    { projection: { employeeId: 1, employee_id: 1 } }
+                );
+                if (existing) {
+                    const existingEmpId = existing.employeeId || existing.employee_id;
+                    if (existingEmpId && String(existingEmpId) !== String(userEmpId)) {
+                        return res.status(403).json({
+                            error: 'Brak uprawnień: Nie można modyfikować wpisu innego pracownika.'
+                        });
+                    }
+                }
+            } catch (err) {
+                console.error('[validateTimeEntry] Single entry ownership check error:', err.message);
+            }
+        }
     }
 
     const valError = await validateAndNormalizeTimeEntryDoc(req.body, {

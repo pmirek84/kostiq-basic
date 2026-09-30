@@ -30,6 +30,14 @@ test('Backend Atomic Duplicate Prevention & Batch Import', async (t) => {
             }
             return null;
         },
+        find: (query) => ({
+            toArray: async () => {
+                if (query && query.id && query.id.$in) {
+                    return query.id.$in.map(id => store.get(id)).filter(Boolean);
+                }
+                return Array.from(store.values());
+            }
+        }),
         updateOne: async (filter, update) => {
             const id = filter.id;
             const doc = store.get(id);
@@ -270,6 +278,83 @@ test('Backend Atomic Duplicate Prevention & Batch Import', async (t) => {
         assert.match(res.body.error, /zbyt stara/);
     });
 
+    await t.test('POST /api/clients/batch-import rejects duplicate IDs within a single batch with 400', async () => {
+        const payload = {
+            items: [
+                { id: 'dup-batch-item', name: 'Version A' },
+                { id: 'dup-batch-item', name: 'Version B' }
+            ]
+        };
+
+        const res = await request(app)
+            .post('/api/clients/batch-import')
+            .send(payload);
+
+        assert.strictEqual(res.status, 400);
+        assert.match(res.body.error, /Wykryto zduplikowane identyfikatory w paczce importowej/);
+    });
+
+    await t.test('POST /api/time-entries/batch-import rejects worker attempting to hijack existing entry of another employee with 403', async () => {
+        const todayStr = new Date().toISOString().slice(0, 10);
+        // Seed existing entry owned by another employee
+        store.set('te-owned-by-other', {
+            id: 'te-owned-by-other',
+            employeeId: 'other-emp-99',
+            jobId: 'job-1',
+            hours: 4,
+            date: todayStr,
+            status: 'submitted'
+        });
+
+        // Worker attempts to overwrite with its own employeeId
+        const payload = {
+            items: [
+                { id: 'te-owned-by-other', employeeId: 'test-user', jobId: 'job-1', hours: 8, date: todayStr }
+            ]
+        };
+
+        const res = await request(app)
+            .post('/api/time-entries/batch-import')
+            .set('x-test-role', 'worker')
+            .send(payload);
+
+        assert.strictEqual(res.status, 403);
+        assert.match(res.body.error, /Nie można zmodyfikować ani przejąć istniejącego wpisu innego pracownika/);
+    });
+
+    await t.test('POST /api/time-entries/batch-import resets worker status admin_approved to submitted', async () => {
+        const todayStr = new Date().toISOString().slice(0, 10);
+        const payload = {
+            items: [
+                { id: 'te-worker-admin-app', employeeId: 'test-user', jobId: 'job-1', hours: 6, date: todayStr, status: 'admin_approved' }
+            ]
+        };
+
+        const res = await request(app)
+            .post('/api/time-entries/batch-import')
+            .set('x-test-role', 'worker')
+            .send(payload);
+
+        assert.strictEqual(res.status, 200);
+        const stored = store.get('te-worker-admin-app');
+        assert.strictEqual(stored.status, 'submitted');
+    });
+
+    await t.test('POST /api/time-entries/batch-import rejects invalid calendar date (e.g. 2026-02-31) with 400', async () => {
+        const payload = {
+            items: [
+                { id: 'te-cal-inv', employeeId: 'test-user', jobId: 'job-1', hours: 4, date: '2026-02-31' }
+            ]
+        };
+
+        const res = await request(app)
+            .post('/api/time-entries/batch-import')
+            .send(payload);
+
+        assert.strictEqual(res.status, 400);
+        assert.match(res.body.error, /Nieprawidłowa data kalendarzowa/);
+    });
+
     await t.test('POST /api/time-entries/batch-import resets worker self-approved status to submitted', async () => {
         const todayStr = new Date().toISOString().slice(0, 10);
         const payload = {
@@ -473,9 +558,11 @@ test('Database Indexing & Migration: Reconciling Duplicates & Verification', asy
 
         await reconcileDuplicatesAndEnsureIndexes(testDb);
 
-        // 1. Verify duplicates were backed up to quarantine
-        assert.strictEqual(quarantinedDocs.length, 2);
+        // 1. Verify all versions (primary snapshot + duplicates) were backed up to quarantine
+        assert.strictEqual(quarantinedDocs.length, 3);
         assert.strictEqual(quarantinedDocs[0].documentId, 'dup-id-1');
+        assert.ok(quarantinedDocs.some(d => d.reason === 'pre_merge_primary_snapshot'));
+        assert.ok(quarantinedDocs.some(d => d.reason === 'duplicate_key_reconciliation'));
 
         // 2. Verify non-destructive field merge
         assert.ok(updatedFields);
