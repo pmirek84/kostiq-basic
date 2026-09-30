@@ -31,8 +31,12 @@ export const ReportsView = () => {
             }
 
             // Category Aggregation
-            if (entry.type === 'employee') empCost += cost;
-            else if (entry.type === 'subcontractor') subCost += cost;
+            const isSub = entry.workerType ? entry.workerType === 'subcontractor' : entry.type === 'subcontractor';
+            if (isSub) {
+                subCost += cost;
+            } else {
+                empCost += cost;
+            }
         });
 
         // Format for Chart - Projects

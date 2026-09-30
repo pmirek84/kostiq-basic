@@ -1800,7 +1800,9 @@ const {
     WORKER_ALLOWED_TIME_ENTRY_STATUSES,
     FOREMAN_ALLOWED_TIME_ENTRY_STATUSES,
     BILLING_TYPES,
-    TIME_ENTRY_TYPES
+    TIME_ENTRY_TYPES,
+    ACTIVITY_TYPES,
+    WORKER_TYPES,
 } = require('../shared/contracts/index.cjs');
 
 const ajv = new Ajv({ allErrors: true, coerceTypes: false });
@@ -1850,7 +1852,13 @@ async function validateAndNormalizeTimeEntryDoc(doc, { db, user, isBatch = false
                 return { error: `Nieprawidłowy typ rozliczenia (billingType): '${doc.billingType}'. Dozwolone: ${BILLING_TYPES.join(', ')}.` };
             }
             if (firstErr.instancePath.includes('type')) {
-                return { error: `Nieprawidłowy typ wpisu (type): '${doc.type}'. Dozwolone: ${TIME_ENTRY_TYPES.join(', ')}.` };
+                return { error: 'Nieprawidłowy typ wpisu (type): \'' + doc.type + '\'. Dozwolone: ' + TIME_ENTRY_TYPES.join(', ') + '.' };
+            }
+            if (firstErr.instancePath.includes('activityType')) {
+                return { error: 'Nieprawidłowy rodzaj aktywności (activityType): \'' + doc.activityType + '\'. Dozwolone: ' + ACTIVITY_TYPES.join(', ') + '.' };
+            }
+            if (firstErr.instancePath.includes('workerType')) {
+                return { error: 'Nieprawidłowy rodzaj wykonawcy (workerType): \'' + doc.workerType + '\'. Dozwolone: ' + WORKER_TYPES.join(', ') + '.' };
             }
         }
         const errorDetails = ajv.errorsText(schemaValidator.errors, { dataVar: 'payload', separator: '; ' });
@@ -1958,21 +1966,34 @@ async function validateAndNormalizeTimeEntryDoc(doc, { db, user, isBatch = false
         }
     }
 
-    // Block time-entry on closed/cancelled jobs (on creation, or when reassigning jobId)
-    if ((!isPatch || doc.jobId !== undefined) && db && effectiveJobId && typeof db.collection === 'function') {
+    // Block time-entry on missing or closed/cancelled jobs (on creation, or when reassigning jobId)
+    if ((!isPatch || doc.jobId !== undefined || doc.project_id !== undefined) && db && effectiveJobId && typeof db.collection === 'function') {
+        let job = null;
         try {
-            const job = await db.collection('jobs').findOne(
+            job = await db.collection('jobs').findOne(
                 { $or: [{ id: effectiveJobId }, { _id: effectiveJobId }] },
                 { projection: { status: 1 } }
             );
-            if (job && (job.status === 'done' || job.status === 'cancelled')) {
-                return {
-                    status: 409,
-                    error: `Zlecenie jest już ${job.status === 'done' ? 'zakończone' : 'anulowane'}. Nie można dodawać wpisów godzinowych.`
-                };
-            }
         } catch (e) {
             console.error('[validateTimeEntry] DB check error:', e.message);
+            return {
+                status: 500,
+                error: 'Błąd podczas weryfikacji zlecenia w bazie danych: ' + e.message
+            };
+        }
+
+        if (!job) {
+            return {
+                status: 404,
+                error: 'Zlecenie o identyfikatorze \'' + effectiveJobId + '\' nie zostało odnalezione w bazie danych.'
+            };
+        }
+
+        if (job.status === 'done' || job.status === 'cancelled') {
+            return {
+                status: 409,
+                error: 'Zlecenie jest już ' + (job.status === 'done' ? 'zakończone' : 'anulowane') + '. Nie można dodawać wpisów godzinowych.'
+            };
         }
     }
 
@@ -2016,6 +2037,27 @@ async function validateAndNormalizeTimeEntryDoc(doc, { db, user, isBatch = false
         }
     }
 
+    // Authoritative workerType assignment
+    if (emp) {
+        doc.workerType = 'employee';
+    } else if (sub) {
+        doc.workerType = 'subcontractor';
+    } else if (existingEntry?.workerType) {
+        doc.workerType = existingEntry.workerType;
+    }
+
+    // Activity type defaulting & backwards compatibility
+    if (doc.type && ['drive', 'work', 'other'].includes(doc.type) && !doc.activityType) {
+        doc.activityType = doc.type;
+    } else if (doc.activityType && !doc.type) {
+        doc.type = doc.activityType;
+    } else if (!doc.activityType) {
+        doc.activityType = existingEntry?.activityType || 'work';
+    }
+    if (!doc.type) {
+        doc.type = doc.workerType || doc.activityType || 'work';
+    }
+
     // Subcontractor settlementType mapping & mismatch validation
     const SUB_SETTLEMENT_TO_BILLING_TYPES = {
         'godzina': ['hourly'],
@@ -2041,7 +2083,20 @@ async function validateAndNormalizeTimeEntryDoc(doc, { db, user, isBatch = false
         if (allowedBillingTypes && !allowedBillingTypes.includes(effectiveBillingType)) {
             return {
                 status: 400,
-                error: `Nieprawidłowy typ rozliczenia '${effectiveBillingType}' dla podwykonawcy '${effectiveEmpId}' (zdefiniowany typ rozliczenia: '${sub.settlementType}', dopuszczalne typy: ${allowedBillingTypes.join(', ')}).`
+                error: 'Nieprawidłowy typ rozliczenia \'' + effectiveBillingType + '\' dla podwykonawcy \'' + effectiveEmpId + '\' (zdefiniowany typ rozliczenia: \'' + sub.settlementType + '\', dopuszczalne typy: ' + allowedBillingTypes.join(', ') + ').'
+            };
+        }
+    }
+
+    const isWorkerUser = user && (user.role === 'worker' || user.role === 'foreman');
+
+    // Employee allowed billing types enforcement
+    if (emp) {
+        const EMPLOYEE_ALLOWED_BILLING = ['hourly', 'daily', 'project'];
+        if (isWorkerUser && !EMPLOYEE_ALLOWED_BILLING.includes(effectiveBillingType)) {
+            return {
+                status: 400,
+                error: 'Typ rozliczenia \'' + effectiveBillingType + '\' nie jest dozwolony dla pracownika. Dopuszczalne: ' + EMPLOYEE_ALLOWED_BILLING.join(', ') + '.'
             };
         }
     }
@@ -2050,7 +2105,6 @@ async function validateAndNormalizeTimeEntryDoc(doc, { db, user, isBatch = false
         ? Number(doc.hours)
         : (existingEntry?.hours !== undefined ? Number(existingEntry.hours) : 0);
 
-    const isWorkerUser = user && (user.role === 'worker' || user.role === 'foreman');
     const shouldRecalculateCost = !isPatch
         || doc.hours !== undefined
         || doc.quantity !== undefined
@@ -2111,8 +2165,12 @@ async function validateAndNormalizeTimeEntryDoc(doc, { db, user, isBatch = false
                 doc.cost = toCurrency(toCents(fixedRate));
                 doc.rate = fixedRate;
             } else {
-                if (doc.cost === undefined && existingEntry?.cost !== undefined) {
+                if (doc.cost !== undefined) {
+                    doc.cost = toCurrency(toCents(Number(doc.cost) || 0));
+                } else if (existingEntry?.cost !== undefined) {
                     doc.cost = existingEntry.cost;
+                } else {
+                    doc.cost = 0;
                 }
             }
         }
@@ -3064,6 +3122,8 @@ module.exports = {
     FOREMAN_ALLOWED_TIME_ENTRY_STATUSES,
     BILLING_TYPES,
     TIME_ENTRY_TYPES,
+    ACTIVITY_TYPES,
+    WORKER_TYPES,
     validateTimeEntryPostSchema,
     validateTimeEntryPatchSchema,
     validateTimeEntryBatchSchema,

@@ -80,6 +80,14 @@ test('Backend Atomic Duplicate Prevention & Batch Import', async (t) => {
                     }
                 };
             }
+            if (colName === 'jobs') {
+                return {
+                    findOne: async (query) => {
+                        const id = query.$or ? query.$or[0].id : query.id;
+                        return { id: id || 'job-202', status: 'in_progress' };
+                    }
+                };
+            }
             if (colName === 'employees') {
                 return {
                     findOne: async (query) => {

@@ -38,7 +38,23 @@ function createVerifyToken(getDb) {
     return async function verifyTokenWithDBCheck(req, res, next) {
         // Test mode bypass — keeps unit tests fast
         if (process.env.NODE_ENV === 'test') {
-            req.user = { id: 'test-user', email: 'test@test.com', role: req.headers['x-test-role'] || 'admin' };
+            const authHeader = req.headers.authorization;
+            let tokenRole = null;
+            let tokenId = null;
+            if (authHeader && authHeader.startsWith('Bearer ')) {
+                try {
+                    const decoded = jwt.decode(authHeader.split(' ')[1]);
+                    if (decoded) {
+                        tokenRole = decoded.role;
+                        tokenId = decoded.id;
+                    }
+                } catch (_) {}
+            }
+            req.user = {
+                id: tokenId || req.headers['x-test-id'] || 'test-user',
+                email: 'test@test.com',
+                role: req.headers['x-test-role'] || tokenRole || 'admin'
+            };
             return next();
         }
 

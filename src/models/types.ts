@@ -2,20 +2,26 @@ import {
     type TimeEntryStatus,
     type BillingType,
     type TimeEntryType,
+    type ActivityType,
+    type WorkerType,
     TIME_ENTRY_STATUSES,
     WORKER_ALLOWED_TIME_ENTRY_STATUSES,
     FOREMAN_ALLOWED_TIME_ENTRY_STATUSES,
     BILLING_TYPES,
-    TIME_ENTRY_TYPES
+    TIME_ENTRY_TYPES,
+    ACTIVITY_TYPES,
+    WORKER_TYPES
 } from '../../shared/contracts';
 
-export type { TimeEntryStatus, BillingType, TimeEntryType };
+export type { TimeEntryStatus, BillingType, TimeEntryType, ActivityType, WorkerType };
 export {
     TIME_ENTRY_STATUSES,
     WORKER_ALLOWED_TIME_ENTRY_STATUSES,
     FOREMAN_ALLOWED_TIME_ENTRY_STATUSES,
     BILLING_TYPES,
-    TIME_ENTRY_TYPES
+    TIME_ENTRY_TYPES,
+    ACTIVITY_TYPES,
+    WORKER_TYPES
 };
 
 export type ConstructionType =
@@ -359,7 +365,6 @@ export interface Crew {
 
 // TimeEntryType is derived and re-exported from shared/contracts above
 
-export type WorkerType = 'employee' | 'subcontractor';
 export type SettlementMethod = 'hourly' | 'fixed' | 'per_m2' | 'per_mb';
 
 export interface WorkerBase {
@@ -443,6 +448,8 @@ export interface TimeEntry {
 
     // Legacy fields specific to simple version
     type?: TimeEntryType;
+    activityType?: ActivityType;
+    workerType?: WorkerType;
     workType?: string;
     quantity?: number; // for non-hourly billing if needed
     rate?: number;

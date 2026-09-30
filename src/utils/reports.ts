@@ -66,9 +66,10 @@ export function buildEmployeePeriodReport(params: BuildEmployeeReportParams): Em
         }
 
         const rec = jobsByCode.get(e.jobCode)!;
-        if (e.type === 'work') {
+        const act = e.activityType || e.type;
+        if (act === 'work') {
             rec.hoursWork += e.hours;
-        } else if (e.type === 'drive') {
+        } else if (act === 'drive') {
             rec.hoursDrive += e.hours;
         }
     }

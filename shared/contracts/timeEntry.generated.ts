@@ -18,6 +18,8 @@ export type WorkerAllowedStatus = 'draft' | 'pending' | 'submitted';
 export type ForemanAllowedStatus = 'draft' | 'pending' | 'submitted' | 'foreman_approved' | 'foreman_rejected';
 export type BillingType = 'hourly' | 'daily' | 'project' | 'fixed' | 'm2' | 'mb';
 export type TimeEntryType = 'drive' | 'work' | 'other' | 'employee' | 'subcontractor';
+export type ActivityType = 'drive' | 'work' | 'other';
+export type WorkerType = 'employee' | 'subcontractor';
 export type CanonicalTimeEntryPostPayload = TimeEntryPostBase & {
   employeeId: string;
   jobId: string;
@@ -61,6 +63,8 @@ export interface TimeEntryRoot {
   TimeEntryPatchPayload?: TimeEntryPatchPayload;
   TimeEntryBatchImportPayload?: TimeEntryBatchImportPayload;
   TimeEntryBatchImportResult?: TimeEntryBatchImportResult;
+  ActivityType?: ActivityType;
+  WorkerType?: WorkerType;
   [k: string]: unknown;
 }
 export interface TimeEntry {
@@ -92,6 +96,8 @@ export interface TimeEntry {
   approved?: boolean;
   createdAt: string;
   updatedAt: string;
+  activityType?: ActivityType;
+  workerType?: WorkerType;
   [k: string]: unknown;
 }
 export interface TimeEntryPostBase {
@@ -117,6 +123,8 @@ export interface TimeEntryPostBase {
   workType?: string;
   quantity?: number;
   rate?: number;
+  activityType?: ActivityType;
+  workerType?: WorkerType;
   [k: string]: unknown;
 }
 export interface TimeEntryPatchPayload {
@@ -147,6 +155,8 @@ export interface TimeEntryPatchPayload {
   quantity?: number;
   rate?: number;
   _lastUpdatedAt?: string;
+  activityType?: ActivityType;
+  workerType?: WorkerType;
   [k: string]: unknown;
 }
 export interface TimeEntryBatchImportPayload {

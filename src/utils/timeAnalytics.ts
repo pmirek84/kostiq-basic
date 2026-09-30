@@ -24,9 +24,10 @@ export function summarizeTimeForJob(jobCode: string, entries: TimeEntry[]): JobT
             map.set(name, { work: 0, drive: 0 });
         }
         const rec = map.get(name)!;
-        if (e.type === 'work') {
+        const act = e.activityType || e.type;
+        if (act === 'work') {
             rec.work += e.hours;
-        } else if (e.type === 'drive') {
+        } else if (act === 'drive') {
             rec.drive += e.hours;
         }
     }

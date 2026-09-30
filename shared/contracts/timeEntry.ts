@@ -6,7 +6,9 @@ import type {
   WorkerAllowedStatus,
   ForemanAllowedStatus,
   BillingType,
-  TimeEntryType
+  TimeEntryType,
+  ActivityType,
+  WorkerType
 } from './timeEntry.generated';
 
 export const TIME_ENTRY_SCHEMA = schema;
@@ -50,6 +52,17 @@ export const TIME_ENTRY_TYPES: readonly TimeEntryType[] = Object.freeze([
   'drive',
   'work',
   'other',
+  'employee',
+  'subcontractor'
+]);
+
+export const ACTIVITY_TYPES: readonly ActivityType[] = Object.freeze([
+  'drive',
+  'work',
+  'other'
+]);
+
+export const WORKER_TYPES: readonly WorkerType[] = Object.freeze([
   'employee',
   'subcontractor'
 ]);

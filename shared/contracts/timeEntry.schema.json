@@ -181,6 +181,12 @@
         },
         "updatedAt": {
           "type": "string"
+        },
+        "activityType": {
+          "$ref": "#/definitions/ActivityType"
+        },
+        "workerType": {
+          "$ref": "#/definitions/WorkerType"
         }
       },
       "additionalProperties": true
@@ -275,6 +281,12 @@
         },
         "rate": {
           "type": "number"
+        },
+        "activityType": {
+          "$ref": "#/definitions/ActivityType"
+        },
+        "workerType": {
+          "$ref": "#/definitions/WorkerType"
         }
       },
       "additionalProperties": true
@@ -493,6 +505,12 @@
         },
         "_lastUpdatedAt": {
           "type": "string"
+        },
+        "activityType": {
+          "$ref": "#/definitions/ActivityType"
+        },
+        "workerType": {
+          "$ref": "#/definitions/WorkerType"
         }
       },
       "additionalProperties": true
@@ -571,6 +589,21 @@
         }
       },
       "additionalProperties": true
+    },
+    "ActivityType": {
+      "type": "string",
+      "enum": [
+        "drive",
+        "work",
+        "other"
+      ]
+    },
+    "WorkerType": {
+      "type": "string",
+      "enum": [
+        "employee",
+        "subcontractor"
+      ]
     }
   }
 }

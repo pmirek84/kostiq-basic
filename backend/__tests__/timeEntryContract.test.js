@@ -14,6 +14,8 @@ const {
     FOREMAN_ALLOWED_TIME_ENTRY_STATUSES,
     BILLING_TYPES,
     TIME_ENTRY_TYPES,
+    ACTIVITY_TYPES,
+    WORKER_TYPES,
     validateTimeEntryPostSchema,
     validateTimeEntryPatchSchema,
     validateTimeEntryBatchSchema
@@ -81,7 +83,10 @@ test('Shared Contracts: TimeEntry JSON Schema, Statuses and Payload Conformity',
     const mockJobsColl = {
         findOne: async (f) => {
             const id = f.$or ? f.$or[0].id : f.id;
+            if (id === 'job-db-error') throw new Error('Database job query failure');
+            if (id === 'job-not-found' || id === 'j' || id === 'non-existent-job') return null;
             if (id === 'job-closed') return { id: 'job-closed', status: 'done' };
+            if (id === 'job-cancelled') return { id: 'job-cancelled', status: 'cancelled' };
             return { id: id || 'job-1', status: 'in_progress' };
         }
     };
@@ -115,7 +120,7 @@ test('Shared Contracts: TimeEntry JSON Schema, Statuses and Payload Conformity',
                 return { id: 'sub-mb', rate: 45, settlementType: 'mb' };
             }
             if (id === 'sub-ryczalt') {
-                return { id: 'sub-ryczalt', rate: 1500, settlementType: 'rycza?t' };
+                return { id: 'sub-ryczalt', rate: 1500, settlementType: 'ryczałt' };
             }
             return null;
         }
@@ -144,6 +149,8 @@ test('Shared Contracts: TimeEntry JSON Schema, Statuses and Payload Conformity',
         assert.deepStrictEqual(FOREMAN_ALLOWED_TIME_ENTRY_STATUSES, ['draft', 'pending', 'submitted', 'foreman_approved', 'foreman_rejected']);
         assert.deepStrictEqual(BILLING_TYPES, ['hourly', 'daily', 'project', 'fixed', 'm2', 'mb']);
         assert.deepStrictEqual(TIME_ENTRY_TYPES, ['drive', 'work', 'other', 'employee', 'subcontractor']);
+        assert.deepStrictEqual(ACTIVITY_TYPES, ['drive', 'work', 'other']);
+        assert.deepStrictEqual(WORKER_TYPES, ['employee', 'subcontractor']);
     });
 
     await t.test('every single one of the 9 statuses is accepted when submitted by admin', async () => {
@@ -569,23 +576,38 @@ test('Shared Contracts: TimeEntry JSON Schema, Statuses and Payload Conformity',
         assert.strictEqual(storedSubHourly.cost, 1000, 'Subcontractor hourly cost must be 4 * 250 = 1000 PLN');
         assert.strictEqual(storedSubHourly.hourlyRate, 250);
 
-        // 2. Rycza?t subcontractor entry: sub-ryczalt has rate 1500 PLN and settlementType 'rycza?t'
-        const resSubProject = await request(app)
+        // 2. Ryczałt subcontractor entry: sub-ryczalt has rate 1500 PLN and settlementType 'ryczałt'
+        // Test defaulting: omitted billingType automatically defaults to 'project'
+        const resSubProjectDefault = await request(app)
             .post('/api/time-entries')
-            .set('Authorization', `Bearer ${adminToken}`)
+            .set('Authorization', 'Bearer ' + adminToken)
             .send({
-                id: 'entry-sub-project',
+                id: 'entry-sub-project-default',
                 employeeId: 'sub-ryczalt',
                 jobId: 'job-1',
-                type: 'subcontractor',
-                billingType: 'project',
                 hours: 0
             });
 
-        assert.strictEqual(resSubProject.status, 201);
-        const storedSubProject = store.get('entry-sub-project');
-        assert.strictEqual(storedSubProject.cost, 1500, 'Subcontractor project cost must be 1500 PLN');
-        assert.strictEqual(storedSubProject.hourlyRate, 1500);
+        assert.strictEqual(resSubProjectDefault.status, 201);
+        const storedSubProjectDefault = store.get('entry-sub-project-default');
+        assert.strictEqual(storedSubProjectDefault.billingType, 'project', 'Omitting billingType for ryczałt sub must default to project');
+        assert.strictEqual(storedSubProjectDefault.cost, 1500, 'Subcontractor project cost must be 1500 PLN');
+        assert.strictEqual(storedSubProjectDefault.hourlyRate, 1500);
+        assert.strictEqual(storedSubProjectDefault.workerType, 'subcontractor');
+
+        // Submitting mismatched billingType (e.g. hourly for ryczałt sub) must be rejected with 400
+        const resSubProjectMismatch = await request(app)
+            .post('/api/time-entries')
+            .set('Authorization', 'Bearer ' + adminToken)
+            .send({
+                id: 'entry-sub-project-mismatch',
+                employeeId: 'sub-ryczalt',
+                jobId: 'job-1',
+                billingType: 'hourly',
+                hours: 4
+            });
+        assert.strictEqual(resSubProjectMismatch.status, 400);
+        assert.match(resSubProjectMismatch.body.error, /typ rozliczenia 'hourly'/);
 
         // 3. m2 subcontractor entry: sub-m2 has rate 80 PLN/m2 and settlementType 'm2'
         const resSubM2 = await request(app)
@@ -693,6 +715,139 @@ test('Shared Contracts: TimeEntry JSON Schema, Statuses and Payload Conformity',
         assert.strictEqual(storedAfterRate.rate, 100);
         assert.strictEqual(storedAfterRate.cost, 2000, 'PATCH rate 100 must recalculate cost to 2000 (20 * 100)');
         assert.strictEqual(resPatchRate.body.cost, 2000);
+    });
+
+    await t.test('[P1] Worker is forbidden from choosing m2, mb, or fixed billing types to fabricate costs', async () => {
+        // 1. Worker POST with m2, quantity 10, rate 999 -> MUST return 400
+        const resWorkerM2 = await request(app)
+            .post('/api/time-entries')
+            .set('Authorization', 'Bearer ' + workerToken)
+            .send({
+                id: 'worker-forged-m2',
+                employeeId: 'test-user',
+                jobId: 'job-1',
+                billingType: 'm2',
+                quantity: 10,
+                rate: 999
+            });
+        assert.strictEqual(resWorkerM2.status, 400);
+        assert.match(resWorkerM2.body.error, /Typ rozliczenia 'm2' nie jest dozwolony dla pracownika/);
+        assert.strictEqual(store.has('worker-forged-m2'), false, 'Forged m2 entry must NOT be saved');
+
+        // 2. Worker POST with fixed, cost 999999 -> MUST return 400
+        const resWorkerFixed = await request(app)
+            .post('/api/time-entries')
+            .set('Authorization', 'Bearer ' + workerToken)
+            .send({
+                id: 'worker-forged-fixed',
+                employeeId: 'test-user',
+                jobId: 'job-1',
+                billingType: 'fixed',
+                cost: 999999
+            });
+        assert.strictEqual(resWorkerFixed.status, 400);
+        assert.match(resWorkerFixed.body.error, /Typ rozliczenia 'fixed' nie jest dozwolony dla pracownika/);
+        assert.strictEqual(store.has('worker-forged-fixed'), false, 'Forged fixed entry must NOT be saved');
+
+        // 3. Worker POST with mb -> MUST return 400
+        const resWorkerMb = await request(app)
+            .post('/api/time-entries')
+            .set('Authorization', 'Bearer ' + workerToken)
+            .send({
+                id: 'worker-forged-mb',
+                employeeId: 'test-user',
+                jobId: 'job-1',
+                billingType: 'mb',
+                quantity: 10,
+                rate: 50
+            });
+        assert.strictEqual(resWorkerMb.status, 400);
+        assert.match(resWorkerMb.body.error, /Typ rozliczenia 'mb' nie jest dozwolony dla pracownika/);
+        assert.strictEqual(store.has('worker-forged-mb'), false);
+    });
+
+    await t.test('[P1] Fail-closed job verification: non-existent job returns 404 and DB error returns 500', async () => {
+        // 1. Non-existent job returns 404
+        const resJobNotFound = await request(app)
+            .post('/api/time-entries')
+            .set('Authorization', 'Bearer ' + adminToken)
+            .send({
+                id: 'entry-missing-job',
+                employeeId: 'test-user',
+                jobId: 'j',
+                hours: 4,
+                billingType: 'hourly'
+            });
+        assert.strictEqual(resJobNotFound.status, 404);
+        assert.match(resJobNotFound.body.error, /Zlecenie o identyfikatorze 'j' nie zostało odnalezione/);
+        assert.strictEqual(store.has('entry-missing-job'), false, 'Orphaned entry without parent job must NEVER be saved');
+
+        // 2. Database failure on job check returns 500
+        const resJobDbError = await request(app)
+            .post('/api/time-entries')
+            .set('Authorization', 'Bearer ' + adminToken)
+            .send({
+                id: 'entry-db-error-job',
+                employeeId: 'test-user',
+                jobId: 'job-db-error',
+                hours: 4,
+                billingType: 'hourly'
+            });
+        assert.strictEqual(resJobDbError.status, 500);
+        assert.match(resJobDbError.body.error, /Błąd podczas weryfikacji zlecenia/);
+        assert.strictEqual(store.has('entry-db-error-job'), false);
+    });
+
+    await t.test('[P2] Separation of activityType and workerType: authoritative resolution on backend', async () => {
+        // 1. Employee form entry with type: work sets activityType: work and workerType: employee
+        const resEmpWork = await request(app)
+            .post('/api/time-entries')
+            .set('Authorization', 'Bearer ' + adminToken)
+            .send({
+                id: 'entry-activity-work',
+                employeeId: 'test-user',
+                jobId: 'job-1',
+                type: 'work',
+                hours: 5,
+                billingType: 'hourly'
+            });
+        assert.strictEqual(resEmpWork.status, 201);
+        const storedEmpWork = store.get('entry-activity-work');
+        assert.strictEqual(storedEmpWork.workerType, 'employee', 'Worker type must be authoritatively resolved to employee');
+        assert.strictEqual(storedEmpWork.activityType, 'work');
+
+        // 2. Client attempting to forge workerType: subcontractor on an employee is authoritatively overridden
+        const resForgeWorkerType = await request(app)
+            .post('/api/time-entries')
+            .set('Authorization', 'Bearer ' + adminToken)
+            .send({
+                id: 'entry-forge-sub',
+                employeeId: 'test-user',
+                jobId: 'job-1',
+                workerType: 'subcontractor',
+                hours: 5,
+                billingType: 'hourly'
+            });
+        assert.strictEqual(resForgeWorkerType.status, 201);
+        const storedForged = store.get('entry-forge-sub');
+        assert.strictEqual(storedForged.workerType, 'employee', 'Server must overwrite workerType with employee based on entity resolver');
+
+        // 3. Subcontractor entry with activityType: drive has workerType: subcontractor
+        const resSubDrive = await request(app)
+            .post('/api/time-entries')
+            .set('Authorization', 'Bearer ' + adminToken)
+            .send({
+                id: 'entry-sub-drive',
+                employeeId: 'sub-1',
+                jobId: 'job-1',
+                activityType: 'drive',
+                hours: 2,
+                billingType: 'hourly'
+            });
+        assert.strictEqual(resSubDrive.status, 201);
+        const storedSubDrive = store.get('entry-sub-drive');
+        assert.strictEqual(storedSubDrive.workerType, 'subcontractor');
+        assert.strictEqual(storedSubDrive.activityType, 'drive');
     });
 
     await t.test('automated generation guard: verifies timeEntry.generated.ts is strictly up to date with timeEntry.schema.json', async () => {
