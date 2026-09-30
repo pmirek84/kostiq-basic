@@ -105,7 +105,7 @@ test('seedInitialDataIfEmpty: repairs exact c4c2ac3 legacy standards without mod
         constructions: new Map()
     };
 
-    // Exact std-pvc-01 from c4c2ac3 (rules: [{ id: 'rule-pvc-01', edge: 'perimeter', usagePerMeter: 1, basis: 'mb' }])
+    // Exact std-pvc-01 from c4c2ac3 (single rule: rule-pvc-01 without materialId)
     store.standards.set('std-pvc-01', {
         id: 'std-pvc-01',
         name: 'Standard PVC – Piana + Taśma 3-warstwowa',
@@ -119,7 +119,7 @@ test('seedInitialDataIfEmpty: repairs exact c4c2ac3 legacy standards without mod
         updatedAt: '2026-09-30T10:00:00Z'
     });
 
-    // Exact std-alu-01 from c4c2ac3 (rules: [{ id: 'rule-alu-01', edge: 'perimeter', usagePerMeter: 1, basis: 'mb' }])
+    // Exact std-alu-01 from c4c2ac3 (single rule: rule-alu-01 without materialId)
     store.standards.set('std-alu-01', {
         id: 'std-alu-01',
         name: 'Standard ALU – Montaż na konsolach + EPDM',
@@ -183,14 +183,15 @@ test('seedInitialDataIfEmpty: repairs exact c4c2ac3 legacy standards without mod
     const afterCustom = store.standards.get('std-custom-user-01');
     assert.deepStrictEqual(afterCustom.rules, customUserStandard.rules, 'User standard rules must not be modified');
     assert.strictEqual(afterCustom.rules[0].materialId, undefined, 'User rule must not be assigned heuristic materialId');
+
+    // 4. Verify one-time repair marker was recorded
+    assert.ok(store.system_migrations.has('repair_c4c2ac3_standards_schema_v1'));
 });
 
-test('seedInitialDataIfEmpty: repairs c4c2ac3 standards even if initial_standards_and_templates_v1 marker was already present', async () => {
-    // Simulates database where commit 2ece28e recorded marker before repairing standards
+test('seedInitialDataIfEmpty: does NOT reset legally modified std-pvc-01 or std-alu-01 on server restart', async () => {
+    // User has legally customized std-pvc-01 (added a 3rd rule) and std-alu-01 (changed properties)
     const store = {
-        system_migrations: new Map([
-            ['initial_standards_and_templates_v1', { id: 'initial_standards_and_templates_v1', appliedAt: '2026-09-30T14:00:00Z' }]
-        ]),
+        system_migrations: new Map(),
         materials: new Map([
             ['mat-pur-low-750', { id: 'mat-pur-low-750', name: 'Pianka PUR' }],
             ['mat-tasma-rozprezna-10', { id: 'mat-tasma-rozprezna-10', name: 'Taśma' }],
@@ -201,16 +202,21 @@ test('seedInitialDataIfEmpty: repairs c4c2ac3 standards even if initial_standard
         standards: new Map([
             ['std-pvc-01', {
                 id: 'std-pvc-01',
-                name: 'Standard PVC',
+                name: 'Standard PVC – Zmodyfikowany przez firmę',
+                description: 'Własny opis użytkownika',
                 rules: [
-                    { id: 'rule-pvc-01', edge: 'perimeter', usagePerMeter: 1, basis: 'mb' }
+                    { id: 'rule-pvc-piana', edge: 'perimeter', materialId: 'mat-pur-low-750', usagePerMeter: 0.25 },
+                    { id: 'rule-pvc-tasma', edge: 'perimeter', materialId: 'mat-tasma-rozprezna-10', usagePerMeter: 1.0 },
+                    { id: 'rule-user-extra-tape', edge: 'top', materialId: 'mat-tasma-rozprezna-10', usagePerMeter: 0.5 }
                 ]
             }],
             ['std-alu-01', {
                 id: 'std-alu-01',
-                name: 'Standard ALU',
+                name: 'Standard ALU – Zmodyfikowany przez brygadzistę',
+                description: 'Inny opis',
                 rules: [
-                    { id: 'rule-alu-01', edge: 'perimeter', usagePerMeter: 1, basis: 'mb' }
+                    { id: 'rule-alu-konsole', edge: 'perimeter', materialId: 'mat-konsola-montazowa-l', usagePerMeter: 2.0 },
+                    { id: 'rule-alu-klej', edge: 'perimeter', materialId: 'mat-klej-hybrydowy', usagePerMeter: 0.3 }
                 ]
             }]
         ]),
@@ -220,16 +226,27 @@ test('seedInitialDataIfEmpty: repairs c4c2ac3 standards even if initial_standard
 
     const mockDb = createMockDb(store);
 
-    const res = await seedInitialDataIfEmpty(mockDb);
-    assert.strictEqual(res.seeded, false);
-    assert.strictEqual(res.reason, 'Migration already applied');
+    // First boot: repair migration should detect these are NOT the c4c2ac3 legacy shape and NOT reset them
+    await seedInitialDataIfEmpty(mockDb);
 
-    // Standards must still have been repaired
-    const pvc = store.standards.get('std-pvc-01');
-    assert.strictEqual(pvc.rules.length, 2);
-    assert.strictEqual(pvc.rules[0].materialId, 'mat-pur-low-750');
+    const pvcAfter = store.standards.get('std-pvc-01');
+    assert.strictEqual(pvcAfter.name, 'Standard PVC – Zmodyfikowany przez firmę');
+    assert.strictEqual(pvcAfter.rules.length, 3, 'User-added rule in std-pvc-01 must be preserved');
+    assert.strictEqual(pvcAfter.rules[2].id, 'rule-user-extra-tape');
 
-    const alu = store.standards.get('std-alu-01');
-    assert.strictEqual(alu.rules.length, 3);
-    assert.strictEqual(alu.rules[0].materialId, 'mat-konsola-montazowa-l');
+    const aluAfter = store.standards.get('std-alu-01');
+    assert.strictEqual(aluAfter.name, 'Standard ALU – Zmodyfikowany przez brygadzistę');
+    assert.strictEqual(aluAfter.rules.length, 2, 'User modifications in std-alu-01 must be preserved');
+    assert.strictEqual(aluAfter.rules[0].usagePerMeter, 2.0);
+
+    // Verify repair marker was recorded
+    assert.ok(store.system_migrations.has('repair_c4c2ac3_standards_schema_v1'));
+
+    // Second boot / server restart:
+    await seedInitialDataIfEmpty(mockDb);
+
+    const pvcRestart = store.standards.get('std-pvc-01');
+    assert.strictEqual(pvcRestart.rules.length, 3, 'User-added rule must remain after server restart');
+    const aluRestart = store.standards.get('std-alu-01');
+    assert.strictEqual(aluRestart.rules.length, 2, 'User modified rules must remain after server restart');
 });

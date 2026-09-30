@@ -178,7 +178,7 @@ function toCanonicalJson(obj) {
     const sortedKeys = Object.keys(obj).sort();
     const result = {};
     for (const key of sortedKeys) {
-        if (key === '_id' || key === '__v' || key === '_lastUpdatedAt') continue;
+        if (key === '_id' || key === '__v' || key === '_lastUpdatedAt' || key === '_fingerprint') continue;
         result[key] = toCanonicalJson(obj[key]);
     }
     return result;
@@ -425,42 +425,63 @@ const SEEDED_STANDARD_RULES = {
     ]
 };
 
-async function repairIncompleteStandards(targetDb) {
+async function repairLegacyC4c2ac3Standards(targetDb) {
     if (!targetDb) return 0;
+    const migrationsColl = targetDb.collection('system_migrations');
+    const repairMigrationId = 'repair_c4c2ac3_standards_schema_v1';
+
+    // One-time persistent migration marker: if already executed, never run again
+    const alreadyApplied = await migrationsColl.findOne({ id: repairMigrationId });
+    if (alreadyApplied) {
+        return 0;
+    }
+
     const standardsColl = targetDb.collection('standards');
     let repairedCount = 0;
 
-    // Strictly target only the exact recognized seeded standards ('std-pvc-01' and 'std-alu-01').
-    // NEVER mutate custom user standards or custom user rules!
-    for (const [stdId, expectedRules] of Object.entries(SEEDED_STANDARD_RULES)) {
-        try {
-            const std = await standardsColl.findOne({ id: stdId });
-            if (!std) continue;
-
-            // Check if this seeded standard is in a broken/legacy state from commit c4c2ac3:
-            // e.g. has rule-pvc-01 / rule-alu-01, or any rule without materialId,
-            // or does not match the full expected rule set.
-            const isLegacySeed = !Array.isArray(std.rules) ||
-                std.rules.length !== expectedRules.length ||
-                std.rules.some(r => !r.materialId || r.id === 'rule-pvc-01' || r.id === 'rule-alu-01');
-
-            if (isLegacySeed) {
-                await standardsColl.updateOne(
-                    { id: stdId },
-                    { 
-                        $set: { 
-                            rules: expectedRules,
-                            updatedAt: new Date().toISOString()
-                        } 
-                    }
-                );
-                repairedCount++;
+    // Check std-pvc-01: ONLY repair if it strictly matches the exact legacy shape from commit c4c2ac3
+    // (exact single rule 'rule-pvc-01' without materialId)
+    const pvc = await standardsColl.findOne({ id: 'std-pvc-01' });
+    if (pvc && Array.isArray(pvc.rules) && pvc.rules.length === 1 && pvc.rules[0].id === 'rule-pvc-01' && !pvc.rules[0].materialId) {
+        await standardsColl.updateOne(
+            { id: 'std-pvc-01' },
+            { 
+                $set: { 
+                    rules: SEEDED_STANDARD_RULES['std-pvc-01'],
+                    updatedAt: new Date().toISOString()
+                } 
             }
-        } catch (_) {}
+        );
+        repairedCount++;
     }
+
+    // Check std-alu-01: ONLY repair if it strictly matches the exact legacy shape from commit c4c2ac3
+    // (exact single rule 'rule-alu-01' without materialId)
+    const alu = await standardsColl.findOne({ id: 'std-alu-01' });
+    if (alu && Array.isArray(alu.rules) && alu.rules.length === 1 && alu.rules[0].id === 'rule-alu-01' && !alu.rules[0].materialId) {
+        await standardsColl.updateOne(
+            { id: 'std-alu-01' },
+            { 
+                $set: { 
+                    rules: SEEDED_STANDARD_RULES['std-alu-01'],
+                    updatedAt: new Date().toISOString()
+                } 
+            }
+        );
+        repairedCount++;
+    }
+
+    // Record one-time migration marker so this repair will never run again
+    await migrationsColl.updateOne(
+        { id: repairMigrationId },
+        { $setOnInsert: { id: repairMigrationId, appliedAt: new Date().toISOString(), repairedCount } },
+        { upsert: true }
+    );
 
     return repairedCount;
 }
+
+const repairIncompleteStandards = repairLegacyC4c2ac3Standards;
 
 async function seedInitialDataIfEmpty(targetDb) {
     if (!targetDb) return { seeded: false, reason: 'No db instance' };
@@ -468,7 +489,7 @@ async function seedInitialDataIfEmpty(targetDb) {
     
     // Check persistent migration version marker - prevents re-seeding if user intentionally empties data
     // Always repair existing standards if they were created with incomplete schema (e.g. by commit c4c2ac3)
-    const repairedStandards = await repairIncompleteStandards(targetDb);
+    const repairedStandards = await repairLegacyC4c2ac3Standards(targetDb);
     if (repairedStandards > 0) {
         console.log(`[SEED/MIGRATION] Repaired ${repairedStandards} standards with missing materialId.`);
     }
@@ -640,9 +661,7 @@ async function seedInitialDataIfEmpty(targetDb) {
             summary.standards++;
         }
 
-        // Post-repair to heal existing records inserted before materialId was required
-        const postRepaired = await repairIncompleteStandards(targetDb);
-        summary.repairedStandards = postRepaired;
+
 
         // 3. Seed template offer and construction
         const offersColl = targetDb.collection('offers');
@@ -2828,6 +2847,7 @@ module.exports = {
     setDb: (testDb, ready = true) => { db = testDb; dbReady = ready; indexInitError = ready ? null : "Database marked not ready"; },
     reconcileDuplicatesAndEnsureIndexes,
     seedInitialDataIfEmpty,
+    repairLegacyC4c2ac3Standards,
     repairIncompleteStandards,
     computeCanonicalDocHash,
     toCanonicalJson,

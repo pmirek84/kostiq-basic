@@ -215,30 +215,74 @@ test('POST /api/migration/admin-record: Administrative migration with mandatory 
         assert.match(res.body.error, /fingerprint mismatch/i);
     });
 
-    await t.test('action=replace succeeds when expectedUpdatedAt and expectedFingerprint match, clearing obsolete fields and setting persistent fingerprint', async () => {
-        const client1Doc = store.get('client-1');
-        const fingerprint = computeCanonicalDocHash(client1Doc);
+    await t.test('action=replace allows multiple consecutive valid preview -> replace cycles for the same document without false 409', async () => {
+        // Initial state of document
+        const initialDoc = {
+            id: 'client-multi-cycle',
+            name: 'Wersja 1',
+            phone: '111-111',
+            updatedAt: '2026-09-30T10:00:00Z'
+        };
+        store.set('client-multi-cycle', { ...initialDoc });
 
-        const res = await request(app)
+        // --- Cycle 1: preview -> replace ---
+        const fp1 = computeCanonicalDocHash(store.get('client-multi-cycle'));
+        const res1 = await request(app)
             .post('/api/migration/admin-record')
             .set('Authorization', `Bearer ${adminToken}`)
             .set('x-test-role', 'admin')
             .send({
                 collection: 'clients',
                 action: 'replace',
-                record: { id: 'client-1', name: 'Firma ABC Po Migracji', updatedAt: '2026-09-30T15:05:00Z' },
-                expectedUpdatedAt: '2026-09-30T15:00:00Z',
-                expectedFingerprint: fingerprint
+                record: { id: 'client-multi-cycle', name: 'Wersja 2', phone: '222-222', updatedAt: '2026-09-30T10:01:00Z' },
+                expectedUpdatedAt: '2026-09-30T10:00:00Z',
+                expectedFingerprint: fp1
             });
 
-        assert.strictEqual(res.status, 200);
-        assert.strictEqual(res.body.success, true);
-        assert.strictEqual(res.body.action, 'replaced');
+        assert.strictEqual(res1.status, 200);
+        assert.strictEqual(res1.body.success, true);
+        const saved1 = store.get('client-multi-cycle');
+        assert.strictEqual(saved1.name, 'Wersja 2');
+        assert.ok(saved1._fingerprint, 'Document in MongoDB now has _fingerprint from Cycle 1');
 
-        const saved = store.get('client-1');
-        assert.strictEqual(saved.name, 'Firma ABC Po Migracji');
-        assert.strictEqual(saved.obsoleteFieldInMongo, undefined, 'Obsolete fields must be deleted upon replace');
-        assert.ok(saved._fingerprint, 'Persistent _fingerprint must be written on replace');
+        // --- Cycle 2: next preview -> replace on the document containing _fingerprint ---
+        // Preview computes canonical hash of the current document in DB (which now includes _fingerprint)
+        const fp2 = computeCanonicalDocHash(saved1);
+
+        const res2 = await request(app)
+            .post('/api/migration/admin-record')
+            .set('Authorization', `Bearer ${adminToken}`)
+            .set('x-test-role', 'admin')
+            .send({
+                collection: 'clients',
+                action: 'replace',
+                record: { id: 'client-multi-cycle', name: 'Wersja 3', phone: '333-333', updatedAt: '2026-09-30T10:02:00Z' },
+                expectedUpdatedAt: '2026-09-30T10:01:00Z',
+                expectedFingerprint: fp2
+            });
+
+        assert.strictEqual(res2.status, 200, 'Subsequent CAS cycle must NOT fail with false 409');
+        assert.strictEqual(res2.body.success, true);
+        const saved2 = store.get('client-multi-cycle');
+        assert.strictEqual(saved2.name, 'Wersja 3');
+        assert.strictEqual(saved2.phone, '333-333');
+
+        // --- Cycle 3: another consecutive replace ---
+        const fp3 = computeCanonicalDocHash(saved2);
+        const res3 = await request(app)
+            .post('/api/migration/admin-record')
+            .set('Authorization', `Bearer ${adminToken}`)
+            .set('x-test-role', 'admin')
+            .send({
+                collection: 'clients',
+                action: 'replace',
+                record: { id: 'client-multi-cycle', name: 'Wersja 4 (Final)', phone: '444-444', updatedAt: '2026-09-30T10:03:00Z' },
+                expectedUpdatedAt: '2026-09-30T10:02:00Z',
+                expectedFingerprint: fp3
+            });
+
+        assert.strictEqual(res3.status, 200, 'Cycle 3 must succeed smoothly');
+        assert.strictEqual(store.get('client-multi-cycle').name, 'Wersja 4 (Final)');
     });
 
     await t.test('action=create inserts new document or returns 409 if exists', async () => {

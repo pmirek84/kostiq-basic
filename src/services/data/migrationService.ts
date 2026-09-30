@@ -67,6 +67,7 @@ function cleanForComparison(obj: any): any {
     delete copy._id;
     delete copy.__v;
     delete copy._lastUpdatedAt;
+    delete copy._fingerprint;
     return copy;
 }
 
@@ -101,7 +102,7 @@ export function toCanonicalJson(obj: any): any {
     const sortedKeys = Object.keys(obj).sort();
     const result: Record<string, any> = {};
     for (const key of sortedKeys) {
-        if (key === '_id' || key === '__v' || key === '_lastUpdatedAt') continue;
+        if (key === '_id' || key === '__v' || key === '_lastUpdatedAt' || key === '_fingerprint') continue;
         result[key] = toCanonicalJson(obj[key]);
     }
     return result;
