@@ -324,6 +324,151 @@ async function reconcileDuplicatesAndEnsureIndexes(database) {
     }
 }
 
+
+// ==========================================
+// Idempotent Seeding on Database Connection
+// ==========================================
+async function seedInitialDataIfEmpty(targetDb) {
+    if (!targetDb) return { seeded: false, reason: 'No db instance' };
+    const summary = { standards: 0, offers: 0, constructions: 0 };
+    try {
+        const standardsColl = targetDb.collection('standards');
+        const stdCount = await standardsColl.countDocuments();
+        if (stdCount === 0) {
+            const now = new Date().toISOString();
+            const defaultStandards = [
+                {
+                    id: 'std-pvc-01',
+                    name: 'Standard PVC – Piana + Taśma 3-warstwowa',
+                    description: 'Montaż okien PVC z pianką PU, taśmą rozprężną 3-warstw. i folią paroprzepuszczalną',
+                    applicableTypes: ['okno_pvc', 'drzwi_pvc', 'hs_pvc'],
+                    isDefault: true,
+                    rules: [
+                        { id: 'rule-pvc-01', edge: 'perimeter', usagePerMeter: 1, basis: 'mb' }
+                    ],
+                    createdAt: now,
+                    updatedAt: now
+                },
+                {
+                    id: 'std-alu-01',
+                    name: 'Standard ALU – Montaż na konsolach + EPDM',
+                    description: 'Montaż konstrukcji aluminiowych na konsolach z folią EPDM i klejem hybrydowym',
+                    applicableTypes: ['okno_alu', 'drzwi_alu', 'fasada_alu'],
+                    isDefault: false,
+                    rules: [
+                        { id: 'rule-alu-01', edge: 'perimeter', usagePerMeter: 1, basis: 'mb' }
+                    ],
+                    createdAt: now,
+                    updatedAt: now
+                }
+            ];
+
+            for (const std of defaultStandards) {
+                await standardsColl.updateOne(
+                    { id: std.id },
+                    { $setOnInsert: std },
+                    { upsert: true }
+                );
+                summary.standards++;
+            }
+        }
+
+        const offersColl = targetDb.collection('offers');
+        const templateOfferCount = await offersColl.countDocuments({ number: 'WZÓR-STD-01' });
+        if (templateOfferCount === 0) {
+            const now = new Date().toISOString();
+            const templateOfferId = 'offer-template-std-01';
+            const standardTemplateOffer = {
+                id: templateOfferId,
+                number: 'WZÓR-STD-01',
+                clientId: '',
+                location: 'Koszalin',
+                status: 'draft',
+                createdAt: now,
+                updatedAt: now,
+                materialsCost: 0,
+                laborCost: 0,
+                totalCost: 0,
+                totalNet: 0,
+                vatRate: 23,
+                discountType: 'percent',
+                discountValue: 0,
+                subtotalNet: 0,
+                discountAmount: 0,
+                vatAmount: 0,
+                totalGross: 0,
+                offerTemplateType: 'detailed',
+                title: 'Oferta montażu konstrukcji aluminiowych',
+                scopeOfWork: [
+                    'Montaż konstrukcji aluminiowych zgodnie z załącznikiem nr 1',
+                    'Usługa odbędzie się na terenie zakładu produkcyjnego klienta Zleceniodawcy pod adresem: Koszalin, ul. Lniana 16',
+                    'Dokładny pomiar produkcyjny i przygotowanie konstrukcji do montażu jest po stronie Zleceniodawcy.',
+                    'Po stronie Zleceniodawcy jest przygotowanie otworów montażowych w konstrukcjach aluminiowych zgodnie z wymaganiami systemodawcy.',
+                    'Zleceniodawca jest zobowiązany do poinformowania na 1 tydzień przed planowanym montażem o możliwości rozpoczęcia montażu w danym terminie.',
+                    'Montaż odbędzie się 1-etapowo i w ciągłości dlatego Zleceniodawca gwarantuje dostawę wszystkich niezbędnych konstrukcji, elementów i materiałów w ustalonym terminie.'
+                ],
+                customMaterials: {
+                    providedByUs: ['śruby do mocowania oraz folia EPDM wraz z klejem'],
+                    providedByClient: ['taśma rozprężna 3-warstwowa, dopasowana do profilu i wymiarów otworów']
+                },
+                notes: [
+                    'Oferta nie obejmuje obróbek blacharskich.'
+                ],
+                settings: {
+                    margin: 0,
+                    discount: 0,
+                    workTime: { workTime: 0, workerCount: 0, hourlyRate: 0 },
+                    installationRates: {}
+                },
+                rentalItems: []
+            };
+
+            await offersColl.updateOne(
+                { number: 'WZÓR-STD-01' },
+                { $setOnInsert: standardTemplateOffer },
+                { upsert: true }
+            );
+            summary.offers++;
+
+            const constructionsColl = targetDb.collection('constructions');
+            const standardConstruction = {
+                id: 'const-template-std-01',
+                offerId: templateOfferId,
+                number: 1,
+                name: 'Witryna W1',
+                type: 'witryna',
+                width: 1500,
+                height: 2200,
+                quantity: 5,
+                area: 3.3,
+                perimeter: 7.4,
+                installationLocation: 'zew',
+                weight: 50,
+                totalArea: 16.5,
+                totalPerimeter: 37,
+                totalCost: 0,
+                materialCosts: { items: [], total: 0 },
+                installationCosts: { rate: 0, total: 0 },
+                createdAt: now,
+                updatedAt: now
+            };
+
+            await constructionsColl.updateOne(
+                { id: standardConstruction.id },
+                { $setOnInsert: standardConstruction },
+                { upsert: true }
+            );
+            summary.constructions++;
+        }
+
+        console.log(`[SEED] Idempotent seeding completed: ${summary.standards} standards, ${summary.offers} offer templates, ${summary.constructions} constructions.`);
+        return { seeded: true, summary };
+    } catch (err) {
+        console.error('[SEED ERROR] Idempotent seeding encountered error:', err.message);
+        throw err;
+    }
+}
+
 async function connectDB() {
     try {
         console.log(`Attempting to connect to MongoDB at ${mongoUri}...`);
@@ -341,6 +486,7 @@ async function connectDB() {
         dbReady = false;
         indexInitError = null;
         await reconcileDuplicatesAndEnsureIndexes(db);
+        await seedInitialDataIfEmpty(db);
         dbReady = true;
         console.log('Successfully reconciled duplicates and verified all unique indexes.');
     } catch (err) {
@@ -2306,6 +2452,7 @@ module.exports = {
     closeGracefully,
     setDb: (testDb, ready = true) => { db = testDb; dbReady = ready; indexInitError = ready ? null : "Database marked not ready"; },
     reconcileDuplicatesAndEnsureIndexes,
+    seedInitialDataIfEmpty,
     ALL_SYSTEM_COLLECTIONS,
     ALLOWED_BATCH_IMPORT_COLLECTIONS,
     VALID_TIME_ENTRY_STATUSES,

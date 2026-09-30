@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback } from 'react';
 import type { InstallationStandard } from '../models/types';
 import { standardsStorage } from '../services/storage/standardsStorage';
 
-const STORAGE_KEY = 'costframe_standards';
+
 
 export function useStandards() {
     const [standards, setStandards] = useState<InstallationStandard[]>([]);
@@ -19,35 +19,8 @@ export function useStandards() {
         }
     }, []);
 
-    useEffect(() => {
-        const init = async () => {
-            // Migration: Check LocalStorage
-            const stored = localStorage.getItem(STORAGE_KEY);
-            if (stored) {
-                try {
-                    const parsed = JSON.parse(stored);
-                    if (Array.isArray(parsed) && parsed.length > 0) {
-                        console.log('Migrating standards from LocalStorage to IndexedDB...', parsed);
-
-                        // We must ensure we don't end up with mixed state.
-                        // Ideally we wipe DB if we trust LS more (user just edited in LS world).
-                        // But verifying if DB has data:
-
-                        // If DB has "default" junk and LS has real data, likely we want LS.
-                        // Simple merge strategy: Save all LS items to DB (upsert).
-                        for (const std of parsed) {
-                            await standardsStorage.saveStandard(std);
-                        }
-                    }
-                    localStorage.removeItem(STORAGE_KEY); // Clear LS after migration
-                } catch (e) {
-                    console.error('Migration failed', e);
-                }
-            }
-
-            await loadStandards();
-        };
-        init();
+        useEffect(() => {
+        loadStandards();
     }, [loadStandards]);
 
     const addStandard = async (standard: Omit<InstallationStandard, 'id' | 'createdAt' | 'updatedAt'>) => {

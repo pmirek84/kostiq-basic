@@ -32,7 +32,7 @@ interface TransportSettingsProps {
     installationLocation?: string;
 }
 
-const TRANSPORT_SETTINGS_KEY = 'costframe_transport_settings';
+
 
 export default function TransportSettings({ 
     settings, 
@@ -74,32 +74,7 @@ export default function TransportSettings({
         };
     }, [companyAddress, installationLocation]);
 
-    // Load saved settings on mount (only if current settings are blank/new)
-    useEffect(() => {
-        try {
-            const isBlank = settings.constructionTransport.distance === 0 && 
-                            settings.constructionTransport.ratePerKm === 0 &&
-                            settings.workerTransport.distance === 0 &&
-                            settings.workerTransport.ratePerKm === 0;
-
-            if (isBlank) {
-                const savedSettings = localStorage.getItem(TRANSPORT_SETTINGS_KEY);
-                if (savedSettings) {
-                    const parsedSettings = JSON.parse(savedSettings);
-                    onSettingsChange({ ...settings, ...parsedSettings });
-                }
-            }
-        } catch (error) {
-            console.error('Błąd podczas ładowania ustawień transportu:', error);
-        }
-    }, []);
-
     const saveSettings = (newSettings: TransportSettingsType) => {
-        try {
-            localStorage.setItem(TRANSPORT_SETTINGS_KEY, JSON.stringify(newSettings));
-        } catch (error) {
-            console.error('Błąd podczas zapisywania ustawień transportu:', error);
-        }
         onSettingsChange(newSettings);
     };
 

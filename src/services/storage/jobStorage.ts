@@ -16,6 +16,10 @@ export const jobStorage = {
         return jobRepo.save(job);
     },
 
+    async updateJob(id: string, updates: Partial<Job>): Promise<void> {
+        return jobRepo.update(id, updates);
+    },
+
     async deleteJob(id: string): Promise<void> {
         return jobRepo.delete(id);
     }

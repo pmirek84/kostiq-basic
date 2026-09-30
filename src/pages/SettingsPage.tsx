@@ -1,7 +1,8 @@
+import type { MigrationPreviewReport, MigrationExecutionReport } from '../services/data/migrationService';
 import { useEffect, useState, useRef } from 'react';
 import {
     Save, Building, CheckCircle, MapPin, Image, Upload, X,
-    Loader2, Globe, Users, Database, Smartphone, Mail
+    Loader2, Globe, Users, Database, Smartphone, Mail, AlertTriangle, Check, Eye, ArrowRight, ShieldCheck
 } from 'lucide-react';
 import { Button } from '../components/ui/Button';
 import { useCompanySettings } from '../hooks/useCompanySettings';
@@ -222,66 +223,342 @@ function ProfileTab({ localState, handleChange }: ProfileTabProps) {
 //  TAB 3: System i Baza Danych
 // ─────────────────────────────────────────────────────
 function SystemTab() {
+    const [isLoadingPreview, setIsLoadingPreview] = useState(false);
+    const [isMigrating, setIsMigrating] = useState(false);
+    const [preview, setPreview] = useState<MigrationPreviewReport | null>(null);
+    const [report, setReport] = useState<MigrationExecutionReport | null>(null);
+    const [conflictStrategy, setConflictStrategy] = useState<'skip' | 'overwrite'>('skip');
+    const [filterTab, setFilterTab] = useState<'all' | 'conflict' | 'to_create' | 'identical'>('all');
+    const [expandedItem, setExpandedItem] = useState<string | null>(null);
+    const [progress, setProgress] = useState<{ current: number; total: number; entity: string; id: string } | null>(null);
+
+    const handleRunPreview = async () => {
+        setIsLoadingPreview(true);
+        setReport(null);
+        try {
+            const { migrationService } = await import('../services/data/migrationService');
+            const data = await migrationService.previewMigration();
+            setPreview(data);
+            toast.success(`Przeanalizowano ${data.totalLocal} rekordów w IndexedDB.`);
+        } catch (e: any) {
+            console.error('Błąd analizy migracji:', e);
+            toast.error('Nie udało się przygotować podglądu migracji: ' + (e.message || 'Błąd bazy danych'));
+        } finally {
+            setIsLoadingPreview(false);
+        }
+    };
+
+    const handleRunMigration = async () => {
+        if (!confirm(`Czy na pewno chcesz wykonać migrację? Wybrana strategia konfliktów: ${conflictStrategy === 'skip' ? 'Bezpieczne pominięcie (MongoDB jako prawda)' : 'Nadpisanie danymi z IndexedDB'}.`)) {
+            return;
+        }
+
+        setIsMigrating(true);
+        setProgress(null);
+        try {
+            const { migrationService } = await import('../services/data/migrationService');
+            const execReport = await migrationService.migrateAll({
+                conflictStrategy,
+                onProgress: (p) => setProgress(p)
+            });
+            setReport(execReport);
+            toast.success(`Migracja zakończona: ${execReport.created} utworzono, ${execReport.updated} zaktualizowano, ${execReport.skipped} pominięto.`);
+            // Refresh preview
+            const updatedPreview = await migrationService.previewMigration();
+            setPreview(updatedPreview);
+        } catch (e: any) {
+            console.error('Błąd wykonania migracji:', e);
+            toast.error('Błąd migracji: ' + (e.message || 'Nieznany błąd'));
+        } finally {
+            setIsMigrating(false);
+            setProgress(null);
+        }
+    };
+
+    const filteredItems = (preview?.items || []).filter(item => {
+        if (filterTab === 'all') return true;
+        return item.status === filterTab;
+    });
+
     return (
-        <div className="bg-white rounded-2xl p-8 border border-black/10">
-            <h3 className="text-xs font-bold uppercase tracking-widest text-zinc-550 mb-8 border-b border-black/5 pb-4">
-                Migracja i Narzędzia
-            </h3>
-            <div className="space-y-5">
-                {/* MongoDB Migration */}
+        <div className="bg-white rounded-2xl p-8 border border-black/10 space-y-8">
+            <div>
+                <h3 className="text-xs font-bold uppercase tracking-widest text-zinc-500 mb-2 border-b border-black/5 pb-4">
+                    Migracja z IndexedDB do MongoDB (Jedno Źródło Prawdy)
+                </h3>
+                <p className="text-xs text-zinc-600 leading-relaxed">
+                    MongoDB jest jedynym aktywnym źródłem zapisu w systemie KOSTIQ. Dane w przeglądarce (IndexedDB) służą wyłącznie jako źródło do bezpiecznej migracji z pełną analizą różnic i konfliktów przed zapisem.
+                </p>
+            </div>
+
+            {/* Action Card */}
+            <div className="bg-zinc-50 border border-black/10 rounded-2xl p-6 space-y-6">
+                <div className="flex flex-wrap items-center justify-between gap-4">
+                    <div className="flex items-center gap-3">
+                        <div className="h-10 w-10 rounded-xl bg-teal-50 text-[#21808D] border border-teal-100/50 flex items-center justify-center flex-shrink-0">
+                            <Database className="h-5 w-5" />
+                        </div>
+                        <div>
+                            <h4 className="font-bold text-sm text-zinc-900">Podgląd spójności i kontrola konfliktów</h4>
+                            <p className="text-xs text-zinc-500">Porównaj lokalny stan IndexedDB z bazą centralną MongoDB.</p>
+                        </div>
+                    </div>
+
+                    <div className="flex items-center gap-3">
+                        <button
+                            onClick={handleRunPreview}
+                            disabled={isLoadingPreview || isMigrating}
+                            className="px-4 py-2.5 bg-white border border-zinc-300 hover:bg-zinc-100 text-zinc-800 rounded-xl text-xs font-semibold flex items-center gap-2 transition-all disabled:opacity-50">
+                            {isLoadingPreview ? <Loader2 className="h-4 w-4 animate-spin text-zinc-500" /> : <Eye className="h-4 w-4 text-zinc-600" />}
+                            Sprawdź spójność (Podgląd)
+                        </button>
+
+                        <button
+                            onClick={handleRunMigration}
+                            disabled={isMigrating || isLoadingPreview}
+                            className="px-5 py-2.5 bg-black hover:bg-zinc-800 text-white rounded-xl text-xs font-semibold flex items-center gap-2 transition-all disabled:opacity-50">
+                            {isMigrating ? <Loader2 className="h-4 w-4 animate-spin text-white" /> : <ArrowRight className="h-4 w-4 text-white" />}
+                            Rozpocznij migrację
+                        </button>
+                    </div>
+                </div>
+
+                {/* Conflict Strategy Selector */}
+                <div className="pt-4 border-t border-zinc-200/60 flex flex-wrap items-center justify-between gap-4 text-xs">
+                    <div className="flex items-center gap-2 text-zinc-700">
+                        <ShieldCheck className="h-4 w-4 text-teal-600" />
+                        <span className="font-medium">Strategia obsługi konfliktów:</span>
+                    </div>
+                    <div className="flex items-center gap-4">
+                        <label className="flex items-center gap-2 cursor-pointer">
+                            <input
+                                type="radio"
+                                name="conflictStrategy"
+                                value="skip"
+                                checked={conflictStrategy === 'skip'}
+                                onChange={() => setConflictStrategy('skip')}
+                                className="text-black focus:ring-black"
+                            />
+                            <span className="font-medium text-zinc-800">Zachowaj wersję MongoDB (bezpieczna)</span>
+                        </label>
+                        <label className="flex items-center gap-2 cursor-pointer">
+                            <input
+                                type="radio"
+                                name="conflictStrategy"
+                                value="overwrite"
+                                checked={conflictStrategy === 'overwrite'}
+                                onChange={() => setConflictStrategy('overwrite')}
+                                className="text-black focus:ring-black"
+                            />
+                            <span className="font-medium text-amber-700">Nadpisz wersją z IndexedDB</span>
+                        </label>
+                    </div>
+                </div>
+
+                {/* Progress bar */}
+                {isMigrating && progress && (
+                    <div className="space-y-1.5 pt-2">
+                        <div className="flex justify-between text-[11px] text-zinc-600">
+                            <span>Przenoszenie rekordu: <b>{progress.entity}</b> ({progress.id})</span>
+                            <span>{progress.current} / {progress.total}</span>
+                        </div>
+                        <div className="w-full bg-zinc-200 rounded-full h-2 overflow-hidden">
+                            <div
+                                className="bg-black h-2 transition-all duration-150"
+                                style={{ width: `${Math.round((progress.current / progress.total) * 100)}%` }}
+                            />
+                        </div>
+                    </div>
+                )}
+            </div>
+
+            {/* Preview Statistics Tiles */}
+            {preview && (
+                <div className="space-y-6">
+                    <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+                        <div className="p-4 rounded-xl bg-zinc-50 border border-zinc-200/80">
+                            <div className="text-[10px] uppercase font-bold text-zinc-400">Łącznie w IndexedDB</div>
+                            <div className="text-2xl font-black text-zinc-900 mt-1">{preview.totalLocal}</div>
+                        </div>
+                        <div className="p-4 rounded-xl bg-emerald-50/50 border border-emerald-100">
+                            <div className="text-[10px] uppercase font-bold text-emerald-700">Nowe do dodania</div>
+                            <div className="text-2xl font-black text-emerald-800 mt-1">{preview.toCreateCount}</div>
+                        </div>
+                        <div className="p-4 rounded-xl bg-zinc-50 border border-zinc-200/80">
+                            <div className="text-[10px] uppercase font-bold text-zinc-500">Identyczne (w synchronizacji)</div>
+                            <div className="text-2xl font-black text-zinc-700 mt-1">{preview.identicalCount}</div>
+                        </div>
+                        <div className="p-4 rounded-xl bg-amber-50/50 border border-amber-200">
+                            <div className="text-[10px] uppercase font-bold text-amber-700">Konflikty danych</div>
+                            <div className="text-2xl font-black text-amber-800 mt-1">{preview.conflictCount}</div>
+                        </div>
+                    </div>
+
+                    {/* Filter Tabs */}
+                    <div className="flex gap-2 border-b border-zinc-200 text-xs font-semibold">
+                        {[
+                            { id: 'all', label: `Wszystkie (${preview.totalLocal})` },
+                            { id: 'conflict', label: `Konflikty (${preview.conflictCount})` },
+                            { id: 'to_create', label: `Do dodania (${preview.toCreateCount})` },
+                            { id: 'identical', label: `Identyczne (${preview.identicalCount})` },
+                        ].map(t => (
+                            <button
+                                key={t.id}
+                                onClick={() => setFilterTab(t.id as any)}
+                                className={`pb-2.5 px-3 border-b-2 transition-all ${
+                                    filterTab === t.id
+                                        ? 'border-black text-black'
+                                        : 'border-transparent text-zinc-400 hover:text-zinc-700'
+                                }`}>
+                                {t.label}
+                            </button>
+                        ))}
+                    </div>
+
+                    {/* Records Table */}
+                    <div className="border border-zinc-200 rounded-xl overflow-hidden text-xs">
+                        <div className="bg-zinc-100/75 px-4 py-2.5 font-bold text-zinc-600 grid grid-cols-12 gap-2 border-b border-zinc-200">
+                            <span className="col-span-3">Kolekcja / Tytuł</span>
+                            <span className="col-span-4">ID Rekordu</span>
+                            <span className="col-span-3">Status spójności</span>
+                            <span className="col-span-2 text-right">Szczegóły</span>
+                        </div>
+                        <div className="divide-y divide-zinc-100 max-h-80 overflow-y-auto">
+                            {filteredItems.length === 0 ? (
+                                <div className="p-6 text-center text-zinc-400">Brak rekordów dla wybranego filtra.</div>
+                            ) : (
+                                filteredItems.map(item => {
+                                    const isExpanded = expandedItem === item.id;
+                                    return (
+                                        <div key={item.id} className="hover:bg-zinc-50/50">
+                                            <div className="px-4 py-2.5 grid grid-cols-12 gap-2 items-center">
+                                                <div className="col-span-3 font-semibold text-zinc-800 truncate" title={item.summary}>
+                                                    <span className="text-[10px] uppercase font-bold text-zinc-400 block">{item.entity}</span>
+                                                    {item.summary || item.id}
+                                                </div>
+                                                <div className="col-span-4 font-mono text-[11px] text-zinc-500 truncate" title={item.id}>
+                                                    {item.id}
+                                                </div>
+                                                <div className="col-span-3">
+                                                    {item.status === 'to_create' && (
+                                                        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold bg-emerald-100 text-emerald-800">
+                                                            <Check className="h-3 w-3" /> Do utworzenia
+                                                        </span>
+                                                    )}
+                                                    {item.status === 'identical' && (
+                                                        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold bg-zinc-100 text-zinc-700">
+                                                            Identyczny
+                                                        </span>
+                                                    )}
+                                                    {item.status === 'conflict' && (
+                                                        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold bg-amber-100 text-amber-900" title={`Konflikt pól: ${item.conflictFields.join(', ')}`}>
+                                                            <AlertTriangle className="h-3 w-3 text-amber-700" /> Konflikt: {item.conflictFields.length} pól
+                                                        </span>
+                                                    )}
+                                                </div>
+                                                <div className="col-span-2 text-right">
+                                                    {item.status === 'conflict' ? (
+                                                        <button
+                                                            onClick={() => setExpandedItem(isExpanded ? null : item.id)}
+                                                            className="text-[11px] text-blue-600 hover:text-blue-800 font-semibold underline">
+                                                            {isExpanded ? 'Ukryj' : 'Pokaż diff'}
+                                                        </button>
+                                                    ) : (
+                                                        <span className="text-zinc-300">—</span>
+                                                    )}
+                                                </div>
+                                            </div>
+
+                                            {isExpanded && item.status === 'conflict' && (
+                                                <div className="px-4 py-3 bg-zinc-100 border-t border-zinc-200 space-y-2">
+                                                    <div className="text-[11px] font-bold text-amber-900">
+                                                        Różniące się pola: {item.conflictFields.join(', ')}
+                                                    </div>
+                                                    <div className="grid grid-cols-2 gap-2 text-[10px] font-mono">
+                                                        <div className="p-2 bg-white rounded border border-zinc-200">
+                                                            <div className="font-bold text-zinc-500 mb-1">IndexedDB (Lokalnie):</div>
+                                                            <pre className="overflow-x-auto max-h-32 text-zinc-700">
+                                                                {JSON.stringify(item.conflictFields.reduce((acc: any, f) => ({ ...acc, [f]: item.localData?.[f] }), {}), null, 2)}
+                                                            </pre>
+                                                        </div>
+                                                        <div className="p-2 bg-white rounded border border-zinc-200">
+                                                            <div className="font-bold text-zinc-500 mb-1">MongoDB (Zdalnie):</div>
+                                                            <pre className="overflow-x-auto max-h-32 text-zinc-700">
+                                                                {JSON.stringify(item.conflictFields.reduce((acc: any, f) => ({ ...acc, [f]: item.remoteData?.[f] }), {}), null, 2)}
+                                                            </pre>
+                                                        </div>
+                                                    </div>
+                                                </div>
+                                            )}
+                                        </div>
+                                    );
+                                })
+                            )}
+                        </div>
+                    </div>
+                </div>
+            )}
+
+            {/* Execution Report */}
+            {report && (
+                <div className="p-6 rounded-2xl bg-zinc-900 text-white space-y-4 text-xs">
+                    <div className="flex items-center justify-between border-b border-zinc-800 pb-3">
+                        <div className="font-bold text-sm">Raport wykonania migracji ({new Date(report.timestamp).toLocaleTimeString()})</div>
+                        <div className="flex gap-4 text-xs">
+                            <span className="text-emerald-400">Utworzono: <b>{report.created}</b></span>
+                            <span className="text-blue-400">Zaktualizowano: <b>{report.updated}</b></span>
+                            <span className="text-zinc-400">Pominięto: <b>{report.skipped}</b></span>
+                            <span className={report.failed > 0 ? 'text-rose-400 font-bold' : 'text-zinc-500'}>
+                                Błędy: <b>{report.failed}</b>
+                            </span>
+                        </div>
+                    </div>
+
+                    <div className="max-h-60 overflow-y-auto space-y-1 font-mono text-[11px] divide-y divide-zinc-800">
+                        {report.results.map((r, idx) => (
+                            <div key={idx} className="py-1 flex items-center justify-between gap-4">
+                                <span className="text-zinc-400 truncate">[{r.entity}] {r.id}</span>
+                                <span className={`font-semibold ${
+                                    r.status === 'created' ? 'text-emerald-400' :
+                                    r.status === 'updated' ? 'text-blue-400' :
+                                    r.status === 'failed' ? 'text-rose-400' : 'text-zinc-400'
+                                }`}>
+                                    {r.status.toUpperCase()}: {r.message}
+                                </span>
+                            </div>
+                        ))}
+                    </div>
+                </div>
+            )}
+
+            {/* Dev seed — only in DEV */}
+            {import.meta.env.DEV && (
                 <div className="group bg-zinc-50 border border-black/10 rounded-2xl p-6 transition-all duration-300">
                     <div className="flex items-center gap-4 mb-3">
                         <div className="h-10 w-10 rounded-xl bg-teal-50 text-[#21808D] border border-teal-100/50 flex items-center justify-center flex-shrink-0">
                             <Database className="h-5 w-5" />
                         </div>
-                        <h4 className="font-bold text-sm text-zinc-900">Transfer danych do MongoDB</h4>
+                        <div className="flex items-center gap-2">
+                            <h4 className="font-bold text-sm text-zinc-900">Dane Demonstracyjne</h4>
+                            <span className="text-[9px] font-bold uppercase tracking-widest text-amber-700 bg-amber-55/60 border border-amber-100/50 px-2 py-0.5 rounded-full">DEV ONLY</span>
+                        </div>
                     </div>
                     <p className="text-xs text-zinc-500 leading-relaxed mb-5 ml-14">
-                        Przenieś dane lokalne z przeglądarki (localStorage) do centralnej bazy danych.
+                        Wypełnij pustą bazę przykładowymi danymi dla celów testowych.
                     </p>
                     <button
                         onClick={async () => {
-                            if (confirm('Czy chcesz rozpocząć migrację danych do MongoDB?')) {
-                                const { migrationService } = await import('../services/data/migrationService');
-                                const count = await migrationService.migrateAll();
-                                alert(`Sukces! Przeniesiono ${count} elementów.`);
-                                window.location.reload();
+                            if (confirm('Zasilić bazę danymi demo? UWAGA: To nadpisze istniejące dane!')) {
+                                const { seedMongoDatabase } = await import('../services/data/mongoSeeder');
+                                await seedMongoDatabase();
+                                alert('Baza danych zasilona danymi demo.');
                             }
                         }}
                         className="ml-14 px-5 py-2.5 bg-black hover:bg-zinc-800 text-white rounded-xl text-xs font-semibold transition-all">
-                        Rozpocznij transfer
+                        Załaduj dane demo
                     </button>
                 </div>
-
-                {/* Dev seed — only in DEV */}
-                {import.meta.env.DEV && (
-                    <div className="group bg-zinc-50 border border-black/10 rounded-2xl p-6 transition-all duration-300">
-                        <div className="flex items-center gap-4 mb-3">
-                            <div className="h-10 w-10 rounded-xl bg-teal-50 text-[#21808D] border border-teal-100/50 flex items-center justify-center flex-shrink-0">
-                                <Database className="h-5 w-5" />
-                            </div>
-                            <div className="flex items-center gap-2">
-                                <h4 className="font-bold text-sm text-zinc-900">Dane Demonstracyjne</h4>
-                                <span className="text-[9px] font-bold uppercase tracking-widest text-amber-700 bg-amber-55/60 border border-amber-100/50 px-2 py-0.5 rounded-full">DEV ONLY</span>
-                            </div>
-                        </div>
-                        <p className="text-xs text-zinc-500 leading-relaxed mb-5 ml-14">
-                            Wypełnij pustą bazę przykładowymi danymi dla celów testowych.
-                        </p>
-                        <button
-                            onClick={async () => {
-                                if (confirm('Zasilić bazę danymi demo? UWAGA: To nadpisze istniejące dane!')) {
-                                    const { seedMongoDatabase } = await import('../services/data/mongoSeeder');
-                                    await seedMongoDatabase();
-                                    alert('Baza danych zasilona danymi demo.');
-                                }
-                            }}
-                            className="ml-14 px-5 py-2.5 bg-black hover:bg-zinc-800 text-white rounded-xl text-xs font-semibold transition-all">
-                            Załaduj dane demo
-                        </button>
-                    </div>
-                )}
-            </div>
+            )}
 
             {/* Support footer */}
             <div className="mt-10 pt-8 border-t border-black/5 flex flex-col items-center gap-4">
@@ -299,9 +576,6 @@ function SystemTab() {
     );
 }
 
-// ─────────────────────────────────────────────────────
-//  MAIN SETTINGS PAGE
-// ─────────────────────────────────────────────────────
 export default function SettingsPage() {
     const { settings, loading, updateSettings } = useCompanySettings();
     const [activeTab, setActiveTab] = useState<Tab>('profile');

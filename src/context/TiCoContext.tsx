@@ -2,13 +2,9 @@ import { executeImportTimeEntries, executeClearTimeEntries } from '../services/d
 import { createContext, useContext, useState, useEffect, useMemo, type ReactNode } from 'react';
 import type { Employee, Subcontractor, TimeEntry, Message, Request, RequestStatus, Settlement, WorkerType, Crew } from '../models/types';
 import { v4 as uuidv4 } from 'uuid';
-import { MockRepository } from '../services/data/MockRepository';
 import { MongoRepository } from '../services/data/MongoRepository';
 import type { TiCoRepository } from '../services/data/TiCoRepository';
 import { useAuth } from './AuthContext';
-
-// Flag to switch between adapters
-const USE_MONGO = true;
 
 export type CreateSettlementInput = {
     workerId: string;
@@ -102,10 +98,8 @@ interface TiCoContextType {
 export const TiCoContext = createContext<TiCoContextType | undefined>(undefined);
 
 export const TiCoProvider = ({ children }: { children: ReactNode }) => {
-    // Repository Instance
-    const repository: TiCoRepository = useMemo(() => {
-        return USE_MONGO ? new MongoRepository() : new MockRepository();
-    }, []);
+    // Repository Instance: strictly MongoDB as sole source of truth
+    const repository: TiCoRepository = useMemo(() => new MongoRepository(), []);
 
     const [loadStatus, setLoadStatus] = useState<LoadStatus>('loading');
     const isLoading = loadStatus === 'loading';
@@ -122,7 +116,7 @@ export const TiCoProvider = ({ children }: { children: ReactNode }) => {
     // Load Initial Data
     useEffect(() => {
         // Don't load if no token (not logged in)
-        if (USE_MONGO && !token) {
+        if (!token) {
             setLoadStatus('complete');
             return;
         }
@@ -154,39 +148,6 @@ export const TiCoProvider = ({ children }: { children: ReactNode }) => {
                     console.error('[TiCoContext] Data fetch encountered errors - marking loadStatus as failed');
                     setLoadStatus('failed');
                     return;
-                }
-
-                // In USE_MONGO mode, NEVER auto-seed client side upon empty state
-                const shouldSeed = !USE_MONGO && emps.length === 0;
-
-                if (shouldSeed) {
-                    console.log("[TiCoContext] No employees found (mock mode) — seeding default employees...");
-
-                    const JAN_ID = uuidv4();
-                    const PIOTR_ID = uuidv4();
-                    const ADAM_ID = uuidv4();
-                    const TOMEK_ID = uuidv4();
-                    const CREW_1_ID = uuidv4();
-
-                    const seedEmps: Employee[] = [
-                        { id: JAN_ID, type: 'employee', firstName: 'Jan', lastName: 'Kowalski', role: 'foreman', isActive: true, hourlyRate: 45, defaultHourlyRate: 45, dailyRate: 350, projectRate: 1500, currency: 'PLN', crewId: CREW_1_ID },
-                        { id: PIOTR_ID, type: 'employee', firstName: 'Piotr', lastName: 'Nowak', role: 'worker', isActive: true, hourlyRate: 35, defaultHourlyRate: 35, dailyRate: 280, projectRate: 1200, currency: 'PLN', crewId: CREW_1_ID },
-                        { id: ADAM_ID, type: 'employee', firstName: 'Adam', lastName: 'Wiśniewski', role: 'worker', isActive: true, hourlyRate: 32, defaultHourlyRate: 32, dailyRate: 250, projectRate: 1000, currency: 'PLN', crewId: CREW_1_ID },
-                        { id: TOMEK_ID, type: 'employee', firstName: 'Tomasz', lastName: 'Wójcik', role: 'worker', isActive: true, hourlyRate: 30, defaultHourlyRate: 30, dailyRate: 240, projectRate: 900, currency: 'PLN' }
-                    ];
-
-                    const seedCrews: Crew[] = [
-                        { id: CREW_1_ID, name: 'Ekipa 1 (Jan)', foremanId: JAN_ID, memberIds: [PIOTR_ID, ADAM_ID], active: true }
-                    ];
-
-                    try {
-                        for (const e of seedEmps) await repository.createEmployee(e);
-                        for (const c of seedCrews) await repository.createCrew(c);
-                        emps = seedEmps;
-                        crewList = seedCrews;
-                    } catch (seedErr) {
-                        console.error("[TiCoContext] Failed to seed default data:", seedErr);
-                    }
                 }
 
                 setEmployees(emps);

@@ -237,29 +237,7 @@ export function JobsProvider({ children }: { children: ReactNode }) {
     const updateJob = async (id: string, updates: Partial<Job>) => {
         const job = jobs.find(j => j.id === id);
         if (job) {
-            const patch = { ...updates, updatedAt: new Date().toISOString() };
-            // Use direct PATCH without _lastUpdatedAt sentinel to avoid stale-cache 409
-            try {
-                const token = localStorage.getItem('kostiq_token');
-                const API_BASE = (import.meta as any).env?.VITE_API_URL || 'http://localhost:3000/api';
-                const res = await fetch(`${API_BASE}/jobs/${id}`, {
-                    method: 'PATCH',
-                    headers: {
-                        'Content-Type': 'application/json',
-                        ...(token ? { Authorization: `Bearer ${token}` } : {})
-                    },
-                    body: JSON.stringify(patch)
-                });
-                if (!res.ok && res.status !== 404) {
-                    const err = await res.json().catch(() => ({}));
-                    throw new Error(err.error || `HTTP ${res.status}`);
-                }
-            } catch (err) {
-                console.error('[updateJob] PATCH failed, falling back to saveJob:', err);
-                // Fallback: merge in memory and try save
-                const updatedJob = { ...job, ...patch };
-                await jobStorage.saveJob(updatedJob);
-            }
+            await jobStorage.updateJob(id, updates);
             await refreshJobs();
         }
     };

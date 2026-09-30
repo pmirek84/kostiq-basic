@@ -5,7 +5,10 @@
  */
 import React from 'react';
 import { useTiCo } from './TiCoContext';
-import type { Schedule } from '../models/tico';
+export interface Schedule {
+    id: string | number;
+    [key: string]: any;
+}
 
 export interface TimeTrackingContextType {
     timeEntries: any[];
