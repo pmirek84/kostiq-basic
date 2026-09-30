@@ -1253,6 +1253,23 @@ app.post('/api/auth/set-password', verifyToken, requireRole('admin'), async (req
 const toCents = (val) => Math.round((Number(val) || 0) * 100);
 const toCurrency = (cents) => Math.round(cents) / 100;
 
+// TimeEntry domain statuses matching exactly src/models/types.ts:
+// status: 'draft' | 'pending' | 'submitted' | 'approved' | 'rejected' | 'foreman_approved' | 'foreman_rejected' | 'admin_approved' | 'admin_rejected'
+const VALID_TIME_ENTRY_STATUSES = [
+    'draft',
+    'pending',
+    'submitted',
+    'approved',
+    'rejected',
+    'foreman_approved',
+    'foreman_rejected',
+    'admin_approved',
+    'admin_rejected'
+];
+
+const WORKER_ALLOWED_TIME_ENTRY_STATUSES = ['draft', 'pending', 'submitted'];
+const FOREMAN_ALLOWED_TIME_ENTRY_STATUSES = ['draft', 'pending', 'submitted', 'foreman_approved', 'foreman_rejected'];
+
 // Shared validation & normalization for time entries (used by single POST/PATCH and batch-import)
 async function validateAndNormalizeTimeEntryDoc(doc, { db, user, isBatch = false, isPatch = false }) {
     if (!doc || typeof doc !== 'object') {
@@ -1273,7 +1290,6 @@ async function validateAndNormalizeTimeEntryDoc(doc, { db, user, isBatch = false
     }
 
     // Status validation & defaulting: validate status against domain whitelist
-    const VALID_TIME_ENTRY_STATUSES = ['draft', 'submitted', 'foreman_approved', 'admin_approved', 'approved', 'rejected', 'settled'];
     if (!doc.status) {
         if (!isPatch) {
             doc.status = 'submitted';
@@ -1444,9 +1460,7 @@ async function validateTimeEntryBatch(req, res, next) {
         }
     }
 
-    const WORKER_ALLOWED_STATUSES = ['draft', 'submitted'];
-    const FOREMAN_ALLOWED_STATUSES = ['draft', 'submitted', 'foreman_approved'];
-    const allowedStatuses = req.user?.role === 'foreman' ? FOREMAN_ALLOWED_STATUSES : WORKER_ALLOWED_STATUSES;
+    const allowedStatuses = req.user?.role === 'foreman' ? FOREMAN_ALLOWED_TIME_ENTRY_STATUSES : WORKER_ALLOWED_TIME_ENTRY_STATUSES;
 
     for (let i = 0; i < items.length; i++) {
         const item = items[i];
@@ -1496,9 +1510,7 @@ async function validateTimeEntry(req, res, next) {
     const userEmpId = req.user?.id || req.user?._id;
 
     if (isWorker) {
-        const WORKER_ALLOWED_STATUSES = ['draft', 'submitted'];
-        const FOREMAN_ALLOWED_STATUSES = ['draft', 'submitted', 'foreman_approved'];
-        const allowedStatuses = req.user?.role === 'foreman' ? FOREMAN_ALLOWED_STATUSES : WORKER_ALLOWED_STATUSES;
+        const allowedStatuses = req.user?.role === 'foreman' ? FOREMAN_ALLOWED_TIME_ENTRY_STATUSES : WORKER_ALLOWED_TIME_ENTRY_STATUSES;
 
         // Security check 1: In POST, worker can only create entry for their own employeeId
         if (req.method === 'POST') {
@@ -2295,5 +2307,8 @@ module.exports = {
     setDb: (testDb, ready = true) => { db = testDb; dbReady = ready; indexInitError = ready ? null : "Database marked not ready"; },
     reconcileDuplicatesAndEnsureIndexes,
     ALL_SYSTEM_COLLECTIONS,
-    ALLOWED_BATCH_IMPORT_COLLECTIONS
+    ALLOWED_BATCH_IMPORT_COLLECTIONS,
+    VALID_TIME_ENTRY_STATUSES,
+    WORKER_ALLOWED_TIME_ENTRY_STATUSES,
+    FOREMAN_ALLOWED_TIME_ENTRY_STATUSES
 };

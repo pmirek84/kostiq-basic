@@ -5,7 +5,7 @@ const request = require('supertest');
 process.env.NODE_ENV = 'test';
 process.env.JWT_SECRET = 'test-secret';
 
-const { app, setDb, reconcileDuplicatesAndEnsureIndexes } = require('../server');
+const { app, setDb, reconcileDuplicatesAndEnsureIndexes, VALID_TIME_ENTRY_STATUSES } = require('../server');
 
 test('Backend Atomic Duplicate Prevention & Batch Import', async (t) => {
     const store = new Map();
@@ -477,10 +477,10 @@ test('Backend Atomic Duplicate Prevention & Batch Import', async (t) => {
         }
     });
 
-    await t.test('POST /api/time-entries defaults status to submitted and rejects invalid status with 400', async () => {
+    await t.test('POST /api/time-entries defaults status to submitted and rejects invalid statuses with 400', async () => {
         const todayStr = new Date().toISOString().slice(0, 10);
 
-        // 1. Invalid status rejected
+        // 1. Invalid status rejected (bogus_status_xyz)
         const invalidRes = await request(app)
             .post('/api/time-entries')
             .send({
@@ -495,7 +495,22 @@ test('Backend Atomic Duplicate Prevention & Batch Import', async (t) => {
         assert.strictEqual(invalidRes.status, 400);
         assert.match(invalidRes.body.error, /Nieprawidłowy status wpisu czasu/);
 
-        // 2. Missing status defaults to submitted
+        // 2. Legacy 'settled' status is NOT part of TimeEntry contract and MUST be rejected with 400
+        const settledRes = await request(app)
+            .post('/api/time-entries')
+            .send({
+                id: 'te-settled-invalid',
+                employeeId: 'emp-101',
+                jobId: 'job-1',
+                hours: 4,
+                date: todayStr,
+                status: 'settled'
+            });
+
+        assert.strictEqual(settledRes.status, 400);
+        assert.match(settledRes.body.error, /Nieprawidłowy status wpisu czasu/);
+
+        // 3. Missing status defaults to submitted
         const validRes = await request(app)
             .post('/api/time-entries')
             .send({
@@ -509,6 +524,81 @@ test('Backend Atomic Duplicate Prevention & Batch Import', async (t) => {
         assert.strictEqual(validRes.status, 201);
         const stored = store.get('te-default-status');
         assert.strictEqual(stored.status, 'submitted');
+    });
+
+    await t.test('Table-driven test: all 9 domain statuses from src/models/types.ts are accepted on POST and PATCH', async () => {
+        const todayStr = new Date().toISOString().slice(0, 10);
+        const expectedStatuses = [
+            'draft',
+            'pending',
+            'submitted',
+            'approved',
+            'rejected',
+            'foreman_approved',
+            'foreman_rejected',
+            'admin_approved',
+            'admin_rejected'
+        ];
+
+        assert.deepStrictEqual(VALID_TIME_ENTRY_STATUSES, expectedStatuses);
+
+        for (const status of expectedStatuses) {
+            const entryId = 'te-status-' + status;
+
+            // 1. Create with status via POST
+            const postRes = await request(app)
+                .post('/api/time-entries')
+                .send({
+                    id: entryId,
+                    employeeId: 'emp-admin',
+                    jobId: 'job-1',
+                    hours: 2,
+                    date: todayStr,
+                    status
+                });
+
+            assert.strictEqual(postRes.status, 201, `Failed on POST for status ${status}`);
+            assert.strictEqual(postRes.body.status, status);
+
+            // 2. Update status via PATCH (e.g. ApprovalsView admin_rejected / foreman_rejected flows)
+            const patchRes = await request(app)
+                .patch('/api/time-entries/' + entryId)
+                .send({
+                    status
+                });
+
+            assert.strictEqual(patchRes.status, 200, `Failed on PATCH for status ${status}`);
+            const stored = store.get(entryId);
+            assert.strictEqual(stored.status, status);
+        }
+    });
+
+    await t.test('Foreman role can approve or reject as foreman, but admin approvals are downgraded', async () => {
+        const todayStr = new Date().toISOString().slice(0, 10);
+
+        // Foreman sending foreman_rejected is accepted
+        const frRes = await request(app)
+            .post('/api/time-entries/batch-import')
+            .set('x-test-role', 'foreman')
+            .send({
+                items: [
+                    { id: 'te-foreman-rej', employeeId: 'test-user', jobId: 'job-1', hours: 4, date: todayStr, status: 'foreman_rejected' }
+                ]
+            });
+        assert.strictEqual(frRes.status, 200);
+        assert.strictEqual(store.get('te-foreman-rej').status, 'foreman_rejected');
+
+        // Foreman sending admin_rejected or admin_approved is downgraded to submitted
+        const faRes = await request(app)
+            .post('/api/time-entries/batch-import')
+            .set('x-test-role', 'foreman')
+            .send({
+                items: [
+                    { id: 'te-foreman-admin-rej', employeeId: 'test-user', jobId: 'job-1', hours: 4, date: todayStr, status: 'admin_rejected' }
+                ]
+            });
+        assert.strictEqual(faRes.status, 200);
+        assert.strictEqual(store.get('te-foreman-admin-rej').status, 'submitted');
     });
 
     await t.test('POST /api/extra-works/batch-import is rejected with 405 without triggering fake notifications', async () => {
