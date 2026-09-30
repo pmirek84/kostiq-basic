@@ -92,10 +92,29 @@ test('Shared Contracts: TimeEntry JSON Schema, Statuses and Payload Conformity',
             if (id === 'emp-db-error') {
                 throw new Error('Database query failure');
             }
-            if (id === 'emp-not-found') {
+            if (id === 'emp-not-found' || id === 'emp-and-sub-not-found' || (id && id.startsWith('sub-'))) {
                 return null;
             }
+            if (id === 'test-user') {
+                return { id: 'test-user', hourlyRate: 50, dailyRate: 400, projectRate: 1500 };
+            }
             return { id: id || 'admin-1', hourlyRate: 50, dailyRate: 400, projectRate: 1500 };
+        }
+    };
+
+    const mockSubcontractorsColl = {
+        findOne: async (f) => {
+            const id = f.$or ? f.$or[0].id : f.id;
+            if (id === 'sub-1') {
+                return { id: 'sub-1', rate: 250, defaultHourlyRate: 250, settlementType: 'godzina' };
+            }
+            if (id === 'sub-daily') {
+                return { id: 'sub-daily', rate: 600, dailyRate: 600, settlementType: 'godzina' };
+            }
+            if (id === 'sub-m2') {
+                return { id: 'sub-m2', rate: 80, settlementType: 'm2' };
+            }
+            return null;
         }
     };
 
@@ -104,6 +123,7 @@ test('Shared Contracts: TimeEntry JSON Schema, Statuses and Payload Conformity',
             if (name === 'time-entries') return mockTimeEntriesColl;
             if (name === 'jobs') return mockJobsColl;
             if (name === 'employees') return mockEmployeesColl;
+            if (name === 'subcontractors') return mockSubcontractorsColl;
             return {
                 findOne: async () => null,
                 find: () => ({ toArray: async () => [] })
@@ -435,6 +455,169 @@ test('Shared Contracts: TimeEntry JSON Schema, Statuses and Payload Conformity',
         assert.strictEqual(resEmpty.status, 400);
         assert.match(resEmpty.body.error, /employeeId jest wymagane/);
     });
+    await t.test('[P1] PATCH authoritative cost recalculation: worker cannot forge cost and changing hours recalculates cost', async () => {
+        // Setup initial daily entry for test-user (worker): 1 day (hours: 1), dailyRate: 400, cost: 400
+        store.set('worker-entry-patch', {
+            id: 'worker-entry-patch',
+            employeeId: 'test-user',
+            jobId: 'job-1',
+            billingType: 'daily',
+            hours: 1,
+            cost: 400,
+            hourlyRate: 400,
+            status: 'submitted',
+            updatedAt: '2026-09-30T10:00:00Z'
+        });
+
+        // 1. Worker tries to forge cost: PATCH { cost: 999999 } without changing hours
+        const resForgeCost = await request(app)
+            .patch('/api/time-entries/worker-entry-patch')
+            .set('Authorization', `Bearer ${workerToken}`)
+            .send({ cost: 999999 });
+
+        assert.strictEqual(resForgeCost.status, 200);
+        const storedAfterForge = store.get('worker-entry-patch');
+        assert.strictEqual(storedAfterForge.cost, 400, 'Worker forged cost must be overwritten with authoritative cost 400');
+        assert.strictEqual(resForgeCost.body.cost, 400);
+
+        // 2. Worker updates hours: PATCH { hours: 2 } on daily entry (dailyRate 400)
+        const resChangeHours = await request(app)
+            .patch('/api/time-entries/worker-entry-patch')
+            .set('Authorization', `Bearer ${workerToken}`)
+            .send({ hours: 2 });
+
+        assert.strictEqual(resChangeHours.status, 200);
+        const storedAfterHours = store.get('worker-entry-patch');
+        assert.strictEqual(storedAfterHours.hours, 2);
+        assert.strictEqual(storedAfterHours.cost, 800, 'Changing hours from 1 to 2 on daily entry must recalculate cost to 800 (2 * 400)');
+        assert.strictEqual(resChangeHours.body.cost, 800);
+        assert.strictEqual(resChangeHours.body.hours, 2);
+    });
+
+    await t.test('[P1] Legacy alias normalization: employee_id and project_id are normalized and deleted before MongoDB persistence', async () => {
+        // 1. Single POST with legacy aliases
+        const legacyPostPayload = {
+            id: 'entry-legacy-post',
+            employee_id: 'admin-1',
+            project_id: 'job-1',
+            hours: 2,
+            cost: 100,
+            billingType: 'hourly'
+        };
+
+        const resPost = await request(app)
+            .post('/api/time-entries')
+            .set('Authorization', `Bearer ${adminToken}`)
+            .send(legacyPostPayload);
+
+        assert.strictEqual(resPost.status, 201);
+        const storedPost = store.get('entry-legacy-post');
+        assert.strictEqual(storedPost.employeeId, 'admin-1');
+        assert.strictEqual(storedPost.jobId, 'job-1');
+        assert.strictEqual(storedPost.employee_id, undefined, 'employee_id MUST NOT be saved in database');
+        assert.strictEqual(storedPost.project_id, undefined, 'project_id MUST NOT be saved in database');
+
+        // 2. Batch import with legacy aliases
+        const batchWithAliases = [
+            { id: 'batch-alias-1', employee_id: 'admin-1', project_id: 'job-1', hours: 3 },
+            { id: 'batch-alias-2', employee_id: 'admin-1', project_id: 'job-1', hours: 4 }
+        ];
+
+        const resBatch = await request(app)
+            .post('/api/time-entries/batch-import')
+            .set('Authorization', `Bearer ${adminToken}`)
+            .send({ items: batchWithAliases });
+
+        assert.strictEqual(resBatch.status, 200);
+        const storedBatch1 = store.get('batch-alias-1');
+        assert.strictEqual(storedBatch1.employeeId, 'admin-1');
+        assert.strictEqual(storedBatch1.jobId, 'job-1');
+        assert.strictEqual(storedBatch1.employee_id, undefined, 'Batch item employee_id MUST NOT exist in database');
+        assert.strictEqual(storedBatch1.project_id, undefined, 'Batch item project_id MUST NOT exist in database');
+
+        // 3. PATCH with legacy alias project_id
+        const resPatch = await request(app)
+            .patch('/api/time-entries/entry-legacy-post')
+            .set('Authorization', `Bearer ${adminToken}`)
+            .send({ project_id: 'job-2' });
+
+        assert.strictEqual(resPatch.status, 200);
+        const storedPatch = store.get('entry-legacy-post');
+        assert.strictEqual(storedPatch.jobId, 'job-2');
+        assert.strictEqual(storedPatch.project_id, undefined, 'PATCH project_id MUST NOT be saved in database');
+    });
+
+    await t.test('[P2] Subcontractor rate resolution: resolves rate from subcontractors collection when not in employees', async () => {
+        // 1. Hourly subcontractor entry: sub-1 has rate 250 PLN/h
+        const resSubHourly = await request(app)
+            .post('/api/time-entries')
+            .set('Authorization', `Bearer ${adminToken}`)
+            .send({
+                id: 'entry-sub-hourly',
+                employeeId: 'sub-1',
+                jobId: 'job-1',
+                type: 'subcontractor',
+                billingType: 'hourly',
+                hours: 4
+            });
+
+        assert.strictEqual(resSubHourly.status, 201);
+        const storedSubHourly = store.get('entry-sub-hourly');
+        assert.strictEqual(storedSubHourly.cost, 1000, 'Subcontractor hourly cost must be 4 * 250 = 1000 PLN');
+        assert.strictEqual(storedSubHourly.hourlyRate, 250);
+
+        // 2. Daily subcontractor entry: sub-daily has rate 600 PLN/day
+        const resSubDaily = await request(app)
+            .post('/api/time-entries')
+            .set('Authorization', `Bearer ${adminToken}`)
+            .send({
+                id: 'entry-sub-daily',
+                employeeId: 'sub-daily',
+                jobId: 'job-1',
+                type: 'subcontractor',
+                billingType: 'daily',
+                hours: 2
+            });
+
+        assert.strictEqual(resSubDaily.status, 201);
+        const storedSubDaily = store.get('entry-sub-daily');
+        assert.strictEqual(storedSubDaily.cost, 1200, 'Subcontractor daily cost must be 2 * 600 = 1200 PLN');
+        assert.strictEqual(storedSubDaily.hourlyRate, 600);
+
+        // 3. m2 subcontractor entry: sub-m2 has rate 80 PLN/m2
+        const resSubM2 = await request(app)
+            .post('/api/time-entries')
+            .set('Authorization', `Bearer ${adminToken}`)
+            .send({
+                id: 'entry-sub-m2',
+                employeeId: 'sub-m2',
+                jobId: 'job-1',
+                type: 'subcontractor',
+                billingType: 'm2',
+                hours: 0,
+                quantity: 10
+            });
+
+        assert.strictEqual(resSubM2.status, 201);
+        const storedSubM2 = store.get('entry-sub-m2');
+        assert.strictEqual(storedSubM2.cost, 800, 'Subcontractor m2 cost must be 10 * 80 = 800 PLN');
+        assert.strictEqual(storedSubM2.rate, 80);
+
+        // 4. Unknown entity in both employees and subcontractors returns 404
+        const resNotFound = await request(app)
+            .post('/api/time-entries')
+            .set('Authorization', `Bearer ${adminToken}`)
+            .send({
+                id: 'entry-unknown-both',
+                employeeId: 'emp-and-sub-not-found',
+                jobId: 'job-1',
+                hours: 2
+            });
+
+        assert.strictEqual(resNotFound.status, 404);
+        assert.match(resNotFound.body.error, /Pracownik lub podwykonawca/);
+    });
+
     await t.test('automated generation guard: verifies timeEntry.generated.ts is strictly up to date with timeEntry.schema.json', async () => {
         const { execSync } = require('child_process');
         const path = require('path');

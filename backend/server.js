@@ -1810,7 +1810,7 @@ const validateTimeEntryPatchSchema = ajv.getSchema('timeEntry#/definitions/TimeE
 const validateTimeEntryBatchSchema = ajv.getSchema('timeEntry#/definitions/TimeEntryBatchImportPayload');
 
 // Shared validation & normalization for time entries (used by single POST/PATCH and batch-import)
-async function validateAndNormalizeTimeEntryDoc(doc, { db, user, isBatch = false, isPatch = false }) {
+async function validateAndNormalizeTimeEntryDoc(doc, { db, user, isBatch = false, isPatch = false, existingEntry = null }) {
     if (!doc || typeof doc !== 'object') {
         return { error: 'Nieprawidłowy obiekt wpisu czasu.' };
     }
@@ -1818,8 +1818,8 @@ async function validateAndNormalizeTimeEntryDoc(doc, { db, user, isBatch = false
     // JSON Schema validation via Ajv from shared/contracts (FAIL-CLOSED)
     const schemaValidator = isPatch ? validateTimeEntryPatchSchema : validateTimeEntryPostSchema;
     const isValidSchema = schemaValidator(doc);
-    const effectiveEmpId = doc.employeeId || doc.employee_id;
-    const effectiveJobId = doc.jobId || doc.project_id;
+    const effectiveEmpId = doc.employeeId || doc.employee_id || existingEntry?.employeeId || existingEntry?.employee_id;
+    const effectiveJobId = doc.jobId || doc.project_id || existingEntry?.jobId || existingEntry?.project_id;
 
     if (!isValidSchema) {
         if (!isPatch) {
@@ -1839,31 +1839,45 @@ async function validateAndNormalizeTimeEntryDoc(doc, { db, user, isBatch = false
                 return { error: 'Pole jobId jest wymagane.' };
             }
             if (firstErr.instancePath.includes('hours')) {
-                if (firstErr.keyword === 'minimum') return { error: 'Godziny nie mog\u0105 by\u0107 ujemne.' };
-                if (firstErr.keyword === 'maximum') return { error: 'Godziny nie mog\u0105 przekracza\u0107 24h na jeden wpis.' };
-                if (firstErr.keyword === 'type') return { error: 'Pole hours musi by\u0107 liczb\u0105.' };
+                if (firstErr.keyword === 'minimum') return { error: 'Godziny nie mogą być ujemne.' };
+                if (firstErr.keyword === 'maximum') return { error: 'Godziny nie mogą przekraczać 24h na jeden wpis.' };
+                if (firstErr.keyword === 'type') return { error: 'Pole hours musi być liczbą.' };
             }
             if (firstErr.instancePath.includes('status')) {
-                return { error: `Nieprawid\u0142owy status wpisu czasu: '${doc.status}'. Dozwolone: ${VALID_TIME_ENTRY_STATUSES.join(', ')}.` };
+                return { error: `Nieprawidłowy status wpisu czasu: '${doc.status}'. Dozwolone: ${VALID_TIME_ENTRY_STATUSES.join(', ')}.` };
             }
             if (firstErr.instancePath.includes('billingType')) {
-                return { error: `Nieprawid\u0142owy typ rozliczenia (billingType): '${doc.billingType}'. Dozwolone: ${BILLING_TYPES.join(', ')}.` };
+                return { error: `Nieprawidłowy typ rozliczenia (billingType): '${doc.billingType}'. Dozwolone: ${BILLING_TYPES.join(', ')}.` };
             }
             if (firstErr.instancePath.includes('type')) {
-                return { error: `Nieprawid\u0142owy typ wpisu (type): '${doc.type}'. Dozwolone: ${TIME_ENTRY_TYPES.join(', ')}.` };
+                return { error: `Nieprawidłowy typ wpisu (type): '${doc.type}'. Dozwolone: ${TIME_ENTRY_TYPES.join(', ')}.` };
             }
         }
         const errorDetails = ajv.errorsText(schemaValidator.errors, { dataVar: 'payload', separator: '; ' });
-        return { error: `B\u0142\u0105d walidacji schematu JSON: ${errorDetails}.` };
+        return { error: `Błąd walidacji schematu JSON: ${errorDetails}.` };
+    }
+
+    // Normalize legacy aliases to canonical fields and delete legacy keys from doc
+    if (doc.employee_id !== undefined) {
+        if (doc.employeeId === undefined) {
+            doc.employeeId = doc.employee_id;
+        }
+        delete doc.employee_id;
+    }
+    if (doc.project_id !== undefined) {
+        if (doc.jobId === undefined) {
+            doc.jobId = doc.project_id;
+        }
+        delete doc.project_id;
     }
 
     // In POST or Batch-Import, employeeId and jobId are mandatory.
     // In PATCH (e.g. status approval/rejection or notes update), they are optional if not being modified.
     if (!isPatch) {
-        if (!effectiveEmpId) {
+        if (!doc.employeeId) {
             return { error: 'Pole employeeId jest wymagane.' };
         }
-        if (!effectiveJobId) {
+        if (!doc.jobId) {
             return { error: 'Pole jobId jest wymagane.' };
         }
     }
@@ -1944,8 +1958,8 @@ async function validateAndNormalizeTimeEntryDoc(doc, { db, user, isBatch = false
         }
     }
 
-    // Block time-entry on closed/cancelled jobs
-    if (db && effectiveJobId && typeof db.collection === 'function') {
+    // Block time-entry on closed/cancelled jobs (on creation, or when reassigning jobId)
+    if ((!isPatch || doc.jobId !== undefined) && db && effectiveJobId && typeof db.collection === 'function') {
         try {
             const job = await db.collection('jobs').findOne(
                 { $or: [{ id: effectiveJobId }, { _id: effectiveJobId }] },
@@ -1962,58 +1976,110 @@ async function validateAndNormalizeTimeEntryDoc(doc, { db, user, isBatch = false
         }
     }
 
-    // Server-side cost calculation:
-    // For hourly, daily, project: authoritative rate comes from employee record in DB.
-    // For fixed, m2, mb, piecework: preserve explicit cost or calculate quantity * rate.
-    const billingType = doc.billingType || 'hourly';
-    if (billingType === 'hourly' || billingType === 'daily' || billingType === 'project') {
-        if (db && effectiveEmpId && typeof db.collection === 'function') {
-            let emp;
+    // Server-side authoritative cost calculation:
+    // Determine effective fields across doc and existingEntry
+    const effectiveBillingType = doc.billingType || existingEntry?.billingType || 'hourly';
+    const effectiveHours = doc.hours !== undefined
+        ? Number(doc.hours)
+        : (existingEntry?.hours !== undefined ? Number(existingEntry.hours) : 0);
+
+    const isWorkerUser = user && (user.role === 'worker' || user.role === 'foreman');
+    const shouldRecalculateCost = !isPatch
+        || doc.hours !== undefined
+        || doc.billingType !== undefined
+        || doc.employeeId !== undefined
+        || doc.cost !== undefined
+        || doc.hourlyRate !== undefined
+        || isWorkerUser;
+
+    if (effectiveBillingType === 'hourly' || effectiveBillingType === 'daily' || effectiveBillingType === 'project') {
+        if (shouldRecalculateCost && db && effectiveEmpId && typeof db.collection === 'function') {
+            let emp = null;
+            let sub = null;
             try {
                 emp = await db.collection('employees').findOne(
                     { $or: [{ id: effectiveEmpId }, { _id: effectiveEmpId }] },
                     { projection: { hourlyRate: 1, defaultHourlyRate: 1, dailyRate: 1, projectRate: 1 } }
                 );
             } catch (e) {
-                console.error('[COST-RECALC] DB lookup failed:', e.message);
+                console.error('[COST-RECALC] Employee lookup failed:', e.message);
                 return {
                     status: 500,
-                    error: `B\u0142\u0105d podczas odczytu stawki pracownika z bazy danych: ${e.message}`
+                    error: `Błąd podczas odczytu stawki pracownika z bazy danych: ${e.message}`
                 };
             }
 
             if (!emp) {
+                try {
+                    sub = await db.collection('subcontractors').findOne(
+                        { $or: [{ id: effectiveEmpId }, { _id: effectiveEmpId }] },
+                        { projection: { rate: 1, defaultHourlyRate: 1, settlementType: 1, dailyRate: 1, projectRate: 1 } }
+                    );
+                } catch (e) {
+                    console.error('[COST-RECALC] Subcontractor lookup failed:', e.message);
+                    return {
+                        status: 500,
+                        error: `Błąd podczas odczytu stawki podwykonawcy z bazy danych: ${e.message}`
+                    };
+                }
+            }
+
+            if (!emp && !sub) {
                 return {
                     status: 404,
-                    error: `Pracownik '${effectiveEmpId}' nie zosta\u0142 odnaleziony w bazie danych.`
+                    error: `Pracownik lub podwykonawca '${effectiveEmpId}' nie został odnaleziony w bazie danych.`
                 };
             }
 
-            if (billingType === 'hourly') {
-                const hours = Number(doc.hours) || 0;
-                const freshRate = Number(emp.hourlyRate ?? emp.defaultHourlyRate) || 0;
-                const freshCostCents = toCents(hours) * toCents(freshRate) / 100;
+            if (effectiveBillingType === 'hourly') {
+                const freshRate = emp
+                    ? (Number(emp.hourlyRate ?? emp.defaultHourlyRate) || 0)
+                    : (Number(sub.defaultHourlyRate ?? sub.rate) || 0);
+                const freshCostCents = toCents(effectiveHours) * toCents(freshRate) / 100;
                 doc.cost = toCurrency(freshCostCents);
                 doc.hourlyRate = freshRate;
-            } else if (billingType === 'daily') {
-                const daysOrHours = Number(doc.hours) || 0;
-                const freshDailyRate = Number(emp.dailyRate) || 0;
-                const freshCostCents = toCents(daysOrHours) * toCents(freshDailyRate) / 100;
+            } else if (effectiveBillingType === 'daily') {
+                const freshDailyRate = emp
+                    ? (Number(emp.dailyRate) || 0)
+                    : (Number(sub.dailyRate ?? sub.rate) || 0);
+                const freshCostCents = toCents(effectiveHours) * toCents(freshDailyRate) / 100;
                 doc.cost = toCurrency(freshCostCents);
                 doc.hourlyRate = freshDailyRate;
-            } else if (billingType === 'project') {
-                const freshProjectRate = Number(emp.projectRate) || 0;
+            } else if (effectiveBillingType === 'project') {
+                const freshProjectRate = emp
+                    ? (Number(emp.projectRate) || 0)
+                    : (Number(sub.projectRate ?? sub.rate) || 0);
                 doc.cost = toCurrency(toCents(freshProjectRate));
                 doc.hourlyRate = freshProjectRate;
             }
         }
     } else {
         // Non-hourly/non-employee billing (fixed, m2, mb, piecework)
-        // If cost is not explicitly provided, calculate quantity * rate if available
-        if (doc.cost === undefined && doc.quantity !== undefined && (doc.rate !== undefined || doc.unitPrice !== undefined)) {
-            const qty = Number(doc.quantity) || 0;
-            const unitRate = Number(doc.rate !== undefined ? doc.rate : doc.unitPrice) || 0;
-            doc.cost = toCurrency(toCents(qty) * toCents(unitRate) / 100);
+        // Resolve rate from subcontractor record if not specified
+        let unitRate = doc.rate !== undefined ? Number(doc.rate) : (doc.unitPrice !== undefined ? Number(doc.unitPrice) : undefined);
+        if (unitRate === undefined && db && effectiveEmpId && typeof db.collection === 'function') {
+            try {
+                const sub = await db.collection('subcontractors').findOne(
+                    { $or: [{ id: effectiveEmpId }, { _id: effectiveEmpId }] },
+                    { projection: { rate: 1, defaultHourlyRate: 1 } }
+                );
+                if (sub) {
+                    unitRate = Number(sub.rate ?? sub.defaultHourlyRate) || 0;
+                    doc.rate = unitRate;
+                }
+            } catch (e) {
+                console.error('[COST-RECALC] Subcontractor rate lookup failed:', e.message);
+            }
+        }
+
+        const qty = doc.quantity !== undefined
+            ? Number(doc.quantity)
+            : (existingEntry?.quantity !== undefined ? Number(existingEntry.quantity) : undefined);
+
+        if (qty !== undefined && unitRate !== undefined) {
+            if (shouldRecalculateCost) {
+                doc.cost = toCurrency(toCents(qty) * toCents(unitRate) / 100);
+            }
         }
     }
 
@@ -2080,7 +2146,21 @@ async function validateTimeEntryBatch(req, res, next) {
             return res.status(400).json({ error: `Pozycja #${i + 1} nie jest prawidłowym obiektem.` });
         }
 
-        const effectiveEmpId = item.employeeId || item.employee_id;
+        // Pre-normalize legacy aliases for this batch item
+        if (item.employee_id !== undefined) {
+            if (item.employeeId === undefined) {
+                item.employeeId = item.employee_id;
+            }
+            delete item.employee_id;
+        }
+        if (item.project_id !== undefined) {
+            if (item.jobId === undefined) {
+                item.jobId = item.project_id;
+            }
+            delete item.project_id;
+        }
+
+        const effectiveEmpId = item.employeeId;
 
         // Security check 2: Worker may ONLY import entries for their own ID and only with allowed statuses
         if (isWorker) {
@@ -2118,6 +2198,45 @@ async function validateTimeEntry(req, res, next) {
         return validateTimeEntryBatch(req, res, next);
     }
 
+    // Pre-normalize legacy aliases in req.body immediately
+    if (req.body && typeof req.body === 'object') {
+        if (req.body.employee_id !== undefined) {
+            if (req.body.employeeId === undefined) {
+                req.body.employeeId = req.body.employee_id;
+            }
+            delete req.body.employee_id;
+        }
+        if (req.body.project_id !== undefined) {
+            if (req.body.jobId === undefined) {
+                req.body.jobId = req.body.project_id;
+            }
+            delete req.body.project_id;
+        }
+    }
+
+    const pathId = req.path ? req.path.replace(/^\//, '').split('/')[0] : null;
+    const targetId = req.params?.id || (pathId && pathId !== 'batch-import' && pathId !== 'batch-update' ? pathId : null) || req.body?.id;
+
+    let existingEntry = null;
+    if (req.method === 'PATCH' && targetId && db && typeof db.collection === 'function') {
+        try {
+            existingEntry = await db.collection('time-entries').findOne({ id: targetId });
+            if (!existingEntry) {
+                existingEntry = await db.collection('time-entries').findOne({ _id: targetId });
+            }
+            if (!existingEntry) {
+                return res.status(404).json({
+                    error: `Nie znaleziono wpisu czasu o identyfikatorze '${targetId}'.`
+                });
+            }
+        } catch (err) {
+            console.error('[validateTimeEntry] Single entry lookup error:', err.message);
+            return res.status(503).json({
+                error: 'Nie można zweryfikować uprawnień własności rekordu z powodu błędu bazy danych.'
+            });
+        }
+    }
+
     const isWorker = req.user && (req.user.role === 'worker' || req.user.role === 'foreman');
     const userEmpId = req.user?.id || req.user?._id;
 
@@ -2126,7 +2245,7 @@ async function validateTimeEntry(req, res, next) {
 
         // Security check 1: In POST, worker can only create entry for their own employeeId
         if (req.method === 'POST') {
-            const bodyEmpId = req.body?.employeeId || req.body?.employee_id;
+            const bodyEmpId = req.body?.employeeId;
             if (bodyEmpId && String(bodyEmpId) !== String(userEmpId)) {
                 return res.status(403).json({
                     error: `Brak uprawnień: Pracownik może tworzyć wpisy wyłącznie dla własnego identyfikatora (${userEmpId}). Wykryto: ${bodyEmpId}.`
@@ -2142,11 +2261,21 @@ async function validateTimeEntry(req, res, next) {
 
         // Security check 2: In PATCH, worker cannot reassign employeeId to another employee
         if (req.method === 'PATCH') {
-            const patchEmpId = req.body?.employeeId || req.body?.employee_id;
+            const patchEmpId = req.body?.employeeId;
             if (patchEmpId && String(patchEmpId) !== String(userEmpId)) {
                 return res.status(403).json({
                     error: `Brak uprawnień: Pracownik nie może zmieniać przypisania wpisu (employeeId) na innego pracownika (${patchEmpId}).`
                 });
+            }
+
+            // Security check 3: Verify ownership of existing record
+            if (existingEntry) {
+                const existingEmpId = existingEntry.employeeId || existingEntry.employee_id;
+                if (existingEmpId && String(existingEmpId) !== String(userEmpId)) {
+                    return res.status(403).json({
+                        error: 'Brak uprawnień: Nie można modyfikować wpisu innego pracownika.'
+                    });
+                }
             }
         }
 
@@ -2154,38 +2283,14 @@ async function validateTimeEntry(req, res, next) {
         if (req.body && req.body.status && !allowedStatuses.includes(req.body.status)) {
             req.body.status = 'submitted';
         }
-
-        // Security check 3: For PATCH/POST targeting an ID: verify ownership of existing record (fail-closed 503)
-        const pathId = req.path ? req.path.replace(/^\//, '').split('/')[0] : null;
-        const targetId = req.params?.id || (pathId && pathId !== 'batch-import' ? pathId : null) || req.body?.id;
-        if (targetId && db && typeof db.collection === 'function') {
-            try {
-                const existing = await db.collection('time-entries').findOne(
-                    { id: targetId },
-                    { projection: { employeeId: 1, employee_id: 1 } }
-                );
-                if (existing) {
-                    const existingEmpId = existing.employeeId || existing.employee_id;
-                    if (existingEmpId && String(existingEmpId) !== String(userEmpId)) {
-                        return res.status(403).json({
-                            error: 'Brak uprawnień: Nie można modyfikować wpisu innego pracownika.'
-                        });
-                    }
-                }
-            } catch (err) {
-                console.error('[validateTimeEntry] Single entry ownership check error:', err.message);
-                return res.status(503).json({
-                    error: 'Nie można zweryfikować uprawnień własności rekordu z powodu błędu bazy danych.'
-                });
-            }
-        }
     }
 
     const valError = await validateAndNormalizeTimeEntryDoc(req.body, {
         db,
         user: req.user,
         isBatch: false,
-        isPatch: req.method === 'PATCH'
+        isPatch: req.method === 'PATCH',
+        existingEntry
     });
     if (valError) {
         return res.status(valError.status || 400).json({ error: valError.error });
@@ -2193,7 +2298,6 @@ async function validateTimeEntry(req, res, next) {
 
     next();
 }
-
 
 // Financial amount validation: no negative amounts (invoices + offers + extra-works)
 function validateFinancialAmount(req, res, next) {

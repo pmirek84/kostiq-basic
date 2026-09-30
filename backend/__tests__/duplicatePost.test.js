@@ -398,7 +398,7 @@ test('Backend Atomic Duplicate Prevention & Batch Import', async (t) => {
         assert.strictEqual(res.status, 200);
         const updated = store.get('te-patch-1');
         assert.strictEqual(updated.status, 'approved');
-        assert.strictEqual(updated.cost, 250);
+        assert.strictEqual(updated.cost, 200, 'Authoritative cost calculation must override client cost (4h * 50 = 200)');
         assert.strictEqual(updated.employeeId, 'emp-101');
         assert.strictEqual(updated.jobId, 'job-1');
     });
