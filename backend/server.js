@@ -1976,9 +1976,76 @@ async function validateAndNormalizeTimeEntryDoc(doc, { db, user, isBatch = false
         }
     }
 
-    // Server-side authoritative cost calculation:
-    // Determine effective fields across doc and existingEntry
-    const effectiveBillingType = doc.billingType || existingEntry?.billingType || 'hourly';
+    // Upfront entity verification (fail-closed for all billing types)
+    let emp = null;
+    let sub = null;
+    if (db && effectiveEmpId && typeof db.collection === 'function') {
+        try {
+            emp = await db.collection('employees').findOne(
+                { $or: [{ id: effectiveEmpId }, { _id: effectiveEmpId }] },
+                { projection: { hourlyRate: 1, defaultHourlyRate: 1, dailyRate: 1, projectRate: 1 } }
+            );
+        } catch (e) {
+            console.error('[ENTITY-LOOKUP] Employee lookup failed:', e.message);
+            return {
+                status: 500,
+                error: `Błąd podczas odczytu pracownika z bazy danych: ${e.message}`
+            };
+        }
+
+        if (!emp) {
+            try {
+                sub = await db.collection('subcontractors').findOne(
+                    { $or: [{ id: effectiveEmpId }, { _id: effectiveEmpId }] },
+                    { projection: { rate: 1, defaultHourlyRate: 1, settlementType: 1 } }
+                );
+            } catch (e) {
+                console.error('[ENTITY-LOOKUP] Subcontractor lookup failed:', e.message);
+                return {
+                    status: 500,
+                    error: `Błąd podczas odczytu podwykonawcy z bazy danych: ${e.message}`
+                };
+            }
+        }
+
+        if (!emp && !sub) {
+            return {
+                status: 404,
+                error: `Pracownik lub podwykonawca '${effectiveEmpId}' nie został odnaleziony w bazie danych.`
+            };
+        }
+    }
+
+    // Subcontractor settlementType mapping & mismatch validation
+    const SUB_SETTLEMENT_TO_BILLING_TYPES = {
+        'godzina': ['hourly'],
+        'm2': ['m2'],
+        'mb': ['mb'],
+        'ryczałt': ['project', 'fixed']
+    };
+    const SUB_DEFAULT_BILLING = {
+        'godzina': 'hourly',
+        'm2': 'm2',
+        'mb': 'mb',
+        'ryczałt': 'project'
+    };
+
+    if (sub && sub.settlementType && !doc.billingType && !existingEntry?.billingType) {
+        doc.billingType = SUB_DEFAULT_BILLING[sub.settlementType] || 'hourly';
+    }
+
+    const effectiveBillingType = doc.billingType || existingEntry?.billingType || (sub?.settlementType ? SUB_DEFAULT_BILLING[sub.settlementType] : 'hourly');
+
+    if (sub && sub.settlementType) {
+        const allowedBillingTypes = SUB_SETTLEMENT_TO_BILLING_TYPES[sub.settlementType];
+        if (allowedBillingTypes && !allowedBillingTypes.includes(effectiveBillingType)) {
+            return {
+                status: 400,
+                error: `Nieprawidłowy typ rozliczenia '${effectiveBillingType}' dla podwykonawcy '${effectiveEmpId}' (zdefiniowany typ rozliczenia: '${sub.settlementType}', dopuszczalne typy: ${allowedBillingTypes.join(', ')}).`
+            };
+        }
+    }
+
     const effectiveHours = doc.hours !== undefined
         ? Number(doc.hours)
         : (existingEntry?.hours !== undefined ? Number(existingEntry.hours) : 0);
@@ -1986,103 +2053,70 @@ async function validateAndNormalizeTimeEntryDoc(doc, { db, user, isBatch = false
     const isWorkerUser = user && (user.role === 'worker' || user.role === 'foreman');
     const shouldRecalculateCost = !isPatch
         || doc.hours !== undefined
+        || doc.quantity !== undefined
+        || doc.rate !== undefined
+        || doc.unitPrice !== undefined
         || doc.billingType !== undefined
         || doc.employeeId !== undefined
         || doc.cost !== undefined
         || doc.hourlyRate !== undefined
         || isWorkerUser;
 
-    if (effectiveBillingType === 'hourly' || effectiveBillingType === 'daily' || effectiveBillingType === 'project') {
-        if (shouldRecalculateCost && db && effectiveEmpId && typeof db.collection === 'function') {
-            let emp = null;
-            let sub = null;
-            try {
-                emp = await db.collection('employees').findOne(
-                    { $or: [{ id: effectiveEmpId }, { _id: effectiveEmpId }] },
-                    { projection: { hourlyRate: 1, defaultHourlyRate: 1, dailyRate: 1, projectRate: 1 } }
-                );
-            } catch (e) {
-                console.error('[COST-RECALC] Employee lookup failed:', e.message);
-                return {
-                    status: 500,
-                    error: `Błąd podczas odczytu stawki pracownika z bazy danych: ${e.message}`
-                };
+    if (shouldRecalculateCost) {
+        if (effectiveBillingType === 'hourly') {
+            const freshRate = emp
+                ? (Number(emp.hourlyRate ?? emp.defaultHourlyRate) || 0)
+                : (Number(sub?.defaultHourlyRate ?? sub?.rate) || 0);
+            const freshCostCents = toCents(effectiveHours) * toCents(freshRate) / 100;
+            doc.cost = toCurrency(freshCostCents);
+            doc.hourlyRate = freshRate;
+        } else if (effectiveBillingType === 'daily') {
+            const freshDailyRate = Number(emp?.dailyRate) || 0;
+            const freshCostCents = toCents(effectiveHours) * toCents(freshDailyRate) / 100;
+            doc.cost = toCurrency(freshCostCents);
+            doc.hourlyRate = freshDailyRate;
+        } else if (effectiveBillingType === 'project') {
+            const freshProjectRate = emp
+                ? (Number(emp.projectRate) || 0)
+                : (Number(sub?.rate) || 0);
+            doc.cost = toCurrency(toCents(freshProjectRate));
+            doc.hourlyRate = freshProjectRate;
+        } else if (effectiveBillingType === 'm2' || effectiveBillingType === 'mb') {
+            const effectiveQuantity = doc.quantity !== undefined
+                ? Number(doc.quantity)
+                : (existingEntry?.quantity !== undefined ? Number(existingEntry.quantity) : 0);
+
+            let unitRate;
+            if (sub) {
+                unitRate = (!isWorkerUser && doc.rate !== undefined)
+                    ? Number(doc.rate)
+                    : (Number(sub.rate) || 0);
+            } else {
+                unitRate = doc.rate !== undefined
+                    ? Number(doc.rate)
+                    : (existingEntry?.rate !== undefined
+                        ? Number(existingEntry.rate)
+                        : (doc.unitPrice !== undefined
+                            ? Number(doc.unitPrice)
+                            : (existingEntry?.unitPrice !== undefined ? Number(existingEntry.unitPrice) : 0)));
             }
 
-            if (!emp) {
-                try {
-                    sub = await db.collection('subcontractors').findOne(
-                        { $or: [{ id: effectiveEmpId }, { _id: effectiveEmpId }] },
-                        { projection: { rate: 1, defaultHourlyRate: 1, settlementType: 1, dailyRate: 1, projectRate: 1 } }
-                    );
-                } catch (e) {
-                    console.error('[COST-RECALC] Subcontractor lookup failed:', e.message);
-                    return {
-                        status: 500,
-                        error: `Błąd podczas odczytu stawki podwykonawcy z bazy danych: ${e.message}`
-                    };
+            doc.rate = unitRate;
+            doc.cost = toCurrency(toCents(effectiveQuantity) * toCents(unitRate) / 100);
+        } else if (effectiveBillingType === 'fixed') {
+            if (sub) {
+                const fixedRate = (!isWorkerUser && doc.cost !== undefined)
+                    ? Number(doc.cost)
+                    : (Number(sub.rate) || 0);
+                doc.cost = toCurrency(toCents(fixedRate));
+                doc.rate = fixedRate;
+            } else {
+                if (doc.cost === undefined && existingEntry?.cost !== undefined) {
+                    doc.cost = existingEntry.cost;
                 }
-            }
-
-            if (!emp && !sub) {
-                return {
-                    status: 404,
-                    error: `Pracownik lub podwykonawca '${effectiveEmpId}' nie został odnaleziony w bazie danych.`
-                };
-            }
-
-            if (effectiveBillingType === 'hourly') {
-                const freshRate = emp
-                    ? (Number(emp.hourlyRate ?? emp.defaultHourlyRate) || 0)
-                    : (Number(sub.defaultHourlyRate ?? sub.rate) || 0);
-                const freshCostCents = toCents(effectiveHours) * toCents(freshRate) / 100;
-                doc.cost = toCurrency(freshCostCents);
-                doc.hourlyRate = freshRate;
-            } else if (effectiveBillingType === 'daily') {
-                const freshDailyRate = emp
-                    ? (Number(emp.dailyRate) || 0)
-                    : (Number(sub.dailyRate ?? sub.rate) || 0);
-                const freshCostCents = toCents(effectiveHours) * toCents(freshDailyRate) / 100;
-                doc.cost = toCurrency(freshCostCents);
-                doc.hourlyRate = freshDailyRate;
-            } else if (effectiveBillingType === 'project') {
-                const freshProjectRate = emp
-                    ? (Number(emp.projectRate) || 0)
-                    : (Number(sub.projectRate ?? sub.rate) || 0);
-                doc.cost = toCurrency(toCents(freshProjectRate));
-                doc.hourlyRate = freshProjectRate;
-            }
-        }
-    } else {
-        // Non-hourly/non-employee billing (fixed, m2, mb, piecework)
-        // Resolve rate from subcontractor record if not specified
-        let unitRate = doc.rate !== undefined ? Number(doc.rate) : (doc.unitPrice !== undefined ? Number(doc.unitPrice) : undefined);
-        if (unitRate === undefined && db && effectiveEmpId && typeof db.collection === 'function') {
-            try {
-                const sub = await db.collection('subcontractors').findOne(
-                    { $or: [{ id: effectiveEmpId }, { _id: effectiveEmpId }] },
-                    { projection: { rate: 1, defaultHourlyRate: 1 } }
-                );
-                if (sub) {
-                    unitRate = Number(sub.rate ?? sub.defaultHourlyRate) || 0;
-                    doc.rate = unitRate;
-                }
-            } catch (e) {
-                console.error('[COST-RECALC] Subcontractor rate lookup failed:', e.message);
-            }
-        }
-
-        const qty = doc.quantity !== undefined
-            ? Number(doc.quantity)
-            : (existingEntry?.quantity !== undefined ? Number(existingEntry.quantity) : undefined);
-
-        if (qty !== undefined && unitRate !== undefined) {
-            if (shouldRecalculateCost) {
-                doc.cost = toCurrency(toCents(qty) * toCents(unitRate) / 100);
             }
         }
     }
-
     return null;
 }
 

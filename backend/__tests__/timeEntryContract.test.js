@@ -92,7 +92,7 @@ test('Shared Contracts: TimeEntry JSON Schema, Statuses and Payload Conformity',
             if (id === 'emp-db-error') {
                 throw new Error('Database query failure');
             }
-            if (id === 'emp-not-found' || id === 'emp-and-sub-not-found' || (id && id.startsWith('sub-'))) {
+            if (id === 'emp-not-found' || id === 'emp-and-sub-not-found' || id === 'does-not-exist' || (id && id.startsWith('sub-'))) {
                 return null;
             }
             if (id === 'test-user') {
@@ -108,11 +108,14 @@ test('Shared Contracts: TimeEntry JSON Schema, Statuses and Payload Conformity',
             if (id === 'sub-1') {
                 return { id: 'sub-1', rate: 250, defaultHourlyRate: 250, settlementType: 'godzina' };
             }
-            if (id === 'sub-daily') {
-                return { id: 'sub-daily', rate: 600, dailyRate: 600, settlementType: 'godzina' };
-            }
             if (id === 'sub-m2') {
                 return { id: 'sub-m2', rate: 80, settlementType: 'm2' };
+            }
+            if (id === 'sub-mb') {
+                return { id: 'sub-mb', rate: 45, settlementType: 'mb' };
+            }
+            if (id === 'sub-ryczalt') {
+                return { id: 'sub-ryczalt', rate: 1500, settlementType: 'rycza?t' };
             }
             return null;
         }
@@ -547,8 +550,8 @@ test('Shared Contracts: TimeEntry JSON Schema, Statuses and Payload Conformity',
         assert.strictEqual(storedPatch.project_id, undefined, 'PATCH project_id MUST NOT be saved in database');
     });
 
-    await t.test('[P2] Subcontractor rate resolution: resolves rate from subcontractors collection when not in employees', async () => {
-        // 1. Hourly subcontractor entry: sub-1 has rate 250 PLN/h
+    await t.test('[P1 & P2] Subcontractor domain rates, settlementType mapping, and mismatch validation', async () => {
+        // 1. Hourly subcontractor entry: sub-1 has rate 250 PLN/h and settlementType 'godzina'
         const resSubHourly = await request(app)
             .post('/api/time-entries')
             .set('Authorization', `Bearer ${adminToken}`)
@@ -566,25 +569,25 @@ test('Shared Contracts: TimeEntry JSON Schema, Statuses and Payload Conformity',
         assert.strictEqual(storedSubHourly.cost, 1000, 'Subcontractor hourly cost must be 4 * 250 = 1000 PLN');
         assert.strictEqual(storedSubHourly.hourlyRate, 250);
 
-        // 2. Daily subcontractor entry: sub-daily has rate 600 PLN/day
-        const resSubDaily = await request(app)
+        // 2. Rycza?t subcontractor entry: sub-ryczalt has rate 1500 PLN and settlementType 'rycza?t'
+        const resSubProject = await request(app)
             .post('/api/time-entries')
             .set('Authorization', `Bearer ${adminToken}`)
             .send({
-                id: 'entry-sub-daily',
-                employeeId: 'sub-daily',
+                id: 'entry-sub-project',
+                employeeId: 'sub-ryczalt',
                 jobId: 'job-1',
                 type: 'subcontractor',
-                billingType: 'daily',
-                hours: 2
+                billingType: 'project',
+                hours: 0
             });
 
-        assert.strictEqual(resSubDaily.status, 201);
-        const storedSubDaily = store.get('entry-sub-daily');
-        assert.strictEqual(storedSubDaily.cost, 1200, 'Subcontractor daily cost must be 2 * 600 = 1200 PLN');
-        assert.strictEqual(storedSubDaily.hourlyRate, 600);
+        assert.strictEqual(resSubProject.status, 201);
+        const storedSubProject = store.get('entry-sub-project');
+        assert.strictEqual(storedSubProject.cost, 1500, 'Subcontractor project cost must be 1500 PLN');
+        assert.strictEqual(storedSubProject.hourlyRate, 1500);
 
-        // 3. m2 subcontractor entry: sub-m2 has rate 80 PLN/m2
+        // 3. m2 subcontractor entry: sub-m2 has rate 80 PLN/m2 and settlementType 'm2'
         const resSubM2 = await request(app)
             .post('/api/time-entries')
             .set('Authorization', `Bearer ${adminToken}`)
@@ -594,7 +597,6 @@ test('Shared Contracts: TimeEntry JSON Schema, Statuses and Payload Conformity',
                 jobId: 'job-1',
                 type: 'subcontractor',
                 billingType: 'm2',
-                hours: 0,
                 quantity: 10
             });
 
@@ -603,7 +605,23 @@ test('Shared Contracts: TimeEntry JSON Schema, Statuses and Payload Conformity',
         assert.strictEqual(storedSubM2.cost, 800, 'Subcontractor m2 cost must be 10 * 80 = 800 PLN');
         assert.strictEqual(storedSubM2.rate, 80);
 
-        // 4. Unknown entity in both employees and subcontractors returns 404
+        // 4. Mismatch validation: sub-m2 (settlementType 'm2') submitted with billingType 'hourly' MUST be rejected with 400
+        const resMismatch = await request(app)
+            .post('/api/time-entries')
+            .set('Authorization', `Bearer ${adminToken}`)
+            .send({
+                id: 'entry-sub-mismatch',
+                employeeId: 'sub-m2',
+                jobId: 'job-1',
+                type: 'subcontractor',
+                billingType: 'hourly',
+                hours: 4
+            });
+
+        assert.strictEqual(resMismatch.status, 400, 'Mismatched settlementType (m2 sub billed as hourly) MUST return 400');
+        assert.match(resMismatch.body.error, /typ rozliczenia 'hourly'/);
+
+        // 5. Unknown entity in both employees and subcontractors returns 404
         const resNotFound = await request(app)
             .post('/api/time-entries')
             .set('Authorization', `Bearer ${adminToken}`)
@@ -616,6 +634,65 @@ test('Shared Contracts: TimeEntry JSON Schema, Statuses and Payload Conformity',
 
         assert.strictEqual(resNotFound.status, 404);
         assert.match(resNotFound.body.error, /Pracownik lub podwykonawca/);
+    });
+
+    await t.test('[P1] Non-existent employee with client rate in m2/mb/fixed is rejected with 404 (no orphaned records)', async () => {
+        const resOrphan = await request(app)
+            .post('/api/time-entries')
+            .set('Authorization', `Bearer ${adminToken}`)
+            .send({
+                id: 'orphan-entry-test',
+                employeeId: 'does-not-exist',
+                jobId: 'job-1',
+                type: 'subcontractor',
+                billingType: 'm2',
+                quantity: 10,
+                rate: 80
+            });
+
+        assert.strictEqual(resOrphan.status, 404, 'Must reject with 404 even if client provided rate/unitPrice');
+        assert.match(resOrphan.body.error, /Pracownik lub podwykonawca/);
+        assert.strictEqual(store.has('orphan-entry-test'), false, 'Orphaned record must NEVER be saved in database');
+    });
+
+    await t.test('[P1] PATCH quantity or rate on m2/mb entries recalculates cost authoritatively', async () => {
+        // Setup initial m2 entry: 10 m2 at 80 PLN/m2 = 800 PLN
+        store.set('m2-patch-test', {
+            id: 'm2-patch-test',
+            employeeId: 'sub-m2',
+            jobId: 'job-1',
+            type: 'subcontractor',
+            billingType: 'm2',
+            quantity: 10,
+            rate: 80,
+            cost: 800,
+            status: 'submitted',
+            updatedAt: '2026-09-30T10:00:00Z'
+        });
+
+        // 1. PATCH quantity: { quantity: 20 } -> cost must become 20 * 80 = 1600
+        const resPatchQty = await request(app)
+            .patch('/api/time-entries/m2-patch-test')
+            .set('Authorization', `Bearer ${adminToken}`)
+            .send({ quantity: 20 });
+
+        assert.strictEqual(resPatchQty.status, 200);
+        const storedAfterQty = store.get('m2-patch-test');
+        assert.strictEqual(storedAfterQty.quantity, 20);
+        assert.strictEqual(storedAfterQty.cost, 1600, 'PATCH quantity 20 must recalculate cost to 1600 (20 * 80)');
+        assert.strictEqual(resPatchQty.body.cost, 1600);
+
+        // 2. PATCH rate: { rate: 100 } -> cost must become 20 * 100 = 2000
+        const resPatchRate = await request(app)
+            .patch('/api/time-entries/m2-patch-test')
+            .set('Authorization', `Bearer ${adminToken}`)
+            .send({ rate: 100 });
+
+        assert.strictEqual(resPatchRate.status, 200);
+        const storedAfterRate = store.get('m2-patch-test');
+        assert.strictEqual(storedAfterRate.rate, 100);
+        assert.strictEqual(storedAfterRate.cost, 2000, 'PATCH rate 100 must recalculate cost to 2000 (20 * 100)');
+        assert.strictEqual(resPatchRate.body.cost, 2000);
     });
 
     await t.test('automated generation guard: verifies timeEntry.generated.ts is strictly up to date with timeEntry.schema.json', async () => {
