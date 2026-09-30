@@ -9,6 +9,7 @@ const jwt = require('jsonwebtoken');
 const {
     app,
     setDb,
+    backfillTimeEntriesWorkerType,
     VALID_TIME_ENTRY_STATUSES,
     WORKER_ALLOWED_TIME_ENTRY_STATUSES,
     FOREMAN_ALLOWED_TIME_ENTRY_STATUSES,
@@ -848,6 +849,160 @@ test('Shared Contracts: TimeEntry JSON Schema, Statuses and Payload Conformity',
         const storedSubDrive = store.get('entry-sub-drive');
         assert.strictEqual(storedSubDrive.workerType, 'subcontractor');
         assert.strictEqual(storedSubDrive.activityType, 'drive');
+    });
+
+
+    await t.test('[P1] PATCH cannot clear employeeId or jobId with empty string or whitespace (fail-closed)', async () => {
+        // Create initial valid entry owned by worker
+        store.set('entry-for-empty-check', {
+            id: 'entry-for-empty-check',
+            employeeId: 'test-user',
+            jobId: 'job-1',
+            date: '2026-03-01T00:00:00.000Z',
+            hours: 4,
+            billingType: 'hourly',
+            hourlyRate: 50,
+            cost: 200,
+            status: 'submitted',
+            workerType: 'employee',
+            activityType: 'work'
+        });
+
+        // 1. Worker tries to clear employeeId: ""
+        const resWorkerEmptyEmp = await request(app)
+            .patch('/api/time-entries/entry-for-empty-check')
+            .set('Authorization', 'Bearer ' + workerToken)
+            .send({ employeeId: '' });
+        assert.strictEqual(resWorkerEmptyEmp.status, 400);
+        assert.match(resWorkerEmptyEmp.body.error, /employeeId nie może być puste/);
+        assert.strictEqual(store.get('entry-for-empty-check').employeeId, 'test-user', 'employeeId must NOT be cleared');
+
+        // 2. Worker tries to clear employeeId: "   "
+        const resWorkerWhitespaceEmp = await request(app)
+            .patch('/api/time-entries/entry-for-empty-check')
+            .set('Authorization', 'Bearer ' + workerToken)
+            .send({ employeeId: '   ' });
+        assert.strictEqual(resWorkerWhitespaceEmp.status, 400);
+        assert.match(resWorkerWhitespaceEmp.body.error, /employeeId nie może być puste/);
+
+        // 3. Worker tries to clear jobId: ""
+        const resWorkerEmptyJob = await request(app)
+            .patch('/api/time-entries/entry-for-empty-check')
+            .set('Authorization', 'Bearer ' + workerToken)
+            .send({ jobId: '' });
+        assert.strictEqual(resWorkerEmptyJob.status, 400);
+        assert.match(resWorkerEmptyJob.body.error, /jobId nie może być puste/);
+        assert.strictEqual(store.get('entry-for-empty-check').jobId, 'job-1', 'jobId must NOT be cleared');
+
+        // 4. Admin tries to clear jobId: ""
+        const resAdminEmptyJob = await request(app)
+            .patch('/api/time-entries/entry-for-empty-check')
+            .set('Authorization', 'Bearer ' + adminToken)
+            .send({ jobId: '' });
+        assert.strictEqual(resAdminEmptyJob.status, 400);
+        assert.match(resAdminEmptyJob.body.error, /jobId nie może być puste/);
+
+        // 5. Admin tries to clear employeeId: ""
+        const resAdminEmptyEmp = await request(app)
+            .patch('/api/time-entries/entry-for-empty-check')
+            .set('Authorization', 'Bearer ' + adminToken)
+            .send({ employeeId: '' });
+        assert.strictEqual(resAdminEmptyEmp.status, 400);
+        assert.match(resAdminEmptyEmp.body.error, /employeeId nie może być puste/);
+    });
+
+    await t.test('[P2] Historical migration backfill: backfills workerType and activityType for legacy entries and GET enriches missing values', async () => {
+        // Setup legacy entries in a simulated targetDb with system_migrations
+        const legacyEntries = [
+            {
+                _id: 'legacy-sub-entry',
+                id: 'legacy-sub-entry',
+                employeeId: 'sub-1', // points to subcontractor
+                jobId: 'job-1',
+                type: 'work', // legacy type with activity instead of worker
+                hours: 8,
+                billingType: 'hourly',
+                cost: 400
+                // workerType and activityType are missing
+            },
+            {
+                _id: 'legacy-emp-entry',
+                id: 'legacy-emp-entry',
+                employeeId: 'admin-1', // points to employee
+                jobId: 'job-1',
+                type: 'work',
+                hours: 8,
+                billingType: 'hourly',
+                cost: 400
+                // workerType and activityType are missing
+            }
+        ];
+
+        const legacyStore = new Map(legacyEntries.map(e => [e._id, { ...e }]));
+        const migrationsStore = new Map();
+
+        const mockMigrationDb = {
+            collection: (name) => {
+                if (name === 'system_migrations') {
+                    return {
+                        findOne: async (query) => migrationsStore.get(query.id) || null,
+                        updateOne: async (query, update, opts) => {
+                            if (opts && opts.upsert && !migrationsStore.has(query.id)) {
+                                migrationsStore.set(query.id, { id: query.id, ...update.$setOnInsert });
+                            }
+                        }
+                    };
+                }
+                if (name === 'time-entries') {
+                    return {
+                        find: (query) => ({
+                            toArray: async () => Array.from(legacyStore.values()).filter(e => !e.workerType)
+                        }),
+                        updateOne: async (filter, update) => {
+                            const doc = legacyStore.get(filter._id);
+                            if (doc && update.$set) {
+                                Object.assign(doc, update.$set);
+                            }
+                        }
+                    };
+                }
+                if (name === 'subcontractors') {
+                    return {
+                        findOne: async (query) => {
+                            const qId = query.$or?.[0]?.id;
+                            if (qId === 'sub-1') return { id: 'sub-1', name: 'Podwykonawca 1' };
+                            return null;
+                        }
+                    };
+                }
+                if (name === 'employees') {
+                    return {
+                        findOne: async (query) => {
+                            const qId = query.$or?.[0]?.id;
+                            if (qId === 'admin-1') return { id: 'admin-1', name: 'Pracownik 1' };
+                            return null;
+                        }
+                    };
+                }
+                return { findOne: async () => null };
+            }
+        };
+
+        // Run backfill
+        const updatedCount = await backfillTimeEntriesWorkerType(mockMigrationDb);
+        assert.strictEqual(updatedCount, 2, 'Should backfill exactly 2 legacy entries');
+
+        const migratedSub = legacyStore.get('legacy-sub-entry');
+        assert.strictEqual(migratedSub.workerType, 'subcontractor', 'Subcontractor ID must resolve to workerType: subcontractor even with legacy type: work');
+        assert.strictEqual(migratedSub.activityType, 'work');
+
+        const migratedEmp = legacyStore.get('legacy-emp-entry');
+        assert.strictEqual(migratedEmp.workerType, 'employee', 'Employee ID must resolve to workerType: employee');
+        assert.strictEqual(migratedEmp.activityType, 'work');
+
+        // Running again is a no-op (idempotent via system_migrations)
+        const secondRun = await backfillTimeEntriesWorkerType(mockMigrationDb);
+        assert.strictEqual(secondRun, 0, 'Second run must be a no-op due to migration marker');
     });
 
     await t.test('automated generation guard: verifies timeEntry.generated.ts is strictly up to date with timeEntry.schema.json', async () => {

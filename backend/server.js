@@ -483,6 +483,94 @@ async function repairLegacyC4c2ac3Standards(targetDb) {
 
 const repairIncompleteStandards = repairLegacyC4c2ac3Standards;
 
+async function backfillTimeEntriesWorkerType(targetDb) {
+    if (!targetDb) return 0;
+    const migrationsColl = targetDb.collection('system_migrations');
+    const migrationId = 'backfill_time_entries_worker_type_v1';
+
+    const alreadyApplied = await migrationsColl.findOne({ id: migrationId });
+    if (alreadyApplied) {
+        return 0;
+    }
+
+    const timeEntriesColl = targetDb.collection('time-entries');
+    const employeesColl = targetDb.collection('employees');
+    const subcontractorsColl = targetDb.collection('subcontractors');
+
+    const cursor = timeEntriesColl.find({
+        $or: [
+            { workerType: { $exists: false } },
+            { workerType: null },
+            { workerType: '' }
+        ]
+    });
+
+    const entriesToUpdate = await cursor.toArray();
+    let updatedCount = 0;
+
+    for (const entry of entriesToUpdate) {
+        const empId = entry.employeeId || entry.employee_id;
+        let resolvedWorkerType = null;
+
+        if (empId) {
+            const isSub = await subcontractorsColl.findOne({
+                $or: [{ id: empId }, { _id: empId }]
+            });
+            if (isSub) {
+                resolvedWorkerType = 'subcontractor';
+            } else {
+                const isEmp = await employeesColl.findOne({
+                    $or: [{ id: empId }, { _id: empId }]
+                });
+                if (isEmp) {
+                    resolvedWorkerType = 'employee';
+                }
+            }
+        }
+
+        if (!resolvedWorkerType) {
+            resolvedWorkerType = entry.type === 'subcontractor' ? 'subcontractor' : 'employee';
+        }
+
+        let resolvedActivityType = entry.activityType;
+        if (!resolvedActivityType) {
+            resolvedActivityType = ['drive', 'work', 'other'].includes(entry.type) ? entry.type : 'work';
+        }
+
+        await timeEntriesColl.updateOne(
+            { _id: entry._id },
+            {
+                $set: {
+                    workerType: resolvedWorkerType,
+                    activityType: resolvedActivityType,
+                    updatedAt: entry.updatedAt || new Date().toISOString()
+                }
+            }
+        );
+        updatedCount++;
+    }
+
+    await migrationsColl.updateOne(
+        { id: migrationId },
+        {
+            $setOnInsert: {
+                id: migrationId,
+                appliedAt: new Date().toISOString(),
+                version: 1,
+                updatedCount
+            }
+        },
+        { upsert: true }
+    );
+
+    if (updatedCount > 0) {
+        console.log(`[MIGRATION] Backfilled workerType & activityType for ${updatedCount} legacy time-entry records.`);
+    }
+
+    return updatedCount;
+}
+
+
 async function seedInitialDataIfEmpty(targetDb) {
     if (!targetDb) return { seeded: false, reason: 'No db instance' };
     const migrationsColl = targetDb.collection('system_migrations');
@@ -781,6 +869,7 @@ async function connectDB() {
         indexInitError = null;
         await reconcileDuplicatesAndEnsureIndexes(db);
         await seedInitialDataIfEmpty(db);
+        await backfillTimeEntriesWorkerType(db);
         dbReady = true;
         console.log('Successfully reconciled duplicates and verified all unique indexes.');
     } catch (err) {
@@ -1817,11 +1906,46 @@ async function validateAndNormalizeTimeEntryDoc(doc, { db, user, isBatch = false
         return { error: 'Nieprawidłowy obiekt wpisu czasu.' };
     }
 
+    // Pre-trim and validate non-empty string for identifiers if explicitly provided
+    if (doc.employeeId !== undefined) {
+        if (typeof doc.employeeId === 'string') doc.employeeId = doc.employeeId.trim();
+        if (!doc.employeeId) {
+            return { error: 'Pole employeeId nie może być puste.' };
+        }
+    }
+    if (doc.employee_id !== undefined) {
+        if (typeof doc.employee_id === 'string') doc.employee_id = doc.employee_id.trim();
+        if (!doc.employee_id) {
+            return { error: 'Pole employeeId nie może być puste.' };
+        }
+    }
+    if (doc.jobId !== undefined) {
+        if (typeof doc.jobId === 'string') doc.jobId = doc.jobId.trim();
+        if (!doc.jobId) {
+            return { error: 'Pole jobId nie może być puste.' };
+        }
+    }
+    if (doc.project_id !== undefined) {
+        if (typeof doc.project_id === 'string') doc.project_id = doc.project_id.trim();
+        if (!doc.project_id) {
+            return { error: 'Pole jobId nie może być puste.' };
+        }
+    }
+
     // JSON Schema validation via Ajv from shared/contracts (FAIL-CLOSED)
     const schemaValidator = isPatch ? validateTimeEntryPatchSchema : validateTimeEntryPostSchema;
     const isValidSchema = schemaValidator(doc);
-    const effectiveEmpId = doc.employeeId || doc.employee_id || existingEntry?.employeeId || existingEntry?.employee_id;
-    const effectiveJobId = doc.jobId || doc.project_id || existingEntry?.jobId || existingEntry?.project_id;
+
+    // Explicit fallback ONLY when property is undefined (NOT when falsy)
+    const reqEmpId = doc.employeeId !== undefined ? doc.employeeId : doc.employee_id;
+    const effectiveEmpId = reqEmpId !== undefined
+        ? reqEmpId
+        : (isPatch ? (existingEntry?.employeeId || existingEntry?.employee_id) : undefined);
+
+    const reqJobId = doc.jobId !== undefined ? doc.jobId : doc.project_id;
+    const effectiveJobId = reqJobId !== undefined
+        ? reqJobId
+        : (isPatch ? (existingEntry?.jobId || existingEntry?.project_id) : undefined);
 
     if (!isValidSchema) {
         if (!isPatch) {
@@ -1834,6 +1958,14 @@ async function validateAndNormalizeTimeEntryDoc(doc, { db, user, isBatch = false
         }
         const firstErr = schemaValidator.errors?.[0];
         if (firstErr) {
+            if (firstErr.keyword === 'minLength') {
+                if (firstErr.instancePath.includes('employeeId') || firstErr.instancePath.includes('employee_id')) {
+                    return { error: 'Pole employeeId nie może być puste.' };
+                }
+                if (firstErr.instancePath.includes('jobId') || firstErr.instancePath.includes('project_id')) {
+                    return { error: 'Pole jobId nie może być puste.' };
+                }
+            }
             if (firstErr.keyword === 'required' || firstErr.params?.missingProperty === 'employeeId') {
                 return { error: 'Pole employeeId jest wymagane.' };
             }
@@ -2351,13 +2483,21 @@ async function validateTimeEntry(req, res, next) {
             }
         }
 
-        // Security check 2: In PATCH, worker cannot reassign employeeId to another employee
+        // Security check 2: In PATCH, worker cannot reassign employeeId to another employee or clear it
         if (req.method === 'PATCH') {
-            const patchEmpId = req.body?.employeeId;
-            if (patchEmpId && String(patchEmpId) !== String(userEmpId)) {
-                return res.status(403).json({
-                    error: `Brak uprawnień: Pracownik nie może zmieniać przypisania wpisu (employeeId) na innego pracownika (${patchEmpId}).`
-                });
+            const patchEmpId = req.body?.employeeId !== undefined ? req.body.employeeId : req.body?.employee_id;
+            if (patchEmpId !== undefined) {
+                const trimmedEmpId = typeof patchEmpId === 'string' ? patchEmpId.trim() : patchEmpId;
+                if (!trimmedEmpId) {
+                    return res.status(400).json({
+                        error: 'Pole employeeId nie może być puste.'
+                    });
+                }
+                if (String(trimmedEmpId) !== String(userEmpId)) {
+                    return res.status(403).json({
+                        error: `Brak uprawnień: Pracownik nie może zmieniać przypisania wpisu (employeeId) na innego pracownika (${patchEmpId}).`
+                    });
+                }
             }
 
             // Security check 3: Verify ownership of existing record
@@ -2374,6 +2514,28 @@ async function validateTimeEntry(req, res, next) {
         // Whitelist allowed statuses for worker/foreman
         if (req.body && req.body.status && !allowedStatuses.includes(req.body.status)) {
             req.body.status = 'submitted';
+        }
+    }
+
+    if (req.method === 'PATCH') {
+        const patchEmpId = req.body?.employeeId !== undefined ? req.body.employeeId : req.body?.employee_id;
+        if (patchEmpId !== undefined) {
+            const trimmedEmpId = typeof patchEmpId === 'string' ? patchEmpId.trim() : patchEmpId;
+            if (!trimmedEmpId) {
+                return res.status(400).json({
+                    error: 'Pole employeeId nie może być puste.'
+                });
+            }
+        }
+
+        const patchJobId = req.body?.jobId !== undefined ? req.body.jobId : req.body?.project_id;
+        if (patchJobId !== undefined) {
+            const trimmedJobId = typeof patchJobId === 'string' ? patchJobId.trim() : patchJobId;
+            if (!trimmedJobId) {
+                return res.status(400).json({
+                    error: 'Pole jobId nie może być puste.'
+                });
+            }
         }
     }
 
@@ -3117,6 +3279,7 @@ module.exports = {
     seedInitialDataIfEmpty,
     repairLegacyC4c2ac3Standards,
     repairIncompleteStandards,
+    backfillTimeEntriesWorkerType,
     VALID_TIME_ENTRY_STATUSES,
     WORKER_ALLOWED_TIME_ENTRY_STATUSES,
     FOREMAN_ALLOWED_TIME_ENTRY_STATUSES,

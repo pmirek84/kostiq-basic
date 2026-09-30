@@ -80,13 +80,15 @@
           "type": "string"
         },
         "employeeId": {
-          "type": "string"
+          "type": "string",
+          "minLength": 1
         },
         "employeeName": {
           "type": "string"
         },
         "jobId": {
-          "type": "string"
+          "type": "string",
+          "minLength": 1
         },
         "jobCode": {
           "type": "string"
@@ -300,10 +302,12 @@
       "type": "object",
       "properties": {
         "employeeId": {
-          "type": "string"
+          "type": "string",
+          "minLength": 1
         },
         "jobId": {
-          "type": "string"
+          "type": "string",
+          "minLength": 1
         }
       },
       "required": [
@@ -323,10 +327,12 @@
           "type": "object",
           "properties": {
             "employeeId": {
-              "type": "string"
+              "type": "string",
+              "minLength": 1
             },
             "jobId": {
-              "type": "string"
+              "type": "string",
+              "minLength": 1
             }
           },
           "required": [
@@ -344,10 +350,12 @@
           "type": "object",
           "properties": {
             "employee_id": {
-              "type": "string"
+              "type": "string",
+              "minLength": 1
             },
             "jobId": {
-              "type": "string"
+              "type": "string",
+              "minLength": 1
             }
           },
           "required": [
@@ -365,10 +373,12 @@
           "type": "object",
           "properties": {
             "employeeId": {
-              "type": "string"
+              "type": "string",
+              "minLength": 1
             },
             "project_id": {
-              "type": "string"
+              "type": "string",
+              "minLength": 1
             }
           },
           "required": [
@@ -386,10 +396,12 @@
           "type": "object",
           "properties": {
             "employee_id": {
-              "type": "string"
+              "type": "string",
+              "minLength": 1
             },
             "project_id": {
-              "type": "string"
+              "type": "string",
+              "minLength": 1
             }
           },
           "required": [
@@ -407,16 +419,20 @@
           "type": "string"
         },
         "employeeId": {
-          "type": "string"
+          "type": "string",
+          "minLength": 1
         },
         "employee_id": {
-          "type": "string"
+          "type": "string",
+          "minLength": 1
         },
         "jobId": {
-          "type": "string"
+          "type": "string",
+          "minLength": 1
         },
         "project_id": {
-          "type": "string"
+          "type": "string",
+          "minLength": 1
         },
         "jobCode": {
           "type": "string"

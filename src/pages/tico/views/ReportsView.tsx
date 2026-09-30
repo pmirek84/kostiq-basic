@@ -5,9 +5,12 @@ import { PieChart, Pie, Cell, ResponsiveContainer, BarChart, Bar, XAxis, YAxis, 
 import { Download } from 'lucide-react';
 
 export const ReportsView = () => {
-    const { timeEntries } = useTiCo();
+    const { timeEntries, subcontractors } = useTiCo();
     const { jobs } = useJobs();
     const [viewMode, setViewMode] = useState<'project' | 'category'>('project');
+
+    // Build Set of known subcontractor IDs for reliable category classification of legacy entries
+    const subIds = useMemo(() => new Set((subcontractors || []).map(s => s.id)), [subcontractors]);
 
     // --- Analytics Data ---
     const data = useMemo(() => {
@@ -30,8 +33,10 @@ export const ReportsView = () => {
                 projectCosts.set('other', projectCosts.get('other')! + cost);
             }
 
-            // Category Aggregation
-            const isSub = entry.workerType ? entry.workerType === 'subcontractor' : entry.type === 'subcontractor';
+            // Category Aggregation: authoritative workerType with fallback to subcontractor IDs and legacy type
+            const isSub = entry.workerType
+                ? entry.workerType === 'subcontractor'
+                : (subIds.has(entry.employeeId) || entry.type === 'subcontractor');
             if (isSub) {
                 subCost += cost;
             } else {
@@ -58,7 +63,7 @@ export const ReportsView = () => {
         ];
 
         return { projectChartData, categoryChartData, totalCost: empCost + subCost };
-    }, [timeEntries, jobs]);
+    }, [timeEntries, jobs, subIds]);
 
     const COLORS = ['#0088FE', '#00C49F', '#FFBB28', '#FF8042', '#8884d8', '#82ca9d'];
 
