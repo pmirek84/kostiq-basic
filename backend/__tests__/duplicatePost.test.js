@@ -416,6 +416,101 @@ test('Backend Atomic Duplicate Prevention & Batch Import', async (t) => {
         assert.match(res.body.error, /Nieprawidłowy format daty/);
     });
 
+    await t.test('POST /api/time-entries rejects worker attempting to create entry for another employee with 403', async () => {
+        const todayStr = new Date().toISOString().slice(0, 10);
+        const payload = {
+            id: 'te-worker-post-other',
+            employeeId: 'other-emp-99',
+            jobId: 'job-1',
+            hours: 4,
+            date: todayStr
+        };
+
+        const res = await request(app)
+            .post('/api/time-entries')
+            .set('x-test-role', 'worker')
+            .send(payload);
+
+        assert.strictEqual(res.status, 403);
+        assert.match(res.body.error, /Pracownik może tworzyć wpisy wyłącznie dla własnego identyfikatora/);
+    });
+
+    await t.test('PATCH /api/time-entries/:id rejects worker attempting to reassign entry to another employee with 403', async () => {
+        const todayStr = new Date().toISOString().slice(0, 10);
+        store.set('te-worker-own', {
+            id: 'te-worker-own',
+            employeeId: 'test-user',
+            jobId: 'job-1',
+            hours: 4,
+            date: todayStr,
+            status: 'submitted'
+        });
+
+        const patchPayload = {
+            employeeId: 'other-emp-99'
+        };
+
+        const res = await request(app)
+            .patch('/api/time-entries/te-worker-own')
+            .set('x-test-role', 'worker')
+            .send(patchPayload);
+
+        assert.strictEqual(res.status, 403);
+        assert.match(res.body.error, /Pracownik nie może zmieniać przypisania wpisu/);
+    });
+
+    await t.test('Worker ownership check fails closed with 503 if database errors out', async () => {
+        const todayStr = new Date().toISOString().slice(0, 10);
+        const originalFindOne = mockCollection.findOne;
+        mockCollection.findOne = async () => { throw new Error('DB connection dropped'); };
+
+        try {
+            const res = await request(app)
+                .patch('/api/time-entries/te-worker-own')
+                .set('x-test-role', 'worker')
+                .send({ status: 'submitted' });
+
+            assert.strictEqual(res.status, 503);
+            assert.match(res.body.error, /Nie można zweryfikować uprawnień własności rekordu/);
+        } finally {
+            mockCollection.findOne = originalFindOne;
+        }
+    });
+
+    await t.test('POST /api/time-entries defaults status to submitted and rejects invalid status with 400', async () => {
+        const todayStr = new Date().toISOString().slice(0, 10);
+
+        // 1. Invalid status rejected
+        const invalidRes = await request(app)
+            .post('/api/time-entries')
+            .send({
+                id: 'te-inv-status',
+                employeeId: 'emp-101',
+                jobId: 'job-1',
+                hours: 4,
+                date: todayStr,
+                status: 'bogus_status_xyz'
+            });
+
+        assert.strictEqual(invalidRes.status, 400);
+        assert.match(invalidRes.body.error, /Nieprawidłowy status wpisu czasu/);
+
+        // 2. Missing status defaults to submitted
+        const validRes = await request(app)
+            .post('/api/time-entries')
+            .send({
+                id: 'te-default-status',
+                employeeId: 'emp-101',
+                jobId: 'job-1',
+                hours: 4,
+                date: todayStr
+            });
+
+        assert.strictEqual(validRes.status, 201);
+        const stored = store.get('te-default-status');
+        assert.strictEqual(stored.status, 'submitted');
+    });
+
     await t.test('POST /api/extra-works/batch-import is rejected with 405 without triggering fake notifications', async () => {
         const notifCountBefore = notifications.length;
 
@@ -481,7 +576,8 @@ test('Database Indexing & Migration: Reconciling Duplicates & Verification', asy
                 name: 'Newest Name',
                 notes: null,
                 stages: [{ id: 's2', name: 'Stage 2 Different' }],
-                updatedAt: '2026-09-01T00:00:00Z'
+                updatedAt: '2026-09-01T00:00:00Z',
+                creationDate: new Date('2026-01-15T12:00:00Z')
             },
             {
                 _id: 'doc-mid',
@@ -558,10 +654,12 @@ test('Database Indexing & Migration: Reconciling Duplicates & Verification', asy
 
         await reconcileDuplicatesAndEnsureIndexes(testDb);
 
-        // 1. Verify all versions (primary snapshot + duplicates) were backed up to quarantine
+        // 1. Verify all versions (primary snapshot + duplicates) were backed up to quarantine with BSON types intact
         assert.strictEqual(quarantinedDocs.length, 3);
         assert.strictEqual(quarantinedDocs[0].documentId, 'dup-id-1');
-        assert.ok(quarantinedDocs.some(d => d.reason === 'pre_merge_primary_snapshot'));
+        const primarySnapshot = quarantinedDocs.find(d => d.reason === 'pre_merge_primary_snapshot');
+        assert.ok(primarySnapshot);
+        assert.ok(primarySnapshot.duplicateDoc.creationDate instanceof Date);
         assert.ok(quarantinedDocs.some(d => d.reason === 'duplicate_key_reconciliation'));
 
         // 2. Verify non-destructive field merge

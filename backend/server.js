@@ -2,7 +2,18 @@ const express = require('express');
 const cors = require('cors');
 const path = require('path');
 const fs = require('fs');
-const { MongoClient, ObjectId } = require('mongodb');
+const { MongoClient, ObjectId, BSON } = require('mongodb');
+
+// BSON Deep Clone helper: preserves full BSON types (Date, ObjectId, Decimal128, Binary) without JSON degradation
+function cloneBsonDoc(doc) {
+    if (!doc) return doc;
+    try {
+        if (BSON && typeof BSON.serialize === 'function' && typeof BSON.deserialize === 'function') {
+            return BSON.deserialize(BSON.serialize(doc));
+        }
+    } catch (_) {}
+    return { ...doc };
+}
 const bcrypt = require('bcryptjs');
 const multer = require('multer');
 const rateLimit = require('express-rate-limit'); // Security: Brute Force protection
@@ -204,7 +215,7 @@ async function reconcileDuplicatesAndEnsureIndexes(database) {
                                 originalDocId: primaryDoc._id,
                                 archivedAt: new Date().toISOString(),
                                 reason: 'pre_merge_primary_snapshot',
-                                duplicateDoc: JSON.parse(JSON.stringify(primaryDoc))
+                                duplicateDoc: cloneBsonDoc(primaryDoc)
                             },
                             ...duplicateDocs.map(dup => ({
                                 quarantineId: new ObjectId().toString(),
@@ -213,7 +224,7 @@ async function reconcileDuplicatesAndEnsureIndexes(database) {
                                 originalDocId: dup._id,
                                 archivedAt: new Date().toISOString(),
                                 reason: 'duplicate_key_reconciliation',
-                                duplicateDoc: dup
+                                duplicateDoc: cloneBsonDoc(dup)
                             }))
                         ];
 
@@ -614,14 +625,23 @@ const createRouter = (collectionName, options = {}) => {
                     });
                 }
 
+                const isWorker = req.user && (req.user.role === 'worker' || req.user.role === 'foreman');
+                const userEmpId = req.user?.id || req.user?._id;
+
                 const now = new Date().toISOString();
                 const operations = items.map(item => {
                     const itemId = item.id || new ObjectId().toString();
                     const { _id, createdAt, ...rest } = item;
 
+                    // Atomic ownership filter: for worker/foreman on time-entries, include employeeId in filter
+                    // so that an existing entry owned by someone else can never be matched or updated by this worker
+                    const filter = (isWorker && collectionName === 'time-entries' && userEmpId)
+                        ? { id: itemId, employeeId: userEmpId }
+                        : { id: itemId };
+
                     return {
                         updateOne: {
-                            filter: { id: itemId },
+                            filter,
                             update: {
                                 $set: {
                                     ...rest,
@@ -1252,6 +1272,18 @@ async function validateAndNormalizeTimeEntryDoc(doc, { db, user, isBatch = false
         }
     }
 
+    // Status validation & defaulting: validate status against domain whitelist
+    const VALID_TIME_ENTRY_STATUSES = ['draft', 'submitted', 'foreman_approved', 'admin_approved', 'approved', 'rejected', 'settled'];
+    if (!doc.status) {
+        if (!isPatch) {
+            doc.status = 'submitted';
+        }
+    } else {
+        if (!VALID_TIME_ENTRY_STATUSES.includes(doc.status)) {
+            return { error: `Nieprawidłowy status wpisu czasu: '${doc.status}'. Dozwolone: ${VALID_TIME_ENTRY_STATUSES.join(', ')}.` };
+        }
+    }
+
     if (doc.hours !== undefined) {
         const h = Number(doc.hours);
         if (isNaN(h) || h < 0) {
@@ -1405,6 +1437,9 @@ async function validateTimeEntryBatch(req, res, next) {
                 }
             } catch (err) {
                 console.error('[validateTimeEntryBatch] Ownership check error:', err.message);
+                return res.status(503).json({
+                    error: 'Nie można zweryfikować uprawnień własności rekordu z powodu błędu bazy danych.'
+                });
             }
         }
     }
@@ -1465,12 +1500,40 @@ async function validateTimeEntry(req, res, next) {
         const FOREMAN_ALLOWED_STATUSES = ['draft', 'submitted', 'foreman_approved'];
         const allowedStatuses = req.user?.role === 'foreman' ? FOREMAN_ALLOWED_STATUSES : WORKER_ALLOWED_STATUSES;
 
+        // Security check 1: In POST, worker can only create entry for their own employeeId
+        if (req.method === 'POST') {
+            const bodyEmpId = req.body?.employeeId || req.body?.employee_id;
+            if (bodyEmpId && String(bodyEmpId) !== String(userEmpId)) {
+                return res.status(403).json({
+                    error: `Brak uprawnień: Pracownik może tworzyć wpisy wyłącznie dla własnego identyfikatora (${userEmpId}). Wykryto: ${bodyEmpId}.`
+                });
+            }
+            if (!bodyEmpId && userEmpId) {
+                req.body.employeeId = userEmpId;
+            }
+            if (!req.body.status) {
+                req.body.status = 'submitted';
+            }
+        }
+
+        // Security check 2: In PATCH, worker cannot reassign employeeId to another employee
+        if (req.method === 'PATCH') {
+            const patchEmpId = req.body?.employeeId || req.body?.employee_id;
+            if (patchEmpId && String(patchEmpId) !== String(userEmpId)) {
+                return res.status(403).json({
+                    error: `Brak uprawnień: Pracownik nie może zmieniać przypisania wpisu (employeeId) na innego pracownika (${patchEmpId}).`
+                });
+            }
+        }
+
+        // Whitelist allowed statuses for worker/foreman
         if (req.body && req.body.status && !allowedStatuses.includes(req.body.status)) {
             req.body.status = 'submitted';
         }
 
-        // For PATCH/POST targeting an ID: verify ownership of existing record
-        const targetId = req.params?.id || req.body?.id;
+        // Security check 3: For PATCH/POST targeting an ID: verify ownership of existing record (fail-closed 503)
+        const pathId = req.path ? req.path.replace(/^\//, '').split('/')[0] : null;
+        const targetId = req.params?.id || (pathId && pathId !== 'batch-import' ? pathId : null) || req.body?.id;
         if (targetId && db && typeof db.collection === 'function') {
             try {
                 const existing = await db.collection('time-entries').findOne(
@@ -1487,6 +1550,9 @@ async function validateTimeEntry(req, res, next) {
                 }
             } catch (err) {
                 console.error('[validateTimeEntry] Single entry ownership check error:', err.message);
+                return res.status(503).json({
+                    error: 'Nie można zweryfikować uprawnień własności rekordu z powodu błędu bazy danych.'
+                });
             }
         }
     }
