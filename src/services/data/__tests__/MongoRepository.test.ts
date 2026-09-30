@@ -110,4 +110,28 @@ describe('MongoRepository - Pagination & Error Handling', () => {
 
         await expect(repo.getTimeEntries()).rejects.toThrow('API Error: 500');
     });
+    it('calls POST /time-entries/batch-import with items payload and returns counts', async () => {
+        const entries = [{ id: 'te-1', employeeId: 'e1', jobId: 'j1', hours: 8 }] as any;
+        mockFetch.mockResolvedValueOnce({
+            ok: true,
+            status: 200,
+            json: async () => ({
+                status: 'success',
+                succeeded: 1,
+                failed: 0,
+                errors: []
+            })
+        });
+
+        const result = await repo.batchImportTimeEntries(entries);
+        expect(result.succeeded).toBe(1);
+        expect(result.failed).toBe(0);
+        expect(mockFetch).toHaveBeenCalledWith(
+            'http://localhost:3000/api/time-entries/batch-import',
+            expect.objectContaining({
+                method: 'POST',
+                body: JSON.stringify({ items: entries })
+            })
+        );
+    });
 });

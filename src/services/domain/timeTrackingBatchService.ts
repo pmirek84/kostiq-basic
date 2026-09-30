@@ -9,41 +9,62 @@ export type BatchOperationResult = {
 };
 
 /**
- * Imports time entries sequentially, performing upsert by ID to prevent duplicate MongoDB documents.
+ * Imports time entries. When the repository implements batchImportTimeEntries,
+ * it performs bulk upsert via the backend batch-import endpoint, preserving createdAt.
+ * Otherwise falls back to sequential upserts.
  * Returns explicit operation counts and errors.
  */
 export async function executeImportTimeEntries(
     entries: TimeEntry[],
     existingEntries: TimeEntry[],
-    repository: Pick<TiCoRepository, 'createTimeEntry' | 'updateTimeEntry'>
+    repository: Pick<TiCoRepository, 'createTimeEntry' | 'updateTimeEntry'> & {
+        batchImportTimeEntries?: (entries: TimeEntry[]) => Promise<BatchOperationResult>;
+    }
 ): Promise<{ result: BatchOperationResult; savedEntries: TimeEntry[] }> {
+    const existingMap = new Map(existingEntries.map(e => [e.id, e]));
+    const now = new Date().toISOString();
+
+    const preparedEntries: TimeEntry[] = entries.map(entry => {
+        const entryId = entry.id || uuidv4();
+        const existing = existingMap.get(entryId);
+        return {
+            ...entry,
+            id: entryId,
+            createdAt: (existing && existing.createdAt) || entry.createdAt || now,
+            updatedAt: now
+        };
+    });
+
+    if (typeof repository.batchImportTimeEntries === 'function') {
+        try {
+            const batchResult = await repository.batchImportTimeEntries(preparedEntries);
+            return {
+                result: batchResult,
+                savedEntries: batchResult.failed === 0 ? preparedEntries : preparedEntries.slice(0, batchResult.succeeded)
+            };
+        } catch (err: any) {
+            console.warn('[executeImportTimeEntries] Batch import failed, falling back to sequential import:', err);
+            // Fallback to sequential below
+        }
+    }
+
     const savedEntries: TimeEntry[] = [];
     const errors: string[] = [];
-    const existingMap = new Map(existingEntries.map(e => [e.id, e]));
 
-    for (const entry of entries) {
+    for (const entryToSave of preparedEntries) {
         try {
-            const entryId = entry.id || uuidv4();
-            const existing = existingMap.get(entryId);
-
+            const existing = existingMap.get(entryToSave.id);
             let saved: TimeEntry;
-            const entryToSave: TimeEntry = {
-                ...entry,
-                id: entryId,
-                createdAt: (existing && existing.createdAt) || entry.createdAt || new Date().toISOString(),
-                updatedAt: new Date().toISOString()
-            };
-
             if (existing) {
-                saved = await repository.updateTimeEntry(entryId, entryToSave);
+                saved = await repository.updateTimeEntry(entryToSave.id, entryToSave);
             } else {
                 saved = await repository.createTimeEntry(entryToSave);
-                existingMap.set(entryId, saved || entryToSave);
+                existingMap.set(entryToSave.id, saved || entryToSave);
             }
             savedEntries.push(saved || entryToSave);
         } catch (err: any) {
-            const msg = err.message || `Błąd importu wpisu ${entry.id || 'bez id'}`;
-            console.error('Failed to import time entry', entry, err);
+            const msg = err.message || `Błąd importu wpisu ${entryToSave.id || 'bez id'}`;
+            console.error('Failed to import time entry', entryToSave, err);
             errors.push(msg);
         }
     }

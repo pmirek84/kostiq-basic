@@ -221,6 +221,18 @@ export class MongoRepository implements TiCoRepository {
         });
     }
 
+    async batchImportTimeEntries(entries: TimeEntry[]): Promise<{ succeeded: number; failed: number; errors: string[] }> {
+        const res = await this.fetchJson<{ status?: string; succeeded?: number; failed?: number; errors?: string[] }>('/time-entries/batch-import', {
+            method: 'POST',
+            body: JSON.stringify({ items: entries }),
+        });
+        return {
+            succeeded: res.succeeded ?? 0,
+            failed: res.failed ?? 0,
+            errors: res.errors ?? [],
+        };
+    }
+
     // --- Settlements ---
 
     async getSettlements(): Promise<Settlement[]> {

@@ -125,22 +125,92 @@ let client;
 
 // Connect to MongoDB
 
-// Ensure unique index on { id: 1 } for all collections to guarantee uniqueness at the database level
-async function ensureIndexes(database) {
+const ALL_SYSTEM_COLLECTIONS = [
+    'jobs', 'offers', 'time-entries', 'settlements', 'employees',
+    'subcontractors', 'clients', 'crews', 'catalog-materials',
+    'materials', 'offer-templates', 'notifications', 'site-logs',
+    'messages', 'archived-reports', 'extra-works', 'company-settings',
+    'invoices', 'cost-invoices', 'requests', 'payments', 'constructions', 'boms',
+    'installation-rates', 'logistics-rates', 'rental-rates', 'sheet-metal',
+    'custom-events', 'client-reports', 'checklists', 'checklist-templates',
+    'standards', 'settings', 'jobStageItems', 'subcontractor_contracts',
+    'documents', 'equipment'
+];
+
+const ALLOWED_BATCH_IMPORT_COLLECTIONS = new Set([
+    'time-entries',
+    'clients',
+    'catalog-materials',
+    'materials'
+]);
+
+let dbReady = process.env.NODE_ENV === 'test';
+let indexInitError = null;
+
+// Reconciles duplicates and creates unique index on { id: 1 } for all system collections
+async function reconcileDuplicatesAndEnsureIndexes(database) {
     if (!database) return;
-    const COLLECTIONS = [
-        'jobs', 'offers', 'time-entries', 'settlements', 'employees',
-        'subcontractors', 'clients', 'crews', 'catalog-materials',
-        'materials', 'offer-templates', 'notifications', 'site-logs',
-        'messages', 'archived-reports', 'extra-works', 'company-settings',
-        'invoices', 'requests', 'payments', 'constructions', 'boms'
-    ];
-    for (const col of COLLECTIONS) {
+    const failures = [];
+
+    for (const col of ALL_SYSTEM_COLLECTIONS) {
         try {
-            await database.collection(col).createIndex({ id: 1 }, { unique: true, sparse: true });
-        } catch (e) {
-            // Ignore index creation conflicts if any
+            const collection = database.collection(col);
+            if (!collection) continue;
+
+            // 1. Group by id and remove stale duplicates, keeping the newest record
+            if (typeof collection.aggregate === 'function') {
+                const duplicates = await collection.aggregate([
+                    { $match: { id: { $exists: true, $ne: null } } },
+                    { $group: {
+                        _id: "$id",
+                        count: { $sum: 1 },
+                        docs: { $push: { _id: "$_id", updatedAt: "$updatedAt", createdAt: "$createdAt" } }
+                    } },
+                    { $match: { count: { $gt: 1 } } }
+                ]).toArray();
+
+                if (duplicates && duplicates.length > 0) {
+                    console.warn(`[INDEX MIGRATION] Found ${duplicates.length} duplicate ID group(s) in collection '${col}'. Reconciling...`);
+                    for (const group of duplicates) {
+                        const docs = group.docs || [];
+                        docs.sort((a, b) => {
+                            const timeA = new Date(a.updatedAt || a.createdAt || 0).getTime();
+                            const timeB = new Date(b.updatedAt || b.createdAt || 0).getTime();
+                            if (timeB !== timeA) return timeB - timeA;
+                            return String(b._id).localeCompare(String(a._id));
+                        });
+                        const redundantIds = docs.slice(1).map(d => d._id);
+                        if (redundantIds.length > 0) {
+                            await collection.deleteMany({ _id: { $in: redundantIds } });
+                            console.warn(`[INDEX MIGRATION] Kept latest record for id '${group._id}', removed ${redundantIds.length} stale duplicate(s) from '${col}'.`);
+                        }
+                    }
+                }
+            }
+
+            // 2. Create unique sparse index
+            if (typeof collection.createIndex === 'function') {
+                await collection.createIndex({ id: 1 }, { unique: true, sparse: true });
+            }
+
+            // 3. Verify index exists with uniqueness
+            if (typeof collection.indexes === 'function') {
+                const indexes = await collection.indexes();
+                const verified = indexes.some(idx => idx.key && idx.key.id === 1 && idx.unique === true);
+                if (!verified) {
+                    throw new Error(`Indeks unikalny { id: 1 } nie został zweryfikowany w kolekcji '${col}'.`);
+                }
+            }
+        } catch (err) {
+            console.error(`[CRITICAL INDEX ERROR] Failed to ensure index for collection '${col}':`, err);
+            failures.push({ collection: col, error: err.message });
         }
+    }
+
+    if (failures.length > 0) {
+        const errorMsg = `Krytyczny błąd: Nie udało się zagwarantować integralności indeksów dla ${failures.length} kolekcji: ` +
+            failures.map(f => `${f.collection} (${f.error})`).join('; ');
+        throw new Error(errorMsg);
     }
 }
 
@@ -157,9 +227,16 @@ async function connectDB() {
 
         // Initialize Backup Schedule
         initBackupSchedule(db);
-        await ensureIndexes(db);
+
+        dbReady = false;
+        indexInitError = null;
+        await reconcileDuplicatesAndEnsureIndexes(db);
+        dbReady = true;
+        console.log('Successfully reconciled duplicates and verified all unique indexes.');
     } catch (err) {
-        console.error('CRITICAL: Failed to connect to MongoDB', err.message);
+        dbReady = false;
+        indexInitError = err.message;
+        console.error('CRITICAL: Failed to connect to MongoDB or initialize indexes:', err.message);
     }
 }
 
@@ -216,7 +293,7 @@ app.use('/api', (req, res, next) => {
     next();
 });
 // Generic CRUD handlers
-const createRouter = (collectionName) => {
+const createRouter = (collectionName, options = {}) => {
     const router = express.Router();
 
     // GET All — with optional filtering + PAGINATION (Fix #4: 10 000 records problem)
@@ -398,49 +475,103 @@ const createRouter = (collectionName) => {
         }
     });
 
-    // POST Batch Import (explicit atomic upsert for bulk data / migrations; preserves createdAt)
-    router.post('/batch-import', async (req, res) => {
-        try {
-            if (!db) return res.status(503).json({ error: 'Database not connected' });
-            const { items } = req.body;
-            if (!Array.isArray(items) || items.length === 0) {
-                return res.status(400).json({ error: 'Brak tablicy items do zaimportowania.' });
-            }
+    // POST Batch Import (explicit upsert for bulk data / migrations; preserves createdAt)
+    // Whitelisted collections only to prevent bypassing domain logic or optimistic locking
+    if (ALLOWED_BATCH_IMPORT_COLLECTIONS.has(collectionName) || (options && options.allowBatchImport === true)) {
+        router.post('/batch-import', async (req, res) => {
+            try {
+                if (!db) return res.status(503).json({ error: 'Database not connected' });
+                const { items } = req.body;
+                if (!Array.isArray(items) || items.length === 0) {
+                    return res.status(400).json({ error: 'Brak tablicy items do zaimportowania.' });
+                }
+                if (items.length > 1000) {
+                    return res.status(400).json({ error: 'Maksymalny rozmiar paczki importu to 1000 rekordów.' });
+                }
 
-            const now = new Date().toISOString();
-            const operations = items.map(item => {
-                const itemId = item.id || new ObjectId().toString();
-                const { _id, createdAt, ...rest } = item;
+                const now = new Date().toISOString();
+                const operations = items.map(item => {
+                    const itemId = item.id || new ObjectId().toString();
+                    const { _id, createdAt, ...rest } = item;
 
-                return {
-                    updateOne: {
-                        filter: { id: itemId },
-                        update: {
-                            $set: {
-                                ...rest,
-                                id: itemId,
-                                updatedAt: now
+                    return {
+                        updateOne: {
+                            filter: { id: itemId },
+                            update: {
+                                $set: {
+                                    ...rest,
+                                    id: itemId,
+                                    updatedAt: now
+                                },
+                                $setOnInsert: {
+                                    createdAt: createdAt || now
+                                }
                             },
-                            $setOnInsert: {
-                                createdAt: createdAt || now
-                            }
-                        },
-                        upsert: true
-                    }
-                };
-            });
+                            upsert: true
+                        }
+                    };
+                });
 
-            const result = await db.collection(collectionName).bulkWrite(operations, { ordered: false });
-            res.status(200).json({
-                succeeded: (result.upsertedCount || 0) + (result.matchedCount || 0),
-                upserted: result.upsertedCount || 0,
-                modified: result.modifiedCount || 0,
-                matched: result.matchedCount || 0
+                try {
+                    const result = await db.collection(collectionName).bulkWrite(operations, { ordered: false });
+                    const upsertedCount = result.upsertedCount || 0;
+                    const modifiedCount = result.modifiedCount || 0;
+                    const matchedCount = result.matchedCount || 0;
+                    const succeeded = upsertedCount + matchedCount;
+
+                    return res.status(200).json({
+                        status: 'success',
+                        succeeded,
+                        upserted: upsertedCount,
+                        modified: modifiedCount,
+                        matched: matchedCount,
+                        failed: 0,
+                        errors: []
+                    });
+                } catch (bulkErr) {
+                    if (bulkErr.name === 'MongoBulkWriteError' || bulkErr.result || bulkErr.writeErrors) {
+                        const writeResult = bulkErr.result || {};
+                        const upsertedCount = writeResult.upsertedCount || (writeResult.nUpserted || 0);
+                        const modifiedCount = writeResult.modifiedCount || (writeResult.nModified || 0);
+                        const matchedCount = writeResult.matchedCount || (writeResult.nMatched || 0);
+                        const succeeded = upsertedCount + modifiedCount;
+
+                        const writeErrors = bulkErr.writeErrors || [];
+                        const failed = writeErrors.length || Math.max(0, items.length - succeeded);
+                        const errorMessages = writeErrors.map(e => e.errmsg || e.message || String(e));
+                        if (errorMessages.length === 0 && bulkErr.message) {
+                            errorMessages.push(bulkErr.message);
+                        }
+
+                        return res.status(207).json({
+                            status: 'partial_success',
+                            succeeded,
+                            upserted: upsertedCount,
+                            modified: modifiedCount,
+                            matched: matchedCount,
+                            failed,
+                            errors: errorMessages
+                        });
+                    }
+                    throw bulkErr;
+                }
+            } catch (err) {
+                console.error(`[BATCH-IMPORT ERROR] Failed on ${collectionName}:`, err);
+                res.status(500).json({
+                    status: 'failed',
+                    succeeded: 0,
+                    failed: Array.isArray(req.body?.items) ? req.body.items.length : 1,
+                    errors: [err.message]
+                });
+            }
+        });
+    } else {
+        router.all('/batch-import', (req, res) => {
+            res.status(405).json({
+                error: `Import wsadowy nie jest dozwolony dla kolekcji '${collectionName}'. Wymagana aktualizacja jednostkowa z optimistic locking.`
             });
-        } catch (err) {
-            res.status(500).json({ error: err.message });
-        }
-    });
+        });
+    }
 
     // PATCH Update — with Optimistic Locking (Shield #1)
     router.patch('/:id', async (req, res) => {
@@ -960,8 +1091,84 @@ app.post('/api/auth/set-password', verifyToken, requireRole('admin'), async (req
 const toCents = (val) => Math.round((Number(val) || 0) * 100);
 const toCurrency = (cents) => Math.round(cents) / 100;
 
+async function validateTimeEntryBatch(req, res, next) {
+    if (req.method !== 'POST') return next();
+    const { items } = req.body;
+    if (!Array.isArray(items) || items.length === 0) {
+        return res.status(400).json({ error: 'Brak tablicy items do zaimportowania.' });
+    }
+    if (items.length > 1000) {
+        return res.status(400).json({ error: 'Maksymalny rozmiar paczki importu to 1000 rekordów.' });
+    }
+
+    const uniqueJobIds = new Set();
+
+    for (let i = 0; i < items.length; i++) {
+        const item = items[i];
+        if (!item || typeof item !== 'object') {
+            return res.status(400).json({ error: `Pozycja #${i + 1} nie jest prawidłowym obiektem.` });
+        }
+        const effectiveEmpId = item.employeeId || item.employee_id;
+        const effectiveJobId = item.jobId || item.project_id;
+
+        if (!effectiveEmpId) {
+            return res.status(400).json({ error: `Pozycja #${i + 1}: Pole employeeId jest wymagane.` });
+        }
+        if (!effectiveJobId) {
+            return res.status(400).json({ error: `Pozycja #${i + 1}: Pole jobId jest wymagane.` });
+        }
+        uniqueJobIds.add(effectiveJobId);
+
+        if (item.hours !== undefined) {
+            const h = Number(item.hours);
+            if (isNaN(h) || h < 0) {
+                return res.status(400).json({ error: `Pozycja #${i + 1}: Godziny nie mogą być ujemne.` });
+            }
+            if (h > 24) {
+                return res.status(400).json({ error: `Pozycja #${i + 1}: Godziny nie mogą przekraczać 24h na jeden wpis.` });
+            }
+        }
+
+        if (item.date) {
+            const rawDate = String(item.date);
+            if (/^\d{4}-\d{2}-\d{2}$/.test(rawDate)) {
+                const [year, month, day] = rawDate.split('-').map(Number);
+                item.date = new Date(Date.UTC(year, month - 1, day)).toISOString();
+            }
+        }
+    }
+
+    if (db && uniqueJobIds.size > 0 && typeof db.collection === 'function') {
+        try {
+            const closedJob = await db.collection('jobs').findOne(
+                {
+                    $or: [
+                        { id: { $in: Array.from(uniqueJobIds) } },
+                        { _id: { $in: Array.from(uniqueJobIds) } }
+                    ],
+                    status: { $in: ['done', 'cancelled'] }
+                },
+                { projection: { id: 1, status: 1 } }
+            );
+            if (closedJob) {
+                return res.status(409).json({
+                    error: `Zlecenie '${closedJob.id || closedJob._id}' jest już ${closedJob.status === 'done' ? 'zakończone' : 'anulowane'}. Nie można dodawać wpisów godzinowych.`
+                });
+            }
+        } catch (e) {
+            console.error('[validateTimeEntryBatch] DB check error:', e.message);
+        }
+    }
+
+    next();
+}
+
 // Time Entry validation: hours 0-24, required fields, closed-job guard, date range guard
 async function validateTimeEntry(req, res, next) {
+    if (req.method !== 'POST' && req.method !== 'PATCH') return next();
+    if (req.path === '/batch-import' || req.url === '/batch-import' || req.originalUrl?.endsWith('/batch-import')) {
+        return validateTimeEntryBatch(req, res, next);
+    }
     if (req.method !== 'POST' && req.method !== 'PATCH') return next();
     const { hours, employeeId, jobId } = req.body;
     const effectiveJobId = jobId || req.body.project_id;
@@ -1782,4 +1989,12 @@ async function closeGracefully(signal) {
 process.on('SIGINT', () => closeGracefully('SIGINT'));
 process.on('SIGTERM', () => closeGracefully('SIGTERM'));
 
-module.exports = { app, connectDB, closeGracefully, setDb: (testDb) => { db = testDb; } };
+module.exports = {
+    app,
+    connectDB,
+    closeGracefully,
+    setDb: (testDb) => { db = testDb; dbReady = true; },
+    reconcileDuplicatesAndEnsureIndexes,
+    ALL_SYSTEM_COLLECTIONS,
+    ALLOWED_BATCH_IMPORT_COLLECTIONS
+};

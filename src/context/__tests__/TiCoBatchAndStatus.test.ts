@@ -80,4 +80,36 @@ describe('Production timeTrackingBatchService - Partial Failure & Duplicate Prev
         expect(deletedIds.has('t2')).toBe(false);
         expect(deletedIds.has('t3')).toBe(true);
     });
+    it('executeImportTimeEntries uses repository.batchImportTimeEntries when available, preserving createdAt and returning results', async () => {
+        const mockRepo = {
+            createTimeEntry: vi.fn(),
+            updateTimeEntry: vi.fn(),
+            batchImportTimeEntries: vi.fn().mockResolvedValue({
+                succeeded: 2,
+                failed: 0,
+                errors: []
+            })
+        };
+
+        const existingEntries = [
+            { id: 't1', createdAt: '2026-05-01T12:00:00.000Z' }
+        ] as TimeEntry[];
+
+        const entriesToImport = [
+            { id: 't1', hours: 6, date: '2026-09-01' },
+            { id: 't2', hours: 8, date: '2026-09-02' }
+        ] as TimeEntry[];
+
+        const { result, savedEntries } = await executeImportTimeEntries(entriesToImport, existingEntries, mockRepo as any);
+
+        expect(mockRepo.batchImportTimeEntries).toHaveBeenCalledTimes(1);
+        expect(mockRepo.createTimeEntry).not.toHaveBeenCalled();
+        expect(mockRepo.updateTimeEntry).not.toHaveBeenCalled();
+
+        expect(result.succeeded).toBe(2);
+        expect(result.failed).toBe(0);
+        expect(savedEntries.length).toBe(2);
+        expect(savedEntries[0].createdAt).toBe('2026-05-01T12:00:00.000Z');
+        expect(savedEntries[1].createdAt).toBeDefined();
+    });
 });

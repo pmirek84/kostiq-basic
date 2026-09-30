@@ -159,6 +159,13 @@ export class MongoAdapter<T extends { id: string }> implements IStorageAdapter<T
         });
     }
 
+    async batchImport(items: T[]): Promise<{ status?: string; succeeded: number; failed: number; errors: string[] }> {
+        return this.fetchJson<{ status?: string; succeeded: number; failed: number; errors: string[] }>(`${this.url}/batch-import`, {
+            method: 'POST',
+            body: JSON.stringify({ items })
+        });
+    }
+
     async save(item: T): Promise<string> {
         // Shield #1: Optimistic Locking — attach current updatedAt as sentinel so server can detect conflicts
         const itemWithSentinel = {
