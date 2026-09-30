@@ -98,6 +98,39 @@ describe('migrationService - Conflict Detection and Per-Record Audited Migration
                 /Snapshot migracji unieważniony: Stan kolekcji 'clients' w MongoDB uległ zmianie/
             );
         });
+
+        it('detects business field change even when updatedAt is untouched (canonical document hashing)', async () => {
+            const mockLocalClients = [{ id: 'c-1', name: 'Klient 1', phone: '111-222' }];
+            const mockDB = {
+                getAll: vi.fn((storeName: string) => {
+                    if (storeName === 'clients') return Promise.resolve(mockLocalClients);
+                    return Promise.resolve([]);
+                })
+            };
+            vi.spyOn(dbModule, 'getDB').mockResolvedValue(mockDB as any);
+
+            const remoteDoc = { id: 'c-1', name: 'Klient 1', phone: '111-222', vatRate: 23, updatedAt: '2026-09-30T10:00:00Z' };
+            const mockAdapter = {
+                getAll: vi.fn(() => Promise.resolve([{ ...remoteDoc }]))
+            };
+            vi.spyOn(adapterFactoryModule, 'getAdapter').mockReturnValue(mockAdapter as any);
+
+            // 1. Generate preview
+            const preview = await migrationService.previewMigration();
+
+            // 2. Business field mutated in MongoDB without touching updatedAt
+            remoteDoc.vatRate = 8; // changed business field
+
+            // 3. Verify snapshot drift detects change
+            const drift = await migrationService.verifySnapshotDrift(preview);
+            expect(drift.valid).toBe(false);
+            expect(drift.driftedStore).toBe('clients');
+
+            // 4. migrateAll rejects with drift reason
+            await expect(migrationService.migrateAll(preview, { conflictStrategy: 'overwrite' })).rejects.toThrow(
+                /Snapshot migracji unieważniony: Stan kolekcji 'clients' w MongoDB uległ zmianie/
+            );
+        });
     });
 
     describe('Admin Migration API & Strategy Flow', () => {
@@ -160,6 +193,7 @@ describe('migrationService - Conflict Detection and Per-Record Audited Migration
             const replaceCall = adminCalls.find(c => c.action === 'replace' && c.record.id === 'c-diff');
             expect(replaceCall).toBeDefined();
             expect(replaceCall.record.phone).toBe('111-222');
+            expect(replaceCall.expectedFingerprint).toBeDefined();
         });
     });
 });

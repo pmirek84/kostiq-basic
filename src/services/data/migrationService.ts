@@ -9,6 +9,7 @@ export interface MigrationItemPreview {
     conflictFields: string[];
     localData?: any;
     remoteData?: any;
+    remoteFingerprint?: string;
 }
 
 export interface MigrationPreviewReport {
@@ -91,17 +92,48 @@ export function detectConflictFields(local: any, remote: any): string[] {
     return conflicts;
 }
 
+export function toCanonicalJson(obj: any): any {
+    if (obj === null || obj === undefined) return null;
+    if (typeof obj !== 'object') return obj;
+    if (Array.isArray(obj)) {
+        return obj.map(toCanonicalJson);
+    }
+    const sortedKeys = Object.keys(obj).sort();
+    const result: Record<string, any> = {};
+    for (const key of sortedKeys) {
+        if (key === '_id' || key === '__v' || key === '_lastUpdatedAt') continue;
+        result[key] = toCanonicalJson(obj[key]);
+    }
+    return result;
+}
+
+export function computeCanonicalDocHash(doc: any): string {
+    if (!doc || typeof doc !== 'object') return 'empty';
+    const canonical = toCanonicalJson(doc);
+    const str = JSON.stringify(canonical);
+    let h1 = 0xdeadbeef, h2 = 0x41c6ce57;
+    for (let i = 0; i < str.length; i++) {
+        const ch = str.charCodeAt(i);
+        h1 = Math.imul(h1 ^ ch, 2654435761);
+        h2 = Math.imul(h2 ^ ch, 1597334677);
+    }
+    h1 = Math.imul(h1 ^ (h1 >>> 16), 2246822507) ^ Math.imul(h2 ^ (h2 >>> 13), 3266489909);
+    h2 = Math.imul(h2 ^ (h2 >>> 16), 2246822507) ^ Math.imul(h1 ^ (h1 >>> 13), 3266489909);
+    return (4294967296 * (2097151 & h2) + (h1 >>> 0)).toString(16);
+}
+
 export function computeStoreFingerprint(remoteItems: any[]): string {
-    if (!Array.isArray(remoteItems)) return 'empty';
+    if (!Array.isArray(remoteItems) || remoteItems.length === 0) return 'empty';
     const sorted = [...remoteItems].sort((a, b) => String(a?.id || '').localeCompare(String(b?.id || '')));
     let hash = 0;
     for (const item of sorted) {
-        const str = `${item?.id || ''}:${item?.updatedAt || item?._lastUpdatedAt || ''}:${item?.name || item?.title || ''}`;
+        const docHash = computeCanonicalDocHash(item);
+        const str = `${item?.id || ''}:${docHash}`;
         for (let i = 0; i < str.length; i++) {
             hash = ((hash << 5) - hash + str.charCodeAt(i)) | 0;
         }
     }
-    return hash.toString(36);
+    return Math.abs(hash).toString(36);
 }
 
 function computeSnapshotHash(storeFingerprints: Record<string, string>, items: MigrationItemPreview[]): string {
@@ -119,7 +151,13 @@ function computeSnapshotHash(storeFingerprints: Record<string, string>, items: M
  * Uses POST /api/migration/admin-record with full document replacement (replaceOne)
  * and bypasses optimistic locking constraints.
  */
-export async function adminMigrateRecord(payload: { collection: string; action: 'create' | 'replace'; record: any }): Promise<any> {
+export async function adminMigrateRecord(payload: { 
+    collection: string; 
+    action: 'create' | 'replace'; 
+    record: any;
+    expectedUpdatedAt?: string;
+    expectedFingerprint?: string;
+}): Promise<any> {
     const token = localStorage.getItem('kostiq_token');
     const baseUrl = (import.meta as any).env?.VITE_API_URL || 'http://localhost:3000/api';
     const res = await fetch(`${baseUrl}/migration/admin-record`, {
@@ -180,6 +218,7 @@ export const migrationService = {
                 if (!localItem || !localItem.id) continue;
 
                 const remoteItem = remoteMap.get(localItem.id);
+                const remoteFingerprint = remoteItem ? computeCanonicalDocHash(remoteItem) : undefined;
                 if (!remoteItem) {
                     items.push({
                         id: localItem.id,
@@ -199,7 +238,8 @@ export const migrationService = {
                             summary: localItem.name || localItem.title || localItem.number || localItem.id,
                             conflictFields,
                             localData: localItem,
-                            remoteData: remoteItem
+                            remoteData: remoteItem,
+                            remoteFingerprint
                         });
                     } else {
                         items.push({
@@ -209,7 +249,8 @@ export const migrationService = {
                             summary: localItem.name || localItem.title || localItem.number || localItem.id,
                             conflictFields: [],
                             localData: localItem,
-                            remoteData: remoteItem
+                            remoteData: remoteItem,
+                            remoteFingerprint
                         });
                     }
                 }
@@ -333,11 +374,13 @@ export const migrationService = {
                         message: 'Pomyślnie utworzono w MongoDB (admin-record)'
                     });
                 } else if (item.status === 'conflict' && conflictStrategy === 'overwrite') {
-                    // Full document replacement via admin endpoint (replaces document, removes MongoDB-only fields, bypasses optimistic lock)
+                    // Full document replacement via admin endpoint (replaces document, removes MongoDB-only fields, atomic conditional replacement)
                     await adminMigrateRecord({
                         collection: item.entity,
                         action: 'replace',
-                        record: item.localData
+                        record: item.localData,
+                        expectedUpdatedAt: item.remoteData?.updatedAt,
+                        expectedFingerprint: item.remoteFingerprint
                     });
                     results.push({
                         id: item.id,

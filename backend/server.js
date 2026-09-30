@@ -155,6 +155,51 @@ const ALLOWED_BATCH_IMPORT_COLLECTIONS = new Set([
     'materials'
 ]);
 
+const ALLOWED_MIGRATION_COLLECTIONS = new Set([
+    'clients',
+    'offers',
+    'jobs',
+    'constructions',
+    'materials',
+    'standards',
+    'settings',
+    'jobStageItems',
+    'custom-events',
+    'subcontractor_contracts',
+    'settlements'
+]);
+
+function toCanonicalJson(obj) {
+    if (obj === null || obj === undefined) return null;
+    if (typeof obj !== 'object') return obj;
+    if (Array.isArray(obj)) {
+        return obj.map(toCanonicalJson);
+    }
+    const sortedKeys = Object.keys(obj).sort();
+    const result = {};
+    for (const key of sortedKeys) {
+        if (key === '_id' || key === '__v' || key === '_lastUpdatedAt') continue;
+        result[key] = toCanonicalJson(obj[key]);
+    }
+    return result;
+}
+
+function computeCanonicalDocHash(doc) {
+    if (!doc || typeof doc !== 'object') return 'empty';
+    const canonical = toCanonicalJson(doc);
+    const str = JSON.stringify(canonical);
+    let h1 = 0xdeadbeef, h2 = 0x41c6ce57;
+    for (let i = 0; i < str.length; i++) {
+        const ch = str.charCodeAt(i);
+        h1 = Math.imul(h1 ^ ch, 2654435761);
+        h2 = Math.imul(h2 ^ ch, 1597334677);
+    }
+    h1 = Math.imul(h1 ^ (h1 >>> 16), 2246822507) ^ Math.imul(h2 ^ (h2 >>> 13), 3266489909);
+    h2 = Math.imul(h2 ^ (h2 >>> 16), 2246822507) ^ Math.imul(h1 ^ (h1 >>> 13), 3266489909);
+    return (4294967296 * (2097151 & h2) + (h1 >>> 0)).toString(16);
+}
+
+
 let dbReady = process.env.NODE_ENV === 'test';
 let indexInitError = null;
 
@@ -328,15 +373,90 @@ async function reconcileDuplicatesAndEnsureIndexes(database) {
 // ==========================================
 // Idempotent Seeding on Database Connection
 // ==========================================
+const RULE_MATERIAL_MAP = {
+    'rule-pvc-pianka': 'mat-pur-low-750',
+    'rule-pvc-piana': 'mat-pur-low-750',
+    'rule-pvc-tasma-wew': 'mat-tasma-rozprezna-10',
+    'rule-pvc-tasma-zew': 'mat-tasma-rozprezna-10',
+    'rule-pvc-tasma': 'mat-tasma-rozprezna-10',
+    'rule-alu-pianka': 'mat-pur-low-750',
+    'rule-alu-tasma-rozprezna': 'mat-tasma-rozprezna-10',
+    'rule-alu-konsole': 'mat-konsola-montazowa-l',
+    'rule-alu-epdm': 'mat-folia-epdm-zew',
+    'rule-alu-klej': 'mat-klej-hybrydowy'
+};
+
+async function repairIncompleteStandards(targetDb) {
+    if (!targetDb) return 0;
+    const standardsColl = targetDb.collection('standards');
+    let repairedCount = 0;
+    const standardIds = ['std-pvc-01', 'std-alu-01'];
+    const candidates = [];
+    for (const id of standardIds) {
+        try {
+            const std = await standardsColl.findOne({ id });
+            if (std) candidates.push(std);
+        } catch (_) {}
+    }
+    if (standardsColl.find) {
+        try {
+            const all = await standardsColl.find({}).toArray();
+            for (const s of all) {
+                if (!candidates.some(c => c.id === s.id)) candidates.push(s);
+            }
+        } catch (_) {}
+    }
+
+    for (const std of candidates) {
+        if (!Array.isArray(std.rules)) continue;
+        let modified = false;
+        const updatedRules = std.rules.map(rule => {
+            if (!rule.materialId) {
+                modified = true;
+                const mappedId = RULE_MATERIAL_MAP[rule.id] ||
+                    (rule.id && rule.id.includes('pian') ? 'mat-pur-low-750' :
+                     rule.id && rule.id.includes('klej') ? 'mat-klej-hybrydowy' :
+                     rule.id && rule.id.includes('epdm') ? 'mat-folia-epdm-zew' :
+                     rule.id && rule.id.includes('konsol') ? 'mat-konsola-montazowa-l' :
+                     rule.id && rule.id.includes('tasm') ? 'mat-tasma-rozprezna-10' : 'mat-pur-low-750');
+                return { ...rule, materialId: mappedId };
+            }
+            return rule;
+        });
+
+        if (modified) {
+            await standardsColl.updateOne(
+                { id: std.id },
+                { $set: { rules: updatedRules, updatedAt: new Date().toISOString() } }
+            );
+            repairedCount++;
+        }
+    }
+    return repairedCount;
+}
+
 async function seedInitialDataIfEmpty(targetDb) {
     if (!targetDb) return { seeded: false, reason: 'No db instance' };
     const migrationsColl = targetDb.collection('system_migrations');
     
     // Check persistent migration version marker - prevents re-seeding if user intentionally empties data
+    // Always repair existing standards if they were created with incomplete schema (e.g. by commit c4c2ac3)
+    const repairedStandards = await repairIncompleteStandards(targetDb);
+    if (repairedStandards > 0) {
+        console.log(`[SEED/MIGRATION] Repaired ${repairedStandards} standards with missing materialId.`);
+    }
+
+    // Check persistent migration version marker - prevents re-seeding if user intentionally empties data
     const migrationId = 'initial_standards_and_templates_v1';
     const alreadyApplied = await migrationsColl.findOne({ id: migrationId });
     if (alreadyApplied) {
-        return { seeded: false, reason: 'Migration already applied', migrationId, appliedAt: alreadyApplied.appliedAt };
+        return { 
+            seeded: false, 
+            reason: 'Migration already applied', 
+            migrationId, 
+            appliedAt: alreadyApplied.appliedAt,
+            repairedStandards 
+        };
     }
 
     const summary = { materials: 0, standards: 0, offers: 0, constructions: 0 };
@@ -492,6 +612,10 @@ async function seedInitialDataIfEmpty(targetDb) {
             );
             summary.standards++;
         }
+
+        // Post-repair to heal existing records inserted before materialId was required
+        const postRepaired = await repairIncompleteStandards(targetDb);
+        summary.repairedStandards = postRepaired;
 
         // 3. Seed template offer and construction
         const offersColl = targetDb.collection('offers');
@@ -1259,9 +1383,9 @@ async function recalculateJobRevenue(jobId) {
 app.post('/api/migration/admin-record', verifyToken, requireRole('admin'), async (req, res) => {
     try {
         if (!db) return res.status(503).json({ error: 'Database not connected' });
-        const { collection, action, record } = req.body;
-        if (!collection || !ALL_SYSTEM_COLLECTIONS.includes(collection)) {
-            return res.status(400).json({ error: `Niedozwolona lub nieznana kolekcja: '${collection}'` });
+        const { collection, action, record, expectedUpdatedAt, expectedFingerprint } = req.body;
+        if (!collection || !ALLOWED_MIGRATION_COLLECTIONS.has(collection)) {
+            return res.status(400).json({ error: `Niedozwolona lub nieobsługiwana kolekcja migracji: '${collection}'. Dozwolone są wyłącznie kolekcje migratora IndexedDB.` });
         }
         if (!record || typeof record !== 'object' || !record.id) {
             return res.status(400).json({ error: 'Rekord musi być obiektem zawierającym niepuste pole id' });
@@ -1282,9 +1406,46 @@ app.post('/api/migration/admin-record', verifyToken, requireRole('admin'), async
             await coll.insertOne(cleanDoc);
             return res.json({ success: true, action: 'created', id: record.id, collection });
         } else if (action === 'replace') {
-            // Full replacement: replaces the whole document, cleans fields removed in IndexedDB,
-            // and bypasses optimistic locking constraints as an explicit administrative migration.
-            await coll.replaceOne({ id: record.id }, cleanDoc, { upsert: true });
+            const existing = await coll.findOne({ id: record.id });
+            if (!existing) {
+                return res.status(404).json({ error: `Dokument o id '${record.id}' nie istnieje w kolekcji '${collection}'` });
+            }
+
+            // Concurrency guard: verify canonical fingerprint if provided
+            if (expectedFingerprint !== undefined && expectedFingerprint !== null) {
+                const currentFingerprint = computeCanonicalDocHash(existing);
+                if (currentFingerprint !== expectedFingerprint) {
+                    return res.status(409).json({
+                        error: `Wykryto zmianę dokumentu '${record.id}' w kolekcji '${collection}' (fingerprint mismatch). Zapis odrzucony ze względu na konflikt współbieżności.`,
+                        code: 'CONCURRENT_MODIFICATION'
+                    });
+                }
+            }
+
+            // Concurrency guard: verify expectedUpdatedAt if provided
+            if (expectedUpdatedAt !== undefined && expectedUpdatedAt !== null) {
+                if (existing.updatedAt && existing.updatedAt !== expectedUpdatedAt) {
+                    return res.status(409).json({
+                        error: `Wykryto konflikt wersji dokumentu '${record.id}' w kolekcji '${collection}' (oczekiwano updatedAt: '${expectedUpdatedAt}', w bazie: '${existing.updatedAt}').`,
+                        code: 'CONCURRENT_MODIFICATION'
+                    });
+                }
+            }
+
+            // Atomic conditional replacement
+            const filter = { id: record.id };
+            if (expectedUpdatedAt !== undefined && expectedUpdatedAt !== null && existing.updatedAt) {
+                filter.updatedAt = expectedUpdatedAt;
+            }
+
+            const replaceRes = await coll.replaceOne(filter, cleanDoc);
+            if (replaceRes && replaceRes.matchedCount === 0) {
+                return res.status(409).json({
+                    error: `Współbieżna modyfikacja uniemożliwiła zastąpienie dokumentu '${record.id}' w kolekcji '${collection}'.`,
+                    code: 'CONCURRENT_MODIFICATION'
+                });
+            }
+
             return res.json({ success: true, action: 'replaced', id: record.id, collection });
         }
     } catch (err) {
@@ -2620,8 +2781,12 @@ module.exports = {
     setDb: (testDb, ready = true) => { db = testDb; dbReady = ready; indexInitError = ready ? null : "Database marked not ready"; },
     reconcileDuplicatesAndEnsureIndexes,
     seedInitialDataIfEmpty,
+    repairIncompleteStandards,
+    computeCanonicalDocHash,
+    toCanonicalJson,
     ALL_SYSTEM_COLLECTIONS,
     ALLOWED_BATCH_IMPORT_COLLECTIONS,
+    ALLOWED_MIGRATION_COLLECTIONS,
     VALID_TIME_ENTRY_STATUSES,
     WORKER_ALLOWED_TIME_ENTRY_STATUSES,
     FOREMAN_ALLOWED_TIME_ENTRY_STATUSES
