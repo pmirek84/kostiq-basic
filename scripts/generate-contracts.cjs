@@ -3,14 +3,13 @@ const path = require('path');
 const { compile } = require('json-schema-to-typescript');
 
 async function generate() {
+  const isCheck = process.argv.includes('--check');
   const rootDir = path.resolve(__dirname, '..');
   const schemaPath = path.join(rootDir, 'shared/contracts/timeEntry.schema.json');
   const outputPath = path.join(rootDir, 'shared/contracts/timeEntry.generated.ts');
 
   const schema = JSON.parse(fs.readFileSync(schemaPath, 'utf8'));
 
-  // Automatically map all definitions to root properties so json-schema-to-typescript
-  // emits a typed export for every definition in schema.definitions!
   const rootProperties = {};
   for (const defName of Object.keys(schema.definitions || {})) {
     rootProperties[defName] = { $ref: `#/definitions/${defName}` };
@@ -29,6 +28,24 @@ async function generate() {
       singleQuote: true
     }
   });
+
+  if (isCheck) {
+    if (!fs.existsSync(outputPath)) {
+      console.error(`[CONTRACTS CHECK FAILED] Output file ${outputPath} does not exist. Run "npm run generate:contracts".`);
+      process.exit(1);
+    }
+    const currentTs = fs.readFileSync(outputPath, 'utf8');
+    const normCurrent = currentTs.replace(/\r\n/g, '\n').trim();
+    const normGenerated = ts.replace(/\r\n/g, '\n').trim();
+
+    if (normCurrent !== normGenerated) {
+      console.error('[CONTRACTS CHECK FAILED] shared/contracts/timeEntry.generated.ts is out of sync with timeEntry.schema.json.');
+      console.error('Please run: npm run generate:contracts');
+      process.exit(1);
+    }
+    console.log('[CONTRACTS CHECK PASSED] Generated contracts are strictly up to date.');
+    return;
+  }
 
   fs.writeFileSync(outputPath, ts, 'utf8');
   console.log('[CONTRACTS] Successfully compiled timeEntry.schema.json -> timeEntry.generated.ts');

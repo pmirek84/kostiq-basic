@@ -1818,7 +1818,18 @@ async function validateAndNormalizeTimeEntryDoc(doc, { db, user, isBatch = false
     // JSON Schema validation via Ajv from shared/contracts (FAIL-CLOSED)
     const schemaValidator = isPatch ? validateTimeEntryPatchSchema : validateTimeEntryPostSchema;
     const isValidSchema = schemaValidator(doc);
+    const effectiveEmpId = doc.employeeId || doc.employee_id;
+    const effectiveJobId = doc.jobId || doc.project_id;
+
     if (!isValidSchema) {
+        if (!isPatch) {
+            if (!effectiveEmpId) {
+                return { error: 'Pole employeeId jest wymagane.' };
+            }
+            if (!effectiveJobId) {
+                return { error: 'Pole jobId jest wymagane.' };
+            }
+        }
         const firstErr = schemaValidator.errors?.[0];
         if (firstErr) {
             if (firstErr.keyword === 'required' || firstErr.params?.missingProperty === 'employeeId') {
@@ -1828,25 +1839,23 @@ async function validateAndNormalizeTimeEntryDoc(doc, { db, user, isBatch = false
                 return { error: 'Pole jobId jest wymagane.' };
             }
             if (firstErr.instancePath.includes('hours')) {
-                if (firstErr.keyword === 'minimum') return { error: 'Godziny nie mogą być ujemne.' };
-                if (firstErr.keyword === 'maximum') return { error: 'Godziny nie mogą przekraczać 24h na jeden wpis.' };
-                if (firstErr.keyword === 'type') return { error: 'Pole hours musi być liczbą.' };
+                if (firstErr.keyword === 'minimum') return { error: 'Godziny nie mog\u0105 by\u0107 ujemne.' };
+                if (firstErr.keyword === 'maximum') return { error: 'Godziny nie mog\u0105 przekracza\u0107 24h na jeden wpis.' };
+                if (firstErr.keyword === 'type') return { error: 'Pole hours musi by\u0107 liczb\u0105.' };
             }
             if (firstErr.instancePath.includes('status')) {
-                return { error: `Nieprawidłowy status wpisu czasu: '${doc.status}'. Dozwolone: ${VALID_TIME_ENTRY_STATUSES.join(', ')}.` };
+                return { error: `Nieprawid\u0142owy status wpisu czasu: '${doc.status}'. Dozwolone: ${VALID_TIME_ENTRY_STATUSES.join(', ')}.` };
             }
             if (firstErr.instancePath.includes('billingType')) {
-                return { error: `Nieprawidłowy typ rozliczenia (billingType): '${doc.billingType}'. Dozwolone: ${BILLING_TYPES.join(', ')}.` };
+                return { error: `Nieprawid\u0142owy typ rozliczenia (billingType): '${doc.billingType}'. Dozwolone: ${BILLING_TYPES.join(', ')}.` };
             }
             if (firstErr.instancePath.includes('type')) {
-                return { error: `Nieprawidłowy typ wpisu (type): '${doc.type}'. Dozwolone: ${TIME_ENTRY_TYPES.join(', ')}.` };
+                return { error: `Nieprawid\u0142owy typ wpisu (type): '${doc.type}'. Dozwolone: ${TIME_ENTRY_TYPES.join(', ')}.` };
             }
         }
         const errorDetails = ajv.errorsText(schemaValidator.errors, { dataVar: 'payload', separator: '; ' });
-        return { error: `Błąd walidacji schematu JSON: ${errorDetails}.` };
+        return { error: `B\u0142\u0105d walidacji schematu JSON: ${errorDetails}.` };
     }
-    const effectiveEmpId = doc.employeeId || doc.employee_id;
-    const effectiveJobId = doc.jobId || doc.project_id;
 
     // In POST or Batch-Import, employeeId and jobId are mandatory.
     // In PATCH (e.g. status approval/rejection or notes update), they are optional if not being modified.
@@ -1954,31 +1963,52 @@ async function validateAndNormalizeTimeEntryDoc(doc, { db, user, isBatch = false
     }
 
     // Server-side cost calculation:
-    // ONLY for billingType === 'hourly' (or default hourly when hours are specified).
+    // For hourly, daily, project: authoritative rate comes from employee record in DB.
     // For fixed, m2, mb, piecework: preserve explicit cost or calculate quantity * rate.
     const billingType = doc.billingType || 'hourly';
-    if (billingType === 'hourly') {
+    if (billingType === 'hourly' || billingType === 'daily' || billingType === 'project') {
         if (db && effectiveEmpId && typeof db.collection === 'function') {
-            const hours = Number(doc.hours) || 0;
-            if (hours > 0) {
-                try {
-                    const emp = await db.collection('employees').findOne(
-                        { $or: [{ id: effectiveEmpId }, { _id: effectiveEmpId }] },
-                        { projection: { hourlyRate: 1, defaultHourlyRate: 1 } }
-                    );
-                    if (emp) {
-                        const freshRate = emp.hourlyRate || emp.defaultHourlyRate || 0;
-                        const freshCostCents = toCents(hours) * toCents(freshRate) / 100;
-                        doc.cost = toCurrency(freshCostCents);
-                        doc.hourlyRate = freshRate;
-                    }
-                } catch (e) {
-                    console.error('[COST-RECALC] DB lookup failed:', e.message);
-                }
+            let emp;
+            try {
+                emp = await db.collection('employees').findOne(
+                    { $or: [{ id: effectiveEmpId }, { _id: effectiveEmpId }] },
+                    { projection: { hourlyRate: 1, defaultHourlyRate: 1, dailyRate: 1, projectRate: 1 } }
+                );
+            } catch (e) {
+                console.error('[COST-RECALC] DB lookup failed:', e.message);
+                return {
+                    status: 500,
+                    error: `B\u0142\u0105d podczas odczytu stawki pracownika z bazy danych: ${e.message}`
+                };
+            }
+
+            if (!emp) {
+                return {
+                    status: 404,
+                    error: `Pracownik '${effectiveEmpId}' nie zosta\u0142 odnaleziony w bazie danych.`
+                };
+            }
+
+            if (billingType === 'hourly') {
+                const hours = Number(doc.hours) || 0;
+                const freshRate = Number(emp.hourlyRate ?? emp.defaultHourlyRate) || 0;
+                const freshCostCents = toCents(hours) * toCents(freshRate) / 100;
+                doc.cost = toCurrency(freshCostCents);
+                doc.hourlyRate = freshRate;
+            } else if (billingType === 'daily') {
+                const daysOrHours = Number(doc.hours) || 0;
+                const freshDailyRate = Number(emp.dailyRate) || 0;
+                const freshCostCents = toCents(daysOrHours) * toCents(freshDailyRate) / 100;
+                doc.cost = toCurrency(freshCostCents);
+                doc.hourlyRate = freshDailyRate;
+            } else if (billingType === 'project') {
+                const freshProjectRate = Number(emp.projectRate) || 0;
+                doc.cost = toCurrency(toCents(freshProjectRate));
+                doc.hourlyRate = freshProjectRate;
             }
         }
     } else {
-        // Non-hourly billing (fixed, m2, mb, piecework)
+        // Non-hourly/non-employee billing (fixed, m2, mb, piecework)
         // If cost is not explicitly provided, calculate quantity * rate if available
         if (doc.cost === undefined && doc.quantity !== undefined && (doc.rate !== undefined || doc.unitPrice !== undefined)) {
             const qty = Number(doc.quantity) || 0;

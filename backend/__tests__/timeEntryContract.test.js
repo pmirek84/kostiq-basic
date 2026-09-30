@@ -89,7 +89,13 @@ test('Shared Contracts: TimeEntry JSON Schema, Statuses and Payload Conformity',
     const mockEmployeesColl = {
         findOne: async (f) => {
             const id = f.$or ? f.$or[0].id : f.id;
-            return { id: id || 'admin-1', hourlyRate: 50 };
+            if (id === 'emp-db-error') {
+                throw new Error('Database query failure');
+            }
+            if (id === 'emp-not-found') {
+                return null;
+            }
+            return { id: id || 'admin-1', hourlyRate: 50, dailyRate: 400, projectRate: 1500 };
         }
     };
 
@@ -347,5 +353,94 @@ test('Shared Contracts: TimeEntry JSON Schema, Statuses and Payload Conformity',
         assert.strictEqual(resBatch.body.failed, 0);
         assert.strictEqual(store.get('batch-c-1').cost, 150); // 3h * 50 PLN/h
         assert.strictEqual(store.get('batch-c-2').cost, 200); // 4h * 50 PLN/h
+    });
+    await t.test('server authoritative cost calculation: recalculates daily and project costs, preventing client fabrication', async () => {
+        // Daily: employee has dailyRate 400, client submits cost: 999999 and hours: 2 (2 days)
+        const resDaily = await request(app)
+            .post('/api/time-entries')
+            .set('Authorization', `Bearer ${adminToken}`)
+            .send({
+                id: 'entry-cost-daily',
+                employeeId: 'admin-1',
+                jobId: 'job-1',
+                billingType: 'daily',
+                hours: 2,
+                cost: 999999
+            });
+
+        assert.strictEqual(resDaily.status, 201);
+        const storedDaily = store.get('entry-cost-daily');
+        assert.strictEqual(storedDaily.cost, 800, 'Daily cost MUST be recalculated as hours * dailyRate (2 * 400 = 800), ignoring client 999999');
+        assert.strictEqual(storedDaily.hourlyRate, 400);
+
+        // Project: employee has projectRate 1500, client submits cost: 999999
+        const resProject = await request(app)
+            .post('/api/time-entries')
+            .set('Authorization', `Bearer ${adminToken}`)
+            .send({
+                id: 'entry-cost-project',
+                employeeId: 'admin-1',
+                jobId: 'job-1',
+                billingType: 'project',
+                hours: 0,
+                cost: 999999
+            });
+
+        assert.strictEqual(resProject.status, 201);
+        const storedProject = store.get('entry-cost-project');
+        assert.strictEqual(storedProject.cost, 1500, 'Project cost MUST be recalculated as projectRate (1500), ignoring client 999999');
+        assert.strictEqual(storedProject.hourlyRate, 1500);
+    });
+
+    await t.test('fail-closed rate lookup: aborts save on employee lookup error (500) or missing employee (404)', async () => {
+        // DB error during employee rate lookup
+        const resDbError = await request(app)
+            .post('/api/time-entries')
+            .set('Authorization', `Bearer ${adminToken}`)
+            .send({
+                id: 'entry-db-error',
+                employeeId: 'emp-db-error',
+                jobId: 'job-1',
+                billingType: 'daily',
+                hours: 1,
+                cost: 999999
+            });
+
+        assert.strictEqual(resDbError.status, 500);
+        assert.strictEqual(store.has('entry-db-error'), false, 'Record MUST NOT be saved when rate lookup fails');
+
+        // Non-existent employee
+        const resNotFound = await request(app)
+            .post('/api/time-entries')
+            .set('Authorization', `Bearer ${adminToken}`)
+            .send({
+                id: 'entry-not-found',
+                employeeId: 'emp-not-found',
+                jobId: 'job-1',
+                billingType: 'daily',
+                hours: 1,
+                cost: 999999
+            });
+
+        assert.strictEqual(resNotFound.status, 404);
+        assert.strictEqual(store.has('entry-not-found'), false, 'Record MUST NOT be saved for non-existent employee');
+    });
+
+    await t.test('empty POST payload {} is strictly rejected by Ajv schema', async () => {
+        const resEmpty = await request(app)
+            .post('/api/time-entries')
+            .set('Authorization', `Bearer ${adminToken}`)
+            .send({});
+
+        assert.strictEqual(resEmpty.status, 400);
+        assert.match(resEmpty.body.error, /employeeId jest wymagane/);
+    });
+    await t.test('automated generation guard: verifies timeEntry.generated.ts is strictly up to date with timeEntry.schema.json', async () => {
+        const { execSync } = require('child_process');
+        const path = require('path');
+        const rootDir = path.resolve(__dirname, '../..');
+        assert.doesNotThrow(() => {
+            execSync('node scripts/generate-contracts.cjs --check', { cwd: rootDir, stdio: 'pipe' });
+        });
     });
 });

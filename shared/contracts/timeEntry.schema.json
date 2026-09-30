@@ -185,22 +185,10 @@
       },
       "additionalProperties": true
     },
-    "TimeEntryPostPayload": {
+    "TimeEntryPostBase": {
       "type": "object",
       "properties": {
         "id": {
-          "type": "string"
-        },
-        "employeeId": {
-          "type": "string"
-        },
-        "employee_id": {
-          "type": "string"
-        },
-        "jobId": {
-          "type": "string"
-        },
-        "project_id": {
           "type": "string"
         },
         "jobCode": {
@@ -289,19 +277,116 @@
           "type": "number"
         }
       },
-      "anyOf": [
+      "additionalProperties": true
+    },
+    "CanonicalTimeEntryPostPayload": {
+      "allOf": [
         {
-          "required": [
-            "employeeId"
-          ]
-        },
-        {
-          "required": [
-            "employee_id"
-          ]
+          "$ref": "#/definitions/TimeEntryPostBase"
         }
       ],
+      "type": "object",
+      "properties": {
+        "employeeId": {
+          "type": "string"
+        },
+        "jobId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "employeeId",
+        "jobId"
+      ],
       "additionalProperties": true
+    },
+    "TimeEntryPostPayload": {
+      "anyOf": [
+        {
+          "allOf": [
+            {
+              "$ref": "#/definitions/TimeEntryPostBase"
+            }
+          ],
+          "type": "object",
+          "properties": {
+            "employeeId": {
+              "type": "string"
+            },
+            "jobId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "employeeId",
+            "jobId"
+          ],
+          "additionalProperties": true
+        },
+        {
+          "allOf": [
+            {
+              "$ref": "#/definitions/TimeEntryPostBase"
+            }
+          ],
+          "type": "object",
+          "properties": {
+            "employee_id": {
+              "type": "string"
+            },
+            "jobId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "employee_id",
+            "jobId"
+          ],
+          "additionalProperties": true
+        },
+        {
+          "allOf": [
+            {
+              "$ref": "#/definitions/TimeEntryPostBase"
+            }
+          ],
+          "type": "object",
+          "properties": {
+            "employeeId": {
+              "type": "string"
+            },
+            "project_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "employeeId",
+            "project_id"
+          ],
+          "additionalProperties": true
+        },
+        {
+          "allOf": [
+            {
+              "$ref": "#/definitions/TimeEntryPostBase"
+            }
+          ],
+          "type": "object",
+          "properties": {
+            "employee_id": {
+              "type": "string"
+            },
+            "project_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "employee_id",
+            "project_id"
+          ],
+          "additionalProperties": true
+        }
+      ]
     },
     "TimeEntryPatchPayload": {
       "type": "object",

@@ -10,6 +10,8 @@ import {
 } from '../../../models/types';
 
 import {
+    type CanonicalTimeEntryPostPayload,
+    type TimeEntryPostPayload,
     TIME_ENTRY_STATUSES as CONTRACT_STATUSES,
     WORKER_ALLOWED_TIME_ENTRY_STATUSES as CONTRACT_WORKER_STATUSES,
     FOREMAN_ALLOWED_TIME_ENTRY_STATUSES as CONTRACT_FOREMAN_STATUSES,
@@ -114,6 +116,36 @@ describe('Shared Contracts: TimeEntry Frontend Type and Status Conformity', () =
 
         allNineStatuses.forEach(s => {
             expect(MODEL_STATUSES.includes(s)).toBe(true);
+        });
+    });
+    it('verifies CanonicalTimeEntryPostPayload and TimeEntryPostPayload contract requirement', () => {
+        // Canonical payload requires employeeId and jobId
+        const canonical: CanonicalTimeEntryPostPayload = {
+            employeeId: 'emp-101',
+            jobId: 'job-202',
+            hours: 8,
+            billingType: 'hourly'
+        };
+        expect(canonical.employeeId).toBe('emp-101');
+        expect(canonical.jobId).toBe('job-202');
+
+        // TimeEntryPostPayload accepts canonical as well as legacy alias variants
+        const payloadAlias: TimeEntryPostPayload = {
+            employee_id: 'emp-101',
+            jobId: 'job-202',
+            hours: 4
+        };
+        expect((payloadAlias as any).employee_id).toBe('emp-101');
+
+        // Verify that schema definition requires both identifiers
+        const canonicalDef = (TIME_ENTRY_SCHEMA.definitions as any).CanonicalTimeEntryPostPayload;
+        expect(canonicalDef.required).toContain('employeeId');
+        expect(canonicalDef.required).toContain('jobId');
+
+        const postDef = (TIME_ENTRY_SCHEMA.definitions as any).TimeEntryPostPayload;
+        expect(postDef.anyOf).toHaveLength(4);
+        postDef.anyOf.forEach((variant: any) => {
+            expect(variant.required.length).toBe(2);
         });
     });
 });

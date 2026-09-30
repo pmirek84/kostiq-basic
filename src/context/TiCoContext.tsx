@@ -62,7 +62,7 @@ interface TiCoContextType {
     toggleSubcontractorStatus: (id: string) => Promise<void>;
 
     // Time Entry Actions
-    addTimeEntry: (entry: Omit<TimeEntry, 'id' | 'createdAt' | 'updatedAt' | 'cost' | 'status'>) => Promise<void>;
+    addTimeEntry: (entry: Omit<TimeEntry, 'id' | 'createdAt' | 'updatedAt' | 'cost' | 'status'> & Partial<Pick<TimeEntry, 'id' | 'createdAt' | 'updatedAt' | 'cost' | 'status'>>) => Promise<void>;
     updateTimeEntry: (id: string, updates: Partial<TimeEntry>) => Promise<void>;
     deleteTimeEntry: (id: string) => Promise<void>;
     updateTimeEntryStatus: (id: string, status: TimeEntry['status']) => Promise<void>;
@@ -272,33 +272,49 @@ export const TiCoProvider = ({ children }: { children: ReactNode }) => {
     };
 
     // --- Time Entry Handlers ---
-    const addTimeEntry = async (entry: Omit<TimeEntry, 'id' | 'createdAt' | 'updatedAt' | 'cost' | 'status'>) => {
-        let cost = 0;
-        if (entry.billingType === 'hourly') {
-            cost = entry.hours * (entry.hourlyRate || 0);
-        } else {
-            cost = (entry.rate || 0) * (1);
-        }
-
-        // FIX #5: Snapshot employeeName — ensures historical records retain name after soft-delete
+    const addTimeEntry = async (entry: Omit<TimeEntry, 'id' | 'createdAt' | 'updatedAt' | 'cost' | 'status'> & Partial<Pick<TimeEntry, 'id' | 'createdAt' | 'updatedAt' | 'cost' | 'status'>>) => {
+        // FIX #5: Snapshot employeeName - ensures historical records retain name after soft-delete
         let employeeName = (entry as any).employeeName;
         if (!employeeName && entry.employeeId) {
             const emp = employees.find(e => e.id === entry.employeeId);
-            if (emp) employeeName = `${emp.firstName} ${emp.lastName}`;
+            if (emp) employeeName = emp.firstName + ' ' + emp.lastName;
         }
 
-        const newEntry: TimeEntry = {
+        // Estimate client-side fallback cost (server authoritative calculation will normalize on persist)
+        let fallbackCost = entry.cost;
+        if (fallbackCost === undefined) {
+            if (entry.billingType === 'hourly') {
+                fallbackCost = entry.hours * (entry.hourlyRate || 0);
+            } else if (entry.billingType === 'daily') {
+                const emp = employees.find(e => e.id === entry.employeeId);
+                const dailyRate = emp?.dailyRate || entry.hourlyRate || 0;
+                fallbackCost = entry.hours * dailyRate;
+            } else if (entry.billingType === 'project') {
+                const emp = employees.find(e => e.id === entry.employeeId);
+                fallbackCost = emp?.projectRate || entry.hourlyRate || 0;
+            } else {
+                fallbackCost = (entry.rate || 0) * (entry.quantity || 1);
+            }
+        }
+
+        const candidateEntry: TimeEntry = {
             ...entry,
             ...(employeeName ? { employeeName } : {}),
-            id: uuidv4(),
-            status: 'approved',
-            cost,
-            createdAt: new Date().toISOString(),
-            updatedAt: new Date().toISOString()
+            id: entry.id || uuidv4(),
+            status: entry.status || 'submitted',
+            cost: fallbackCost,
+            createdAt: entry.createdAt || new Date().toISOString(),
+            updatedAt: entry.updatedAt || new Date().toISOString()
         };
 
-        await repository.createTimeEntry(newEntry);
-        setTimeEntries(prev => [...prev, newEntry]);
+        const savedEntry = await repository.createTimeEntry(candidateEntry);
+        // Canonical record returned by backend repository is stored into local state.
+        // This guarantees UI and aggregations reflect server-normalized dates, statuses, snapshot rates, and costs.
+        const finalEntry = (savedEntry && typeof savedEntry === 'object' && savedEntry.id)
+            ? { ...candidateEntry, ...savedEntry }
+            : candidateEntry;
+
+        setTimeEntries(prev => [...prev, finalEntry]);
     };
 
     const updateTimeEntry = async (id: string, updates: Partial<TimeEntry>) => {
@@ -315,9 +331,13 @@ export const TiCoProvider = ({ children }: { children: ReactNode }) => {
         }
 
         const finalUpdates = { ...updates, cost, updatedAt: new Date().toISOString() };
-        await repository.updateTimeEntry(id, finalUpdates);
+        const savedUpdates = await repository.updateTimeEntry(id, finalUpdates);
 
-        setTimeEntries(prev => prev.map(t => t.id === id ? { ...t, ...finalUpdates } : t));
+        const merged = (savedUpdates && typeof savedUpdates === 'object' && savedUpdates.id)
+            ? { ...current, ...finalUpdates, ...savedUpdates }
+            : { ...current, ...finalUpdates };
+
+        setTimeEntries(prev => prev.map(t => t.id === id ? merged : t));
     };
 
     const deleteTimeEntry = async (id: string) => {

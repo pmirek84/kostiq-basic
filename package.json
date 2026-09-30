@@ -6,12 +6,13 @@
   "scripts": {
     "dev": "vite --port 5180",
     "dev:mobile": "cross-env VITE_APP_MODE=mobile vite --port 5174",
-    "build": "tsc -b && vite build",
+    "build": "node scripts/generate-contracts.cjs --check && tsc -b && vite build",
     "lint": "eslint .",
     "test": "vitest run",
     "preview": "vite preview",
     "db:restore": "npm --prefix backend run restore",
-    "generate:contracts": "node scripts/generate-contracts.cjs"
+    "generate:contracts": "node scripts/generate-contracts.cjs",
+    "contracts:verify": "node scripts/generate-contracts.cjs --check"
   },
   "dependencies": {
     "@emotion/react": "^11.14.0",

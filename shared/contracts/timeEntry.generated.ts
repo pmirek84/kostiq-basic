@@ -18,38 +18,32 @@ export type WorkerAllowedStatus = 'draft' | 'pending' | 'submitted';
 export type ForemanAllowedStatus = 'draft' | 'pending' | 'submitted' | 'foreman_approved' | 'foreman_rejected';
 export type BillingType = 'hourly' | 'daily' | 'project' | 'fixed' | 'm2' | 'mb';
 export type TimeEntryType = 'drive' | 'work' | 'other' | 'employee' | 'subcontractor';
-export type TimeEntryPostPayload = TimeEntryPostPayload1 & {
-  id?: string;
-  employeeId?: string;
-  employee_id?: string;
-  jobId?: string;
-  project_id?: string;
-  jobCode?: string;
-  jobName?: string;
-  stageId?: string;
-  stageName?: string;
-  date?: string;
-  hours?: number;
-  billingType?: BillingType;
-  hourlyRate?: number;
-  cost?: number;
-  description?: string;
-  status?: TimeEntryStatus;
-  crewId?: string | null;
-  foremanId?: string | null;
-  foremanApprovedAt?: string | null;
-  adminId?: string | null;
-  adminApprovedAt?: string | null;
-  settlementId?: string | null;
-  type?: TimeEntryType;
-  workType?: string;
-  quantity?: number;
-  rate?: number;
+export type CanonicalTimeEntryPostPayload = TimeEntryPostBase & {
+  employeeId: string;
+  jobId: string;
   [k: string]: unknown;
 };
-export type TimeEntryPostPayload1 = {
-  [k: string]: unknown;
-};
+export type TimeEntryPostPayload =
+  | (TimeEntryPostBase & {
+      employeeId: string;
+      jobId: string;
+      [k: string]: unknown;
+    })
+  | (TimeEntryPostBase & {
+      employee_id: string;
+      jobId: string;
+      [k: string]: unknown;
+    })
+  | (TimeEntryPostBase & {
+      employeeId: string;
+      project_id: string;
+      [k: string]: unknown;
+    })
+  | (TimeEntryPostBase & {
+      employee_id: string;
+      project_id: string;
+      [k: string]: unknown;
+    });
 
 /**
  * Canonical domain contract and JSON Schemas for TimeEntry, statuses, and API payloads.
@@ -61,6 +55,8 @@ export interface TimeEntryRoot {
   BillingType?: BillingType;
   TimeEntryType?: TimeEntryType;
   TimeEntry?: TimeEntry;
+  TimeEntryPostBase?: TimeEntryPostBase;
+  CanonicalTimeEntryPostPayload?: CanonicalTimeEntryPostPayload;
   TimeEntryPostPayload?: TimeEntryPostPayload;
   TimeEntryPatchPayload?: TimeEntryPatchPayload;
   TimeEntryBatchImportPayload?: TimeEntryBatchImportPayload;
@@ -96,6 +92,31 @@ export interface TimeEntry {
   approved?: boolean;
   createdAt: string;
   updatedAt: string;
+  [k: string]: unknown;
+}
+export interface TimeEntryPostBase {
+  id?: string;
+  jobCode?: string;
+  jobName?: string;
+  stageId?: string;
+  stageName?: string;
+  date?: string;
+  hours?: number;
+  billingType?: BillingType;
+  hourlyRate?: number;
+  cost?: number;
+  description?: string;
+  status?: TimeEntryStatus;
+  crewId?: string | null;
+  foremanId?: string | null;
+  foremanApprovedAt?: string | null;
+  adminId?: string | null;
+  adminApprovedAt?: string | null;
+  settlementId?: string | null;
+  type?: TimeEntryType;
+  workType?: string;
+  quantity?: number;
+  rate?: number;
   [k: string]: unknown;
 }
 export interface TimeEntryPatchPayload {
