@@ -112,4 +112,52 @@ describe('Production timeTrackingBatchService - Partial Failure & Duplicate Prev
         expect(savedEntries[0].createdAt).toBe('2026-05-01T12:00:00.000Z');
         expect(savedEntries[1].createdAt).toBeDefined();
     });
+    it('executeImportTimeEntries updates savedEntries strictly according to succeededIds on partial success', async () => {
+        const mockRepo = {
+            batchImportTimeEntries: vi.fn().mockResolvedValue({
+                succeeded: 1,
+                failed: 1,
+                succeededIds: ['t2'], // t2 succeeded, t1 failed (out-of-order test)
+                failedIds: ['t1'],
+                errors: ['Duplicate on t1']
+            }),
+            createTimeEntry: vi.fn(),
+            updateTimeEntry: vi.fn()
+        };
+
+        const entriesToImport = [
+            { id: 't1', hours: 4 },
+            { id: 't2', hours: 8 }
+        ] as TimeEntry[];
+
+        const { result, savedEntries } = await executeImportTimeEntries(entriesToImport, [], mockRepo as any);
+
+        expect(result.succeeded).toBe(1);
+        expect(result.failed).toBe(1);
+        expect(savedEntries.map(s => s.id)).toEqual(['t2']);
+        expect(mockRepo.createTimeEntry).not.toHaveBeenCalled();
+    });
+
+    it('executeImportTimeEntries returns network failure cleanly without dangerous sequential fallback', async () => {
+        const mockRepo = {
+            batchImportTimeEntries: vi.fn().mockRejectedValue(new Error('Network connection timeout')),
+            createTimeEntry: vi.fn(),
+            updateTimeEntry: vi.fn()
+        };
+
+        const entriesToImport = [
+            { id: 't1', hours: 4 },
+            { id: 't2', hours: 8 }
+        ] as TimeEntry[];
+
+        const { result, savedEntries } = await executeImportTimeEntries(entriesToImport, [], mockRepo as any);
+
+        expect(result.succeeded).toBe(0);
+        expect(result.failed).toBe(2);
+        expect(result.errors[0]).toContain('Network connection timeout');
+        expect(savedEntries).toEqual([]);
+        // Proves NO sequential fallback occurred
+        expect(mockRepo.createTimeEntry).not.toHaveBeenCalled();
+        expect(mockRepo.updateTimeEntry).not.toHaveBeenCalled();
+    });
 });

@@ -221,14 +221,29 @@ export class MongoRepository implements TiCoRepository {
         });
     }
 
-    async batchImportTimeEntries(entries: TimeEntry[]): Promise<{ succeeded: number; failed: number; errors: string[] }> {
-        const res = await this.fetchJson<{ status?: string; succeeded?: number; failed?: number; errors?: string[] }>('/time-entries/batch-import', {
+    async batchImportTimeEntries(entries: TimeEntry[]): Promise<{
+        succeeded: number;
+        failed: number;
+        succeededIds?: string[];
+        failedIds?: string[];
+        errors: string[];
+    }> {
+        const res = await this.fetchJson<{
+            status?: string;
+            succeeded?: number;
+            failed?: number;
+            succeededIds?: string[];
+            failedIds?: string[];
+            errors?: string[];
+        }>('/time-entries/batch-import', {
             method: 'POST',
             body: JSON.stringify({ items: entries }),
         });
         return {
             succeeded: res.succeeded ?? 0,
             failed: res.failed ?? 0,
+            succeededIds: res.succeededIds,
+            failedIds: res.failedIds,
             errors: res.errors ?? [],
         };
     }

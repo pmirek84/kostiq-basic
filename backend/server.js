@@ -2,7 +2,7 @@ const express = require('express');
 const cors = require('cors');
 const path = require('path');
 const fs = require('fs');
-const { MongoClient } = require('mongodb');
+const { MongoClient, ObjectId } = require('mongodb');
 const bcrypt = require('bcryptjs');
 const multer = require('multer');
 const rateLimit = require('express-rate-limit'); // Security: Brute Force protection
@@ -147,7 +147,8 @@ const ALLOWED_BATCH_IMPORT_COLLECTIONS = new Set([
 let dbReady = process.env.NODE_ENV === 'test';
 let indexInitError = null;
 
-// Reconciles duplicates and creates unique index on { id: 1 } for all system collections
+// Reconciles duplicates safely with quarantine backup and field merging,
+// then creates and verifies unique index on { id: 1 } for all system collections
 async function reconcileDuplicatesAndEnsureIndexes(database) {
     if (!database) return;
     const failures = [];
@@ -157,7 +158,7 @@ async function reconcileDuplicatesAndEnsureIndexes(database) {
             const collection = database.collection(col);
             if (!collection) continue;
 
-            // 1. Group by id and remove stale duplicates, keeping the newest record
+            // 1. Group by id and safely reconcile duplicates before creating unique index
             if (typeof collection.aggregate === 'function') {
                 const duplicates = await collection.aggregate([
                     { $match: { id: { $exists: true, $ne: null } } },
@@ -170,20 +171,85 @@ async function reconcileDuplicatesAndEnsureIndexes(database) {
                 ]).toArray();
 
                 if (duplicates && duplicates.length > 0) {
-                    console.warn(`[INDEX MIGRATION] Found ${duplicates.length} duplicate ID group(s) in collection '${col}'. Reconciling...`);
+                    console.warn(`[INDEX MIGRATION] Found ${duplicates.length} duplicate ID group(s) in collection '${col}'. Reconciling with quarantine snapshot...`);
                     for (const group of duplicates) {
-                        const docs = group.docs || [];
-                        docs.sort((a, b) => {
+                        const groupDocIds = group.docs.map(d => d._id);
+                        let fullDocs = [];
+                        if (typeof collection.find === 'function') {
+                            const cursor = collection.find({ _id: { $in: groupDocIds } });
+                            if (cursor && typeof cursor.toArray === 'function') {
+                                fullDocs = await cursor.toArray();
+                            }
+                        }
+                        if (!fullDocs || fullDocs.length === 0) {
+                            fullDocs = group.docs;
+                        }
+
+                        fullDocs.sort((a, b) => {
                             const timeA = new Date(a.updatedAt || a.createdAt || 0).getTime();
                             const timeB = new Date(b.updatedAt || b.createdAt || 0).getTime();
                             if (timeB !== timeA) return timeB - timeA;
                             return String(b._id).localeCompare(String(a._id));
                         });
-                        const redundantIds = docs.slice(1).map(d => d._id);
-                        if (redundantIds.length > 0) {
-                            await collection.deleteMany({ _id: { $in: redundantIds } });
-                            console.warn(`[INDEX MIGRATION] Kept latest record for id '${group._id}', removed ${redundantIds.length} stale duplicate(s) from '${col}'.`);
+
+                        const primaryDoc = fullDocs[0];
+                        const duplicateDocs = fullDocs.slice(1);
+
+                        // 1. Snapshot / Quarantine: Archive discarded documents into _migration_quarantine
+                        const quarantineEntries = duplicateDocs.map(dup => ({
+                            quarantineId: new ObjectId().toString(),
+                            collectionName: col,
+                            documentId: group._id,
+                            originalDocId: dup._id,
+                            archivedAt: new Date().toISOString(),
+                            reason: 'duplicate_key_reconciliation',
+                            duplicateDoc: dup
+                        }));
+
+                        const quarantineCol = database.collection('_migration_quarantine');
+                        if (quarantineCol && typeof quarantineCol.insertMany === 'function' && quarantineEntries.length > 0) {
+                            await quarantineCol.insertMany(quarantineEntries);
                         }
+
+                        // 2. Non-destructive field merge: preserve values from duplicates if primary doc lacks them
+                        const mergedFields = [];
+                        const updates = {};
+                        for (const dup of duplicateDocs) {
+                            for (const [key, val] of Object.entries(dup)) {
+                                if (key === '_id' || key === 'id') continue;
+                                if (val !== undefined && val !== null && val !== '') {
+                                    if (primaryDoc[key] === undefined || primaryDoc[key] === null || primaryDoc[key] === '') {
+                                        primaryDoc[key] = val;
+                                        updates[key] = val;
+                                        mergedFields.push(key);
+                                    }
+                                }
+                            }
+                        }
+
+                        if (Object.keys(updates).length > 0 && typeof collection.updateOne === 'function') {
+                            await collection.updateOne({ _id: primaryDoc._id }, { $set: updates });
+                        }
+
+                        // 3. Log reconciliation audit record in _migration_logs
+                        const migrationLogsCol = database.collection('_migration_logs');
+                        if (migrationLogsCol && typeof migrationLogsCol.insertOne === 'function') {
+                            await migrationLogsCol.insertOne({
+                                collectionName: col,
+                                documentId: group._id,
+                                reconciledAt: new Date().toISOString(),
+                                survivingDocId: primaryDoc._id,
+                                quarantinedDocIds: duplicateDocs.map(d => d._id),
+                                mergedFields
+                            });
+                        }
+
+                        // 4. Safely delete the redundant duplicate records
+                        const redundantIds = duplicateDocs.map(d => d._id);
+                        if (redundantIds.length > 0 && typeof collection.deleteMany === 'function') {
+                            await collection.deleteMany({ _id: { $in: redundantIds } });
+                        }
+                        console.warn(`[INDEX MIGRATION] Kept latest record for id '${group._id}', quarantined & removed ${redundantIds.length} stale duplicate(s) from '${col}'.`);
                     }
                 }
             }
@@ -287,6 +353,14 @@ function sanitizeQueryParams(req, res, next) {
 // Apply to all API routes
 app.use('/api', sanitizeQueryParams);
 app.use('/api', (req, res, next) => {
+    if (!db) {
+        return res.status(503).json({ error: 'Database not connected' });
+    }
+    if (!dbReady) {
+        return res.status(503).json({
+            error: `Database not ready: ${indexInitError || 'Index verification and migration failed or pending'}`
+        });
+    }
     res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
     res.setHeader('Pragma', 'no-cache');
     res.setHeader('Expires', '0');
@@ -299,7 +373,7 @@ const createRouter = (collectionName, options = {}) => {
     // GET All — with optional filtering + PAGINATION (Fix #4: 10 000 records problem)
     router.get('/', async (req, res) => {
         try {
-            if (!db) return res.status(503).json({ error: 'Database not connected' });
+            if (!db || !dbReady) return res.status(503).json({ error: `Database not ready: ${indexInitError || 'Database not ready'}` });
 
             // PAGINATION: extract page/limit from query, strip from filter
             // Collections that are always small enough to return fully (lookup lists)
@@ -480,7 +554,7 @@ const createRouter = (collectionName, options = {}) => {
     if (ALLOWED_BATCH_IMPORT_COLLECTIONS.has(collectionName) || (options && options.allowBatchImport === true)) {
         router.post('/batch-import', async (req, res) => {
             try {
-                if (!db) return res.status(503).json({ error: 'Database not connected' });
+                if (!db || !dbReady) return res.status(503).json({ error: `Database not ready: ${indexInitError || 'Database not ready'}` });
                 const { items } = req.body;
                 if (!Array.isArray(items) || items.length === 0) {
                     return res.status(400).json({ error: 'Brak tablicy items do zaimportowania.' });
@@ -526,6 +600,8 @@ const createRouter = (collectionName, options = {}) => {
                         modified: modifiedCount,
                         matched: matchedCount,
                         failed: 0,
+                        succeededIds: items.map(i => i.id),
+                        failedIds: [],
                         errors: []
                     });
                 } catch (bulkErr) {
@@ -534,10 +610,21 @@ const createRouter = (collectionName, options = {}) => {
                         const upsertedCount = writeResult.upsertedCount || (writeResult.nUpserted || 0);
                         const modifiedCount = writeResult.modifiedCount || (writeResult.nModified || 0);
                         const matchedCount = writeResult.matchedCount || (writeResult.nMatched || 0);
-                        const succeeded = upsertedCount + modifiedCount;
 
                         const writeErrors = bulkErr.writeErrors || [];
-                        const failed = writeErrors.length || Math.max(0, items.length - succeeded);
+                        const failedIndices = new Set(writeErrors.map(e => e.index));
+                        const failedIds = [];
+                        const succeededIds = [];
+
+                        for (let i = 0; i < items.length; i++) {
+                            const itemId = items[i].id;
+                            if (failedIndices.has(i)) {
+                                failedIds.push(itemId);
+                            } else {
+                                succeededIds.push(itemId);
+                            }
+                        }
+
                         const errorMessages = writeErrors.map(e => e.errmsg || e.message || String(e));
                         if (errorMessages.length === 0 && bulkErr.message) {
                             errorMessages.push(bulkErr.message);
@@ -545,11 +632,13 @@ const createRouter = (collectionName, options = {}) => {
 
                         return res.status(207).json({
                             status: 'partial_success',
-                            succeeded,
+                            succeeded: succeededIds.length,
                             upserted: upsertedCount,
                             modified: modifiedCount,
                             matched: matchedCount,
-                            failed,
+                            failed: failedIds.length,
+                            succeededIds,
+                            failedIds,
                             errors: errorMessages
                         });
                     }
@@ -561,6 +650,8 @@ const createRouter = (collectionName, options = {}) => {
                     status: 'failed',
                     succeeded: 0,
                     failed: Array.isArray(req.body?.items) ? req.body.items.length : 1,
+                    succeededIds: [],
+                    failedIds: Array.isArray(req.body?.items) ? req.body.items.map(i => i.id) : [],
                     errors: [err.message]
                 });
             }
@@ -1091,6 +1182,112 @@ app.post('/api/auth/set-password', verifyToken, requireRole('admin'), async (req
 const toCents = (val) => Math.round((Number(val) || 0) * 100);
 const toCurrency = (cents) => Math.round(cents) / 100;
 
+// Shared validation & normalization for time entries (used by single POST/PATCH and batch-import)
+async function validateAndNormalizeTimeEntryDoc(doc, { db, user, isBatch = false }) {
+    if (!doc || typeof doc !== 'object') {
+        return { error: 'Nieprawidłowy obiekt wpisu czasu.' };
+    }
+    const effectiveEmpId = doc.employeeId || doc.employee_id;
+    const effectiveJobId = doc.jobId || doc.project_id;
+
+    if (!effectiveEmpId) {
+        return { error: 'Pole employeeId jest wymagane.' };
+    }
+    if (!effectiveJobId) {
+        return { error: 'Pole jobId jest wymagane.' };
+    }
+
+    if (doc.hours !== undefined) {
+        const h = Number(doc.hours);
+        if (isNaN(h) || h < 0) {
+            return { error: 'Godziny nie mogą być ujemne.' };
+        }
+        if (h > 24) {
+            return { error: 'Godziny nie mogą przekraczać 24h na jeden wpis.' };
+        }
+    }
+
+    // Shield #3 + FIX #2: UTC date normalization + Time Travel guard
+    if (doc.date) {
+        let entryDate;
+        const rawDate = String(doc.date);
+
+        if (/^\d{4}-\d{2}-\d{2}$/.test(rawDate)) {
+            const [year, month, day] = rawDate.split('-').map(Number);
+            entryDate = new Date(Date.UTC(year, month - 1, day));
+            doc.date = entryDate.toISOString();
+        } else {
+            entryDate = new Date(rawDate);
+        }
+
+        if (!isNaN(entryDate.getTime())) {
+            const nowUTC = new Date();
+            const todayUTC = new Date(Date.UTC(nowUTC.getUTCFullYear(), nowUTC.getUTCMonth(), nowUTC.getUTCDate()));
+
+            // Reject future dates (beyond today)
+            if (entryDate > todayUTC) {
+                return {
+                    error: `Nie można zgłosić czasu z datą przyszłą (${rawDate}). Dozwolona data to dzisiaj lub wcześniej.`
+                };
+            }
+
+            // Reject dates older than MAX_BACKDATE_DAYS (default 7) unless admin/manager
+            const MAX_BACKDATE_DAYS = 7;
+            const oldestAllowed = new Date(todayUTC);
+            oldestAllowed.setUTCDate(oldestAllowed.getUTCDate() - MAX_BACKDATE_DAYS);
+
+            const isAdminOverride = user && (user.role === 'admin' || user.role === 'manager');
+
+            if (entryDate < oldestAllowed && !isAdminOverride) {
+                return {
+                    error: `Data wpisu jest zbyt stara (${rawDate}). Pracownicy mogą wpisywać czas maksymalnie ${MAX_BACKDATE_DAYS} dni wstecz. Skontaktuj się z przełożonym.`
+                };
+            }
+        }
+    }
+
+    // Block time-entry on closed/cancelled jobs
+    if (db && effectiveJobId && typeof db.collection === 'function') {
+        try {
+            const job = await db.collection('jobs').findOne(
+                { $or: [{ id: effectiveJobId }, { _id: effectiveJobId }] },
+                { projection: { status: 1 } }
+            );
+            if (job && (job.status === 'done' || job.status === 'cancelled')) {
+                return {
+                    status: 409,
+                    error: `Zlecenie jest już ${job.status === 'done' ? 'zakończone' : 'anulowane'}. Nie można dodawać wpisów godzinowych.`
+                };
+            }
+        } catch (e) {
+            console.error('[validateTimeEntry] DB check error:', e.message);
+        }
+    }
+
+    // Server-side cost recalculation from employee current rate in DB
+    if (db && effectiveEmpId && typeof db.collection === 'function') {
+        const hours = Number(doc.hours) || 0;
+        if (hours > 0) {
+            try {
+                const emp = await db.collection('employees').findOne(
+                    { $or: [{ id: effectiveEmpId }, { _id: effectiveEmpId }] },
+                    { projection: { hourlyRate: 1, defaultHourlyRate: 1 } }
+                );
+                if (emp) {
+                    const freshRate = emp.hourlyRate || emp.defaultHourlyRate || 0;
+                    const freshCostCents = toCents(hours) * toCents(freshRate) / 100;
+                    doc.cost = toCurrency(freshCostCents);
+                    doc.hourlyRate = freshRate;
+                }
+            } catch (e) {
+                console.error('[COST-RECALC] DB lookup failed:', e.message);
+            }
+        }
+    }
+
+    return null;
+}
+
 async function validateTimeEntryBatch(req, res, next) {
     if (req.method !== 'POST') return next();
     const { items } = req.body;
@@ -1101,62 +1298,16 @@ async function validateTimeEntryBatch(req, res, next) {
         return res.status(400).json({ error: 'Maksymalny rozmiar paczki importu to 1000 rekordów.' });
     }
 
-    const uniqueJobIds = new Set();
-
     for (let i = 0; i < items.length; i++) {
-        const item = items[i];
-        if (!item || typeof item !== 'object') {
-            return res.status(400).json({ error: `Pozycja #${i + 1} nie jest prawidłowym obiektem.` });
-        }
-        const effectiveEmpId = item.employeeId || item.employee_id;
-        const effectiveJobId = item.jobId || item.project_id;
-
-        if (!effectiveEmpId) {
-            return res.status(400).json({ error: `Pozycja #${i + 1}: Pole employeeId jest wymagane.` });
-        }
-        if (!effectiveJobId) {
-            return res.status(400).json({ error: `Pozycja #${i + 1}: Pole jobId jest wymagane.` });
-        }
-        uniqueJobIds.add(effectiveJobId);
-
-        if (item.hours !== undefined) {
-            const h = Number(item.hours);
-            if (isNaN(h) || h < 0) {
-                return res.status(400).json({ error: `Pozycja #${i + 1}: Godziny nie mogą być ujemne.` });
-            }
-            if (h > 24) {
-                return res.status(400).json({ error: `Pozycja #${i + 1}: Godziny nie mogą przekraczać 24h na jeden wpis.` });
-            }
-        }
-
-        if (item.date) {
-            const rawDate = String(item.date);
-            if (/^\d{4}-\d{2}-\d{2}$/.test(rawDate)) {
-                const [year, month, day] = rawDate.split('-').map(Number);
-                item.date = new Date(Date.UTC(year, month - 1, day)).toISOString();
-            }
-        }
-    }
-
-    if (db && uniqueJobIds.size > 0 && typeof db.collection === 'function') {
-        try {
-            const closedJob = await db.collection('jobs').findOne(
-                {
-                    $or: [
-                        { id: { $in: Array.from(uniqueJobIds) } },
-                        { _id: { $in: Array.from(uniqueJobIds) } }
-                    ],
-                    status: { $in: ['done', 'cancelled'] }
-                },
-                { projection: { id: 1, status: 1 } }
-            );
-            if (closedJob) {
-                return res.status(409).json({
-                    error: `Zlecenie '${closedJob.id || closedJob._id}' jest już ${closedJob.status === 'done' ? 'zakończone' : 'anulowane'}. Nie można dodawać wpisów godzinowych.`
-                });
-            }
-        } catch (e) {
-            console.error('[validateTimeEntryBatch] DB check error:', e.message);
+        const valError = await validateAndNormalizeTimeEntryDoc(items[i], {
+            db,
+            user: req.user,
+            isBatch: true
+        });
+        if (valError) {
+            return res.status(valError.status || 400).json({
+                error: `Pozycja #${i + 1}: ${valError.error}`
+            });
         }
     }
 
@@ -1169,111 +1320,14 @@ async function validateTimeEntry(req, res, next) {
     if (req.path === '/batch-import' || req.url === '/batch-import' || req.originalUrl?.endsWith('/batch-import')) {
         return validateTimeEntryBatch(req, res, next);
     }
-    if (req.method !== 'POST' && req.method !== 'PATCH') return next();
-    const { hours, employeeId, jobId } = req.body;
-    const effectiveJobId = jobId || req.body.project_id;
 
-    if (req.method === 'POST') {
-        if (!employeeId && !req.body.employee_id) {
-            return res.status(400).json({ error: 'Pole employeeId jest wymagane.' });
-        }
-        if (!effectiveJobId) {
-            return res.status(400).json({ error: 'Pole jobId jest wymagane.' });
-        }
-
-        // Block time-entry on closed/cancelled jobs (PWA offline conflict guard)
-        if (db && effectiveJobId) {
-            try {
-                const job = await db.collection('jobs').findOne(
-                    { $or: [{ id: effectiveJobId }, { _id: effectiveJobId }] },
-                    { projection: { status: 1 } }
-                );
-                if (job && (job.status === 'done' || job.status === 'cancelled')) {
-                    return res.status(409).json({
-                        error: `Zlecenie jest już ${job.status === 'done' ? 'zakończone' : 'anulowane'}. Nie można dodawać wpisów godzinowych.`
-                    });
-                }
-            } catch (e) {
-                console.error('[validateTimeEntry] DB check error:', e.message);
-            }
-        }
-    }
-
-    if (hours !== undefined) {
-        const h = Number(hours);
-        if (isNaN(h) || h < 0) {
-            return res.status(400).json({ error: 'Godziny nie mogą być ujemne.' });
-        }
-        if (h > 24) {
-            return res.status(400).json({ error: 'Godziny nie mogą przekraczać 24h na jeden wpis.' });
-        }
-    }
-
-    // Shield #3 + FIX #2: UTC date normalization + Time Travel guard
-    if (req.body.date) {
-        let entryDate;
-        const rawDate = String(req.body.date);
-
-        // Normalize plain YYYY-MM-DD to UTC midnight ISO
-        if (/^\d{4}-\d{2}-\d{2}$/.test(rawDate)) {
-            const [year, month, day] = rawDate.split('-').map(Number);
-            entryDate = new Date(Date.UTC(year, month - 1, day));
-            req.body.date = entryDate.toISOString();
-        } else {
-            // Already an ISO string — parse it
-            entryDate = new Date(rawDate);
-        }
-
-        if (!isNaN(entryDate.getTime())) {
-            const nowUTC = new Date();
-            // Normalize today to UTC midnight for fair comparison
-            const todayUTC = new Date(Date.UTC(nowUTC.getUTCFullYear(), nowUTC.getUTCMonth(), nowUTC.getUTCDate()));
-
-            // FIX #2a: Reject future dates (beyond today)
-            if (entryDate > todayUTC) {
-                return res.status(400).json({
-                    error: `Nie można zgłosić czasu z datą przyszłą (${rawDate}). Dozwolona data to dzisiaj lub wcześniej.`
-                });
-            }
-
-            // FIX #2b: Reject dates older than MAX_BACKDATE_DAYS (default 7)
-            // Admins/managers may override via header X-Allow-Backdate
-            const MAX_BACKDATE_DAYS = 7;
-            const oldestAllowed = new Date(todayUTC);
-            oldestAllowed.setUTCDate(oldestAllowed.getUTCDate() - MAX_BACKDATE_DAYS);
-
-            const isAdminOverride = req.user && (req.user.role === 'admin' || req.user.role === 'manager');
-
-            if (entryDate < oldestAllowed && !isAdminOverride) {
-                return res.status(400).json({
-                    error: `Data wpisu jest zbyt stara (${rawDate}). Pracownicy mogą wpisywać czas maksymalnie ${MAX_BACKDATE_DAYS} dni wstecz. Skontaktuj się z przełożonym.`
-                });
-            }
-        }
-    }
-
-    // TARCZA 2 (PWA Stawka): Server przelicza cost z aktualnej stawki z DB — ignoruje wartość z payloadu
-    if (req.method === 'POST' && db) {
-        const effectiveEmployeeId = req.body.employeeId || req.body.employee_id;
-        const hours = Number(req.body.hours) || 0;
-        if (effectiveEmployeeId && hours > 0) {
-            try {
-                const emp = await db.collection('employees').findOne(
-                    { $or: [{ id: effectiveEmployeeId }, { _id: effectiveEmployeeId }] },
-                    { projection: { hourlyRate: 1, defaultHourlyRate: 1 } }
-                );
-                if (emp) {
-                    const freshRate = emp.hourlyRate || emp.defaultHourlyRate || 0;
-                    // Tarcza 1: integer cents arithmetic eliminates IEEE 754 drift
-                    const freshCostCents = toCents(hours) * toCents(freshRate) / 100;
-                    req.body.cost = toCurrency(freshCostCents);
-                    req.body.hourlyRate = freshRate;
-                    console.log(`[COST-RECALC] emp=${effectiveEmployeeId} h=${hours} rate=${freshRate} cost=${req.body.cost}`);
-                }
-            } catch (e) {
-                console.error('[COST-RECALC] DB lookup failed (non-fatal):', e.message);
-            }
-        }
+    const valError = await validateAndNormalizeTimeEntryDoc(req.body, {
+        db,
+        user: req.user,
+        isBatch: false
+    });
+    if (valError) {
+        return res.status(valError.status || 400).json({ error: valError.error });
     }
 
     next();
@@ -1335,12 +1389,14 @@ app.use('/api/messages', verifyToken, (req, res, next) => {
     if (req.method === 'POST') {
         const oldJson = res.json;
         res.json = function (data) {
-            createNotification({
-                type: 'message',
-                title: 'Nowa wiadomość',
-                message: data.content || data.message || 'Pracownik wysłał wiadomość.',
-                jobId: data.jobId
-            });
+            if (res.statusCode >= 200 && res.statusCode < 300 && data && !data.error) {
+                createNotification({
+                    type: 'message',
+                    title: 'Nowa wiadomość',
+                    message: data.content || data.message || 'Pracownik wysłał wiadomość.',
+                    jobId: data.jobId
+                });
+            }
             return oldJson.call(this, data);
         };
     }
@@ -1350,13 +1406,15 @@ app.use('/api/requests', verifyToken, (req, res, next) => {
     if (req.method === 'POST') {
         const oldJson = res.json;
         res.json = function (data) {
-            createNotification({
-                type: 'request',
-                title: 'Nowe zgłoszenie',
-                message: data.description || 'Pracownik wysłał nowe zgłoszenie.',
-                jobId: data.jobId,
-                status: 'pending'
-            });
+            if (res.statusCode >= 200 && res.statusCode < 300 && data && !data.error) {
+                createNotification({
+                    type: 'request',
+                    title: 'Nowe zgłoszenie',
+                    message: data.description || 'Pracownik wysłał nowe zgłoszenie.',
+                    jobId: data.jobId,
+                    status: 'pending'
+                });
+            }
             return oldJson.call(this, data);
         };
     }
@@ -1366,12 +1424,14 @@ app.use('/api/site-logs', verifyToken, (req, res, next) => {
     if (req.method === 'POST') {
         const oldJson = res.json;
         res.json = function (data) {
-            createNotification({
-                type: 'site_log',
-                title: 'Nowy wpis w dzienniku',
-                message: data.description || 'Pracownik dodał nowy raport.',
-                jobId: data.jobId
-            });
+            if (res.statusCode >= 200 && res.statusCode < 300 && data && !data.error) {
+                createNotification({
+                    type: 'site_log',
+                    title: 'Nowy wpis w dzienniku',
+                    message: data.description || 'Pracownik dodał nowy raport.',
+                    jobId: data.jobId
+                });
+            }
             return oldJson.call(this, data);
         };
     }
@@ -1382,13 +1442,15 @@ app.use('/api/extra-works', verifyToken, requireWorkerPostOrAdmin, validateFinan
     if (req.method === 'POST') {
         const oldJson = res.json;
         res.json = function (data) {
-            createNotification({
-                type: 'extra_work',
-                title: 'Zgłoszono pracę dodatkową',
-                message: `Zlecenie: ${data.jobId}. Opis: ${data.description || data.title}`,
-                jobId: data.jobId,
-                status: 'pending_quote'
-            });
+            if (res.statusCode >= 200 && res.statusCode < 300 && data && !data.error) {
+                createNotification({
+                    type: 'extra_work',
+                    title: 'Zgłoszono pracę dodatkową',
+                    message: `Zlecenie: ${data.jobId}. Opis: ${data.description || data.title}`,
+                    jobId: data.jobId,
+                    status: 'pending_quote'
+                });
+            }
             return oldJson.call(this, data);
         };
     }
@@ -1993,7 +2055,7 @@ module.exports = {
     app,
     connectDB,
     closeGracefully,
-    setDb: (testDb) => { db = testDb; dbReady = true; },
+    setDb: (testDb, ready = true) => { db = testDb; dbReady = ready; indexInitError = ready ? null : "Database marked not ready"; },
     reconcileDuplicatesAndEnsureIndexes,
     ALL_SYSTEM_COLLECTIONS,
     ALLOWED_BATCH_IMPORT_COLLECTIONS

@@ -5,13 +5,16 @@ import { v4 as uuidv4 } from 'uuid';
 export type BatchOperationResult = {
     succeeded: number;
     failed: number;
+    succeededIds?: string[];
+    failedIds?: string[];
     errors: string[];
 };
 
 /**
  * Imports time entries. When the repository implements batchImportTimeEntries,
  * it performs bulk upsert via the backend batch-import endpoint, preserving createdAt.
- * Otherwise falls back to sequential upserts.
+ * If partial success occurs, it saves exactly the records confirmed by succeededIds.
+ * Does NOT run sequential retries on ambiguous network/server errors.
  * Returns explicit operation counts and errors.
  */
 export async function executeImportTimeEntries(
@@ -38,13 +41,35 @@ export async function executeImportTimeEntries(
     if (typeof repository.batchImportTimeEntries === 'function') {
         try {
             const batchResult = await repository.batchImportTimeEntries(preparedEntries);
+            const succeededSet = new Set(batchResult.succeededIds || []);
+            
+            // Accurately map only the saved entries confirmed by the database
+            const savedEntries = (batchResult.succeededIds && batchResult.succeededIds.length > 0)
+                ? preparedEntries.filter(e => succeededSet.has(e.id))
+                : (batchResult.failed === 0 ? preparedEntries : []);
+
             return {
                 result: batchResult,
-                savedEntries: batchResult.failed === 0 ? preparedEntries : preparedEntries.slice(0, batchResult.succeeded)
+                savedEntries
             };
         } catch (err: any) {
-            console.warn('[executeImportTimeEntries] Batch import failed, falling back to sequential import:', err);
-            // Fallback to sequential below
+            // Only fall back to sequential if the batch endpoint is explicitly not supported (HTTP 404)
+            if (err?.status === 404 || (err?.message && err.message.includes('404'))) {
+                console.warn('[executeImportTimeEntries] Batch endpoint not supported (404), falling back to sequential import');
+            } else {
+                // Ambiguous network/server error: do NOT attempt duplicate sequential writes!
+                console.error('[executeImportTimeEntries] Batch import network/server error:', err);
+                return {
+                    result: {
+                        succeeded: 0,
+                        failed: preparedEntries.length,
+                        succeededIds: [],
+                        failedIds: preparedEntries.map(e => e.id),
+                        errors: [err.message || 'Błąd sieciowy podczas importu wsadowego']
+                    },
+                    savedEntries: []
+                };
+            }
         }
     }
 
@@ -73,6 +98,8 @@ export async function executeImportTimeEntries(
         result: {
             succeeded: savedEntries.length,
             failed: errors.length,
+            succeededIds: savedEntries.map(e => e.id),
+            failedIds: [],
             errors
         },
         savedEntries

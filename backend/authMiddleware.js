@@ -38,7 +38,7 @@ function createVerifyToken(getDb) {
     return async function verifyTokenWithDBCheck(req, res, next) {
         // Test mode bypass — keeps unit tests fast
         if (process.env.NODE_ENV === 'test') {
-            req.user = { id: 'admin-id', email: 'admin@test.com', role: 'admin' };
+            req.user = { id: 'test-user', email: 'test@test.com', role: req.headers['x-test-role'] || 'admin' };
             return next();
         }
 
