@@ -22,12 +22,21 @@ test('Backend Atomic Duplicate Prevention & Batch Import', async (t) => {
             return { insertedId: 'mongo-' + doc.id };
         },
         findOne: async (query) => {
+            if (query && query.id) return store.get(query.id) || null;
             if (query && query.$or) {
                 for (const condition of query.$or) {
                     if (condition.id && store.has(condition.id)) return store.get(condition.id);
                 }
             }
             return null;
+        },
+        updateOne: async (filter, update) => {
+            const id = filter.id;
+            const doc = store.get(id);
+            if (!doc) return { matchedCount: 0, modifiedCount: 0 };
+            const updated = { ...doc, ...update.$set };
+            store.set(id, updated);
+            return { matchedCount: 1, modifiedCount: 1 };
         },
         bulkWrite: async (ops) => {
             let upsertedCount = 0;
@@ -102,6 +111,24 @@ test('Backend Atomic Duplicate Prevention & Batch Import', async (t) => {
         assert.deepStrictEqual(statuses, [201, 409]);
     });
 
+    await t.test('PATCH /api/time-entries/:id accepts partial update without demanding employeeId/jobId', async () => {
+        store.set('te-patch-1', {
+            id: 'te-patch-1',
+            employeeId: 'emp-1',
+            jobId: 'job-1',
+            status: 'submitted',
+            hours: 6
+        });
+
+        const res = await request(app)
+            .patch('/api/time-entries/te-patch-1')
+            .send({ status: 'approved' });
+
+        assert.strictEqual(res.status, 200);
+        const updated = store.get('te-patch-1');
+        assert.strictEqual(updated.status, 'approved');
+    });
+
     await t.test('POST /api/clients/batch-import atomically upserts, preserves createdAt, returns succeededIds', async () => {
         const originalCreatedAt = '2026-01-01T00:00:00.000Z';
         store.set('existing-c', { id: 'existing-c', name: 'Old Name', createdAt: originalCreatedAt });
@@ -132,12 +159,57 @@ test('Backend Atomic Duplicate Prevention & Batch Import', async (t) => {
         assert.ok(newDoc.createdAt);
     });
 
-    await t.test('POST /api/time-entries/batch-import validates date, calculates cost from employee DB rate', async () => {
-        // Use today's UTC date so it passes future and backdate guards
+    await t.test('POST /api/time-entries/batch-import validates date, calculates cost for hourly billing', async () => {
         const todayStr = new Date().toISOString().slice(0, 10);
         const payload = {
             items: [
-                { id: 'te-1', employeeId: 'emp-101', jobId: 'job-202', hours: 4, date: todayStr }
+                { id: 'te-hourly', employeeId: 'emp-101', jobId: 'job-202', hours: 4, date: todayStr, billingType: 'hourly' }
+            ]
+        };
+
+        const res = await request(app)
+            .post('/api/time-entries/batch-import')
+            .send(payload);
+
+        assert.strictEqual(res.status, 200);
+        assert.strictEqual(res.body.succeeded, 1);
+        assert.deepStrictEqual(res.body.succeededIds, ['te-hourly']);
+
+        const stored = store.get('te-hourly');
+        assert.strictEqual(stored.cost, 200);
+        assert.strictEqual(stored.hourlyRate, 50);
+    });
+
+    await t.test('POST /api/time-entries/batch-import preserves cost for non-hourly (fixed, m2)', async () => {
+        const todayStr = new Date().toISOString().slice(0, 10);
+        const payload = {
+            items: [
+                { id: 'te-fixed', employeeId: 'emp-101', jobId: 'job-1', hours: 8, date: todayStr, billingType: 'fixed', cost: 1500 },
+                { id: 'te-m2', employeeId: 'emp-101', jobId: 'job-1', hours: 8, date: todayStr, billingType: 'm2', quantity: 20, rate: 30 }
+            ]
+        };
+
+        const res = await request(app)
+            .post('/api/time-entries/batch-import')
+            .send(payload);
+
+        assert.strictEqual(res.status, 200);
+        assert.strictEqual(res.body.succeeded, 2);
+
+        // Fixed cost was NOT overwritten by hours * rate (8 * 50 = 400)
+        const storedFixed = store.get('te-fixed');
+        assert.strictEqual(storedFixed.cost, 1500);
+
+        // m2 cost was computed from quantity * rate (20 * 30 = 600)
+        const storedM2 = store.get('te-m2');
+        assert.strictEqual(storedM2.cost, 600);
+    });
+
+    await t.test('POST /api/time-entries/batch-import rejects worker importing for other employees with 403', async () => {
+        const todayStr = new Date().toISOString().slice(0, 10);
+        const payload = {
+            items: [
+                { id: 'te-other', employeeId: 'other-emp-99', jobId: 'job-1', hours: 4, date: todayStr }
             ]
         };
 
@@ -146,14 +218,23 @@ test('Backend Atomic Duplicate Prevention & Batch Import', async (t) => {
             .set('x-test-role', 'worker')
             .send(payload);
 
-        assert.strictEqual(res.status, 200);
-        assert.strictEqual(res.body.succeeded, 1);
-        assert.deepStrictEqual(res.body.succeededIds, ['te-1']);
+        assert.strictEqual(res.status, 403);
+        assert.match(res.body.error, /Brak uprawnień/);
+    });
 
-        // Check that item in store had its cost computed from DB rate (4h * 50 = 200)
-        const stored = store.get('te-1');
-        assert.strictEqual(stored.cost, 200);
-        assert.strictEqual(stored.hourlyRate, 50);
+    await t.test('POST /api/time-entries/batch-import rejects invalid date string with 400', async () => {
+        const payload = {
+            items: [
+                { id: 'te-inv-date', employeeId: 'emp-101', jobId: 'job-1', hours: 4, date: 'not-a-valid-date' }
+            ]
+        };
+
+        const res = await request(app)
+            .post('/api/time-entries/batch-import')
+            .send(payload);
+
+        assert.strictEqual(res.status, 400);
+        assert.match(res.body.error, /Nieprawidłowy format daty/);
     });
 
     await t.test('POST /api/time-entries/batch-import rejects future dates with 400', async () => {
@@ -176,7 +257,7 @@ test('Backend Atomic Duplicate Prevention & Batch Import', async (t) => {
         const oldDate = '2020-01-01';
         const payload = {
             items: [
-                { id: 'te-old', employeeId: 'emp-101', jobId: 'job-1', hours: 8, date: oldDate }
+                { id: 'te-old', employeeId: 'test-user', jobId: 'job-1', hours: 8, date: oldDate }
             ]
         };
 
@@ -189,6 +270,67 @@ test('Backend Atomic Duplicate Prevention & Batch Import', async (t) => {
         assert.match(res.body.error, /zbyt stara/);
     });
 
+    await t.test('POST /api/time-entries/batch-import resets worker self-approved status to submitted', async () => {
+        const todayStr = new Date().toISOString().slice(0, 10);
+        const payload = {
+            items: [
+                { id: 'te-worker-self', employeeId: 'test-user', jobId: 'job-1', hours: 6, date: todayStr, status: 'approved' }
+            ]
+        };
+
+        const res = await request(app)
+            .post('/api/time-entries/batch-import')
+            .set('x-test-role', 'worker')
+            .send(payload);
+
+        assert.strictEqual(res.status, 200);
+        const stored = store.get('te-worker-self');
+        assert.strictEqual(stored.status, 'submitted');
+    });
+
+    await t.test('PATCH /api/time-entries/:id accepts partial payload (status and cost) without employeeId/jobId', async () => {
+        const todayStr = new Date().toISOString().slice(0, 10);
+        store.set('te-patch-1', {
+            id: 'te-patch-1',
+            employeeId: 'emp-101',
+            jobId: 'job-1',
+            hours: 4,
+            date: todayStr,
+            status: 'submitted',
+            cost: 200,
+            updatedAt: '2026-09-01T10:00:00Z'
+        });
+
+        const patchPayload = {
+            status: 'approved',
+            cost: 250
+        };
+
+        const res = await request(app)
+            .patch('/api/time-entries/te-patch-1')
+            .send(patchPayload);
+
+        assert.strictEqual(res.status, 200);
+        const updated = store.get('te-patch-1');
+        assert.strictEqual(updated.status, 'approved');
+        assert.strictEqual(updated.cost, 250);
+        assert.strictEqual(updated.employeeId, 'emp-101');
+        assert.strictEqual(updated.jobId, 'job-1');
+    });
+
+    await t.test('PATCH /api/time-entries/:id rejects invalid date format with 400', async () => {
+        const patchPayload = {
+            date: 'not-a-valid-date'
+        };
+
+        const res = await request(app)
+            .patch('/api/time-entries/te-patch-1')
+            .send(patchPayload);
+
+        assert.strictEqual(res.status, 400);
+        assert.match(res.body.error, /Nieprawidłowy format daty/);
+    });
+
     await t.test('POST /api/extra-works/batch-import is rejected with 405 without triggering fake notifications', async () => {
         const notifCountBefore = notifications.length;
 
@@ -199,7 +341,6 @@ test('Backend Atomic Duplicate Prevention & Batch Import', async (t) => {
         assert.strictEqual(res.status, 405);
         assert.match(res.body.error, /Import wsadowy nie jest dozwolony dla kolekcji 'extra-works'/);
 
-        // Verify NO fake notification was created on 405 response!
         assert.strictEqual(notifications.length, notifCountBefore);
     });
 
@@ -207,7 +348,6 @@ test('Backend Atomic Duplicate Prevention & Batch Import', async (t) => {
         const partialError = new Error('BulkWrite partial error');
         partialError.name = 'MongoBulkWriteError';
         partialError.result = { nUpserted: 1, nModified: 0, nMatched: 0 };
-        // writeErrors indicates index 1 failed
         partialError.writeErrors = [{ index: 1, errmsg: 'Duplicate key error on item-2' }];
 
         mockCollection.bulkWrite = async () => { throw partialError; };
@@ -235,21 +375,42 @@ test('Backend Atomic Duplicate Prevention & Batch Import', async (t) => {
         assert.strictEqual(res.status, 503);
         assert.match(res.body.error, /Database not ready/);
 
-        // Restore ready state
         setDb(mockDb, true);
     });
 });
 
 test('Database Indexing & Migration: Reconciling Duplicates & Verification', async (t) => {
-    await t.test('reconcileDuplicatesAndEnsureIndexes snapshots to quarantine, merges non-empty fields, then deletes', async () => {
+    await t.test('reconcileDuplicatesAndEnsureIndexes snapshots to quarantine, merges fields, reports complex conflicts', async () => {
         const docs = [
-            { _id: 'doc-old', id: 'dup-id-1', name: 'Old Name', notes: 'Preserved Note', updatedAt: '2026-01-01T00:00:00Z' },
-            { _id: 'doc-new', id: 'dup-id-1', name: 'Newest Name', notes: null, updatedAt: '2026-09-01T00:00:00Z' },
-            { _id: 'doc-mid', id: 'dup-id-1', name: 'Mid Name', extraTag: 'TagX', updatedAt: '2026-05-01T00:00:00Z' }
+            {
+                _id: 'doc-old',
+                id: 'dup-id-1',
+                name: 'Old Name',
+                notes: 'Preserved Note',
+                stages: [{ id: 's1', name: 'Stage 1' }],
+                updatedAt: '2026-01-01T00:00:00Z'
+            },
+            {
+                _id: 'doc-new',
+                id: 'dup-id-1',
+                name: 'Newest Name',
+                notes: null,
+                stages: [{ id: 's2', name: 'Stage 2 Different' }],
+                updatedAt: '2026-09-01T00:00:00Z'
+            },
+            {
+                _id: 'doc-mid',
+                id: 'dup-id-1',
+                name: 'Mid Name',
+                extraTag: 'TagX',
+                stages: [],
+                updatedAt: '2026-05-01T00:00:00Z'
+            }
         ];
 
         const deletedIds = [];
         const quarantinedDocs = [];
+        const migrationLogs = [];
         let updatedFields = null;
         let indexCreated = false;
 
@@ -295,7 +456,10 @@ test('Database Indexing & Migration: Reconciling Duplicates & Verification', asy
                 }
                 if (colName === '_migration_logs') {
                     return {
-                        insertOne: async () => ({ insertedId: 'log-1' })
+                        insertOne: async (log) => {
+                            migrationLogs.push(log);
+                            return { insertedId: 'log-' + migrationLogs.length };
+                        }
                     };
                 }
                 if (colName === 'clients') return fakeCollection;
@@ -313,12 +477,17 @@ test('Database Indexing & Migration: Reconciling Duplicates & Verification', asy
         assert.strictEqual(quarantinedDocs.length, 2);
         assert.strictEqual(quarantinedDocs[0].documentId, 'dup-id-1');
 
-        // 2. Verify non-destructive field merge: doc-old had notes, doc-mid had extraTag
+        // 2. Verify non-destructive field merge
         assert.ok(updatedFields);
         assert.strictEqual(updatedFields.notes, 'Preserved Note');
         assert.strictEqual(updatedFields.extraTag, 'TagX');
 
-        // 3. Verify that doc-old and doc-mid were deleted, keeping doc-new
+        // 3. Verify complex conflict detection in _migration_logs
+        assert.strictEqual(migrationLogs.length, 1);
+        assert.strictEqual(migrationLogs[0].hasConflicts, true);
+        assert.ok(migrationLogs[0].conflictingFields.includes('stages'));
+
+        // 4. Verify that doc-old and doc-mid were deleted, keeping doc-new
         assert.strictEqual(deletedIds.length, 2);
         assert.ok(deletedIds.includes('doc-old'));
         assert.ok(deletedIds.includes('doc-mid'));

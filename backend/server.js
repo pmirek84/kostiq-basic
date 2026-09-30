@@ -211,20 +211,39 @@ async function reconcileDuplicatesAndEnsureIndexes(database) {
                             await quarantineCol.insertMany(quarantineEntries);
                         }
 
-                        // 2. Non-destructive field merge: preserve values from duplicates if primary doc lacks them
+                        // 2. Non-destructive field merge + conflict detection
                         const mergedFields = [];
+                        const conflictingFields = [];
                         const updates = {};
+
                         for (const dup of duplicateDocs) {
                             for (const [key, val] of Object.entries(dup)) {
-                                if (key === '_id' || key === 'id') continue;
+                                if (key === '_id' || key === 'id' || key === 'updatedAt' || key === 'createdAt') continue;
                                 if (val !== undefined && val !== null && val !== '') {
                                     if (primaryDoc[key] === undefined || primaryDoc[key] === null || primaryDoc[key] === '') {
                                         primaryDoc[key] = val;
                                         updates[key] = val;
                                         mergedFields.push(key);
+                                    } else if (Array.isArray(val) && val.length > 0) {
+                                        if (Array.isArray(primaryDoc[key]) && primaryDoc[key].length > 0) {
+                                            if (JSON.stringify(val) !== JSON.stringify(primaryDoc[key])) {
+                                                conflictingFields.push(key);
+                                            }
+                                        }
+                                    } else if (typeof val === 'object' && Object.keys(val).length > 0) {
+                                        if (typeof primaryDoc[key] === 'object' && Object.keys(primaryDoc[key]).length > 0) {
+                                            if (JSON.stringify(val) !== JSON.stringify(primaryDoc[key])) {
+                                                conflictingFields.push(key);
+                                            }
+                                        }
                                     }
                                 }
                             }
+                        }
+
+                        const uniqueConflicts = Array.from(new Set(conflictingFields));
+                        if (uniqueConflicts.length > 0) {
+                            console.warn(`[MIGRATION CONFLICT] Collection '${col}' doc '${group._id}' has conflicting complex field(s): [${uniqueConflicts.join(', ')}]. Preserved newest version in active DB and archived full version in _migration_quarantine.`);
                         }
 
                         if (Object.keys(updates).length > 0 && typeof collection.updateOne === 'function') {
@@ -240,15 +259,18 @@ async function reconcileDuplicatesAndEnsureIndexes(database) {
                                 reconciledAt: new Date().toISOString(),
                                 survivingDocId: primaryDoc._id,
                                 quarantinedDocIds: duplicateDocs.map(d => d._id),
-                                mergedFields
+                                mergedFields,
+                                hasConflicts: uniqueConflicts.length > 0,
+                                conflictingFields: uniqueConflicts
                             });
                         }
 
-                        // 4. Safely delete the redundant duplicate records
+                        // 4. Remove duplicate documents from primary collection
                         const redundantIds = duplicateDocs.map(d => d._id);
-                        if (redundantIds.length > 0 && typeof collection.deleteMany === 'function') {
+                        if (typeof collection.deleteMany === 'function' && redundantIds.length > 0) {
                             await collection.deleteMany({ _id: { $in: redundantIds } });
                         }
+
                         console.warn(`[INDEX MIGRATION] Kept latest record for id '${group._id}', quarantined & removed ${redundantIds.length} stale duplicate(s) from '${col}'.`);
                     }
                 }
@@ -1183,18 +1205,22 @@ const toCents = (val) => Math.round((Number(val) || 0) * 100);
 const toCurrency = (cents) => Math.round(cents) / 100;
 
 // Shared validation & normalization for time entries (used by single POST/PATCH and batch-import)
-async function validateAndNormalizeTimeEntryDoc(doc, { db, user, isBatch = false }) {
+async function validateAndNormalizeTimeEntryDoc(doc, { db, user, isBatch = false, isPatch = false }) {
     if (!doc || typeof doc !== 'object') {
         return { error: 'Nieprawidłowy obiekt wpisu czasu.' };
     }
     const effectiveEmpId = doc.employeeId || doc.employee_id;
     const effectiveJobId = doc.jobId || doc.project_id;
 
-    if (!effectiveEmpId) {
-        return { error: 'Pole employeeId jest wymagane.' };
-    }
-    if (!effectiveJobId) {
-        return { error: 'Pole jobId jest wymagane.' };
+    // In POST or Batch-Import, employeeId and jobId are mandatory.
+    // In PATCH (e.g. status approval/rejection or notes update), they are optional if not being modified.
+    if (!isPatch) {
+        if (!effectiveEmpId) {
+            return { error: 'Pole employeeId jest wymagane.' };
+        }
+        if (!effectiveJobId) {
+            return { error: 'Pole jobId jest wymagane.' };
+        }
     }
 
     if (doc.hours !== undefined) {
@@ -1207,7 +1233,7 @@ async function validateAndNormalizeTimeEntryDoc(doc, { db, user, isBatch = false
         }
     }
 
-    // Shield #3 + FIX #2: UTC date normalization + Time Travel guard
+    // Shield #3 + FIX #2: UTC date normalization + Time Travel guard + Invalid Date check
     if (doc.date) {
         let entryDate;
         const rawDate = String(doc.date);
@@ -1220,29 +1246,31 @@ async function validateAndNormalizeTimeEntryDoc(doc, { db, user, isBatch = false
             entryDate = new Date(rawDate);
         }
 
-        if (!isNaN(entryDate.getTime())) {
-            const nowUTC = new Date();
-            const todayUTC = new Date(Date.UTC(nowUTC.getUTCFullYear(), nowUTC.getUTCMonth(), nowUTC.getUTCDate()));
+        if (isNaN(entryDate.getTime())) {
+            return { error: `Nieprawidłowy format daty: '${rawDate}'. Oczekiwano poprawnej daty.` };
+        }
 
-            // Reject future dates (beyond today)
-            if (entryDate > todayUTC) {
-                return {
-                    error: `Nie można zgłosić czasu z datą przyszłą (${rawDate}). Dozwolona data to dzisiaj lub wcześniej.`
-                };
-            }
+        const nowUTC = new Date();
+        const todayUTC = new Date(Date.UTC(nowUTC.getUTCFullYear(), nowUTC.getUTCMonth(), nowUTC.getUTCDate()));
 
-            // Reject dates older than MAX_BACKDATE_DAYS (default 7) unless admin/manager
-            const MAX_BACKDATE_DAYS = 7;
-            const oldestAllowed = new Date(todayUTC);
-            oldestAllowed.setUTCDate(oldestAllowed.getUTCDate() - MAX_BACKDATE_DAYS);
+        // Reject future dates (beyond today)
+        if (entryDate > todayUTC) {
+            return {
+                error: `Nie można zgłosić czasu z datą przyszłą (${rawDate}). Dozwolona data to dzisiaj lub wcześniej.`
+            };
+        }
 
-            const isAdminOverride = user && (user.role === 'admin' || user.role === 'manager');
+        // Reject dates older than MAX_BACKDATE_DAYS (default 7) unless admin/manager
+        const MAX_BACKDATE_DAYS = 7;
+        const oldestAllowed = new Date(todayUTC);
+        oldestAllowed.setUTCDate(oldestAllowed.getUTCDate() - MAX_BACKDATE_DAYS);
 
-            if (entryDate < oldestAllowed && !isAdminOverride) {
-                return {
-                    error: `Data wpisu jest zbyt stara (${rawDate}). Pracownicy mogą wpisywać czas maksymalnie ${MAX_BACKDATE_DAYS} dni wstecz. Skontaktuj się z przełożonym.`
-                };
-            }
+        const isAdminOverride = user && (user.role === 'admin' || user.role === 'manager');
+
+        if (entryDate < oldestAllowed && !isAdminOverride) {
+            return {
+                error: `Data wpisu jest zbyt stara (${rawDate}). Pracownicy mogą wpisywać czas maksymalnie ${MAX_BACKDATE_DAYS} dni wstecz. Skontaktuj się z przełożonym.`
+            };
         }
     }
 
@@ -1264,24 +1292,37 @@ async function validateAndNormalizeTimeEntryDoc(doc, { db, user, isBatch = false
         }
     }
 
-    // Server-side cost recalculation from employee current rate in DB
-    if (db && effectiveEmpId && typeof db.collection === 'function') {
-        const hours = Number(doc.hours) || 0;
-        if (hours > 0) {
-            try {
-                const emp = await db.collection('employees').findOne(
-                    { $or: [{ id: effectiveEmpId }, { _id: effectiveEmpId }] },
-                    { projection: { hourlyRate: 1, defaultHourlyRate: 1 } }
-                );
-                if (emp) {
-                    const freshRate = emp.hourlyRate || emp.defaultHourlyRate || 0;
-                    const freshCostCents = toCents(hours) * toCents(freshRate) / 100;
-                    doc.cost = toCurrency(freshCostCents);
-                    doc.hourlyRate = freshRate;
+    // Server-side cost calculation:
+    // ONLY for billingType === 'hourly' (or default hourly when hours are specified).
+    // For fixed, m2, mb, piecework: preserve explicit cost or calculate quantity * rate.
+    const billingType = doc.billingType || 'hourly';
+    if (billingType === 'hourly') {
+        if (db && effectiveEmpId && typeof db.collection === 'function') {
+            const hours = Number(doc.hours) || 0;
+            if (hours > 0) {
+                try {
+                    const emp = await db.collection('employees').findOne(
+                        { $or: [{ id: effectiveEmpId }, { _id: effectiveEmpId }] },
+                        { projection: { hourlyRate: 1, defaultHourlyRate: 1 } }
+                    );
+                    if (emp) {
+                        const freshRate = emp.hourlyRate || emp.defaultHourlyRate || 0;
+                        const freshCostCents = toCents(hours) * toCents(freshRate) / 100;
+                        doc.cost = toCurrency(freshCostCents);
+                        doc.hourlyRate = freshRate;
+                    }
+                } catch (e) {
+                    console.error('[COST-RECALC] DB lookup failed:', e.message);
                 }
-            } catch (e) {
-                console.error('[COST-RECALC] DB lookup failed:', e.message);
             }
+        }
+    } else {
+        // Non-hourly billing (fixed, m2, mb, piecework)
+        // If cost is not explicitly provided, calculate quantity * rate if available
+        if (doc.cost === undefined && doc.quantity !== undefined && (doc.rate !== undefined || doc.unitPrice !== undefined)) {
+            const qty = Number(doc.quantity) || 0;
+            const unitRate = Number(doc.rate !== undefined ? doc.rate : doc.unitPrice) || 0;
+            doc.cost = toCurrency(toCents(qty) * toCents(unitRate) / 100);
         }
     }
 
@@ -1298,11 +1339,34 @@ async function validateTimeEntryBatch(req, res, next) {
         return res.status(400).json({ error: 'Maksymalny rozmiar paczki importu to 1000 rekordów.' });
     }
 
+    const isWorker = req.user && (req.user.role === 'worker' || req.user.role === 'foreman');
+    const userEmpId = req.user?.id || req.user?._id;
+
     for (let i = 0; i < items.length; i++) {
-        const valError = await validateAndNormalizeTimeEntryDoc(items[i], {
+        const item = items[i];
+        if (!item || typeof item !== 'object') {
+            return res.status(400).json({ error: `Pozycja #${i + 1} nie jest prawidłowym obiektem.` });
+        }
+
+        const effectiveEmpId = item.employeeId || item.employee_id;
+
+        // Security check: workers may ONLY import entries for their own ID and cannot self-approve
+        if (isWorker) {
+            if (effectiveEmpId && String(effectiveEmpId) !== String(userEmpId)) {
+                return res.status(403).json({
+                    error: `Brak uprawnień: Pracownik może importować wpisy wyłącznie dla własnego identyfikatora (${userEmpId}). Wykryto: ${effectiveEmpId}.`
+                });
+            }
+            if (item.status === 'approved' || item.status === 'settled') {
+                item.status = 'submitted';
+            }
+        }
+
+        const valError = await validateAndNormalizeTimeEntryDoc(item, {
             db,
             user: req.user,
-            isBatch: true
+            isBatch: true,
+            isPatch: false
         });
         if (valError) {
             return res.status(valError.status || 400).json({
@@ -1324,7 +1388,8 @@ async function validateTimeEntry(req, res, next) {
     const valError = await validateAndNormalizeTimeEntryDoc(req.body, {
         db,
         user: req.user,
-        isBatch: false
+        isBatch: false,
+        isPatch: req.method === 'PATCH'
     });
     if (valError) {
         return res.status(valError.status || 400).json({ error: valError.error });
