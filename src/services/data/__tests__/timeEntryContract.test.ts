@@ -14,7 +14,8 @@ import {
     WORKER_ALLOWED_TIME_ENTRY_STATUSES as CONTRACT_WORKER_STATUSES,
     FOREMAN_ALLOWED_TIME_ENTRY_STATUSES as CONTRACT_FOREMAN_STATUSES,
     BILLING_TYPES as CONTRACT_BILLING_TYPES,
-    TIME_ENTRY_TYPES as CONTRACT_TIME_ENTRY_TYPES
+    TIME_ENTRY_TYPES as CONTRACT_TIME_ENTRY_TYPES,
+    TIME_ENTRY_SCHEMA
 } from '../../../../shared/contracts';
 
 describe('Shared Contracts: TimeEntry Frontend Type and Status Conformity', () => {
@@ -40,11 +41,25 @@ describe('Shared Contracts: TimeEntry Frontend Type and Status Conformity', () =
         expect(MODEL_FOREMAN_STATUSES).toEqual(['draft', 'pending', 'submitted', 'foreman_approved', 'foreman_rejected']);
 
         expect(MODEL_BILLING_TYPES).toEqual(CONTRACT_BILLING_TYPES);
+        expect(MODEL_BILLING_TYPES).toEqual(['hourly', 'daily', 'project', 'fixed', 'm2', 'mb']);
+
         expect(MODEL_TIME_ENTRY_TYPES).toEqual(CONTRACT_TIME_ENTRY_TYPES);
+        expect(MODEL_TIME_ENTRY_TYPES).toEqual(['drive', 'work', 'other', 'employee', 'subcontractor']);
     });
 
-    it('typechecks a compliant TimeEntry object with valid domain status and billingType', () => {
-        const entry: TimeEntry = {
+    it('validates schema definition integrity directly from timeEntry.schema.json without drift', () => {
+        // Assert runtime schema matches exported contract arrays directly
+        expect(TIME_ENTRY_SCHEMA.definitions.TimeEntryStatus.enum).toEqual([...MODEL_STATUSES]);
+        expect(TIME_ENTRY_SCHEMA.definitions.BillingType.enum).toEqual([...MODEL_BILLING_TYPES]);
+        expect(TIME_ENTRY_SCHEMA.definitions.TimeEntryType.enum).toEqual([...MODEL_TIME_ENTRY_TYPES]);
+
+        // Batch import schema requires items array
+        expect(TIME_ENTRY_SCHEMA.definitions.TimeEntryBatchImportPayload.required).toContain('items');
+        expect(TIME_ENTRY_SCHEMA.definitions.TimeEntryBatchImportPayload.properties).toHaveProperty('items');
+    });
+
+    it('typechecks a compliant TimeEntry object with valid domain status and billingType (including daily and project)', () => {
+        const hourlyEntry: TimeEntry = {
             id: 'test-te-1',
             employeeId: 'emp-1',
             employeeName: 'Jan Kowalski',
@@ -64,8 +79,26 @@ describe('Shared Contracts: TimeEntry Frontend Type and Status Conformity', () =
             updatedAt: '2026-09-30T10:00:00Z'
         };
 
-        expect(entry.status).toBe('submitted');
-        expect(MODEL_STATUSES.includes(entry.status)).toBe(true);
+        expect(hourlyEntry.status).toBe('submitted');
+        expect(MODEL_STATUSES.includes(hourlyEntry.status)).toBe(true);
+
+        const dailyEntry: TimeEntry = {
+            ...hourlyEntry,
+            id: 'test-te-daily',
+            billingType: 'daily',
+            hours: 1, // 1 day
+            cost: 450
+        };
+        expect(dailyEntry.billingType).toBe('daily');
+
+        const projectEntry: TimeEntry = {
+            ...hourlyEntry,
+            id: 'test-te-project',
+            billingType: 'project',
+            hours: 0,
+            cost: 2500
+        };
+        expect(projectEntry.billingType).toBe('project');
 
         const allNineStatuses: TimeEntryStatus[] = [
             'draft',

@@ -40,6 +40,8 @@
       "type": "string",
       "enum": [
         "hourly",
+        "daily",
+        "project",
         "fixed",
         "m2",
         "mb"
@@ -413,10 +415,10 @@
     "TimeEntryBatchImportPayload": {
       "type": "object",
       "required": [
-        "entries"
+        "items"
       ],
       "properties": {
-        "entries": {
+        "items": {
           "type": "array",
           "items": {
             "$ref": "#/definitions/TimeEntryPostPayload"
@@ -441,7 +443,7 @@
           "enum": [
             "success",
             "partial_success",
-            "error"
+            "failed"
           ]
         },
         "succeeded": {

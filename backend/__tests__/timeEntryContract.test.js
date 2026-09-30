@@ -113,7 +113,7 @@ test('Shared Contracts: TimeEntry JSON Schema, Statuses and Payload Conformity',
         assert.deepStrictEqual(VALID_TIME_ENTRY_STATUSES, schemaStatuses);
         assert.deepStrictEqual(WORKER_ALLOWED_TIME_ENTRY_STATUSES, ['draft', 'pending', 'submitted']);
         assert.deepStrictEqual(FOREMAN_ALLOWED_TIME_ENTRY_STATUSES, ['draft', 'pending', 'submitted', 'foreman_approved', 'foreman_rejected']);
-        assert.deepStrictEqual(BILLING_TYPES, ['hourly', 'fixed', 'm2', 'mb']);
+        assert.deepStrictEqual(BILLING_TYPES, ['hourly', 'daily', 'project', 'fixed', 'm2', 'mb']);
         assert.deepStrictEqual(TIME_ENTRY_TYPES, ['drive', 'work', 'other', 'employee', 'subcontractor']);
     });
 
@@ -249,6 +249,85 @@ test('Shared Contracts: TimeEntry JSON Schema, Statuses and Payload Conformity',
         const patched = store.get('entry-for-patch');
         assert.strictEqual(patched.hours, 6);
         assert.strictEqual(patched.description, 'Updated description');
+    });
+
+
+    await t.test('fail-closed Ajv validation: rejects invalid billingType, invalid type, and string hours', async () => {
+        // Valid daily billingType (now officially supported)
+        const resDaily = await request(app)
+            .post('/api/time-entries')
+            .set('Authorization', `Bearer ${adminToken}`)
+            .send({
+                id: 'entry-valid-daily',
+                employeeId: 'admin-1',
+                jobId: 'job-1',
+                billingType: 'daily',
+                hours: 1, // 1 day
+                cost: 400
+            });
+        assert.strictEqual(resDaily.status, 201, 'Valid billingType daily should be accepted with 201');
+
+        // Invalid billingType: nonsense
+        const resBadBilling = await request(app)
+            .post('/api/time-entries')
+            .set('Authorization', `Bearer ${adminToken}`)
+            .send({
+                id: 'entry-bad-billing',
+                employeeId: 'admin-1',
+                jobId: 'job-1',
+                billingType: 'nonsense',
+                hours: 8
+            });
+        assert.strictEqual(resBadBilling.status, 400, 'Invalid billingType MUST be rejected with 400');
+        assert.match(resBadBilling.body.error, /Nieprawidłowy typ rozliczenia/);
+
+        // Invalid type: nonsense
+        const resBadType = await request(app)
+            .post('/api/time-entries')
+            .set('Authorization', `Bearer ${adminToken}`)
+            .send({
+                id: 'entry-bad-type',
+                employeeId: 'admin-1',
+                jobId: 'job-1',
+                type: 'nonsense',
+                hours: 8
+            });
+        assert.strictEqual(resBadType.status, 400, 'Invalid type MUST be rejected with 400');
+        assert.match(resBadType.body.error, /Nieprawidłowy typ wpisu/);
+
+        // String hours: "8" instead of number
+        const resStringHours = await request(app)
+            .post('/api/time-entries')
+            .set('Authorization', `Bearer ${adminToken}`)
+            .send({
+                id: 'entry-string-hours',
+                employeeId: 'admin-1',
+                jobId: 'job-1',
+                hours: "8"
+            });
+        assert.strictEqual(resStringHours.status, 400, 'String hours MUST be rejected with 400');
+        assert.match(resStringHours.body.error, /hours/);
+    });
+
+    await t.test('batch import validation: requires items array and validates batch schema', async () => {
+        // Missing items array (e.g. legacy entries: [...])
+        const resMissingItems = await request(app)
+            .post('/api/time-entries/batch-import')
+            .set('Authorization', `Bearer ${adminToken}`)
+            .send({ entries: [{ employeeId: 'admin-1', jobId: 'job-1' }] });
+        assert.strictEqual(resMissingItems.status, 400, 'Batch import without items array must return 400');
+        assert.match(resMissingItems.body.error, /items/);
+
+        // Batch with invalid item (negative hours)
+        const resInvalidBatchItem = await request(app)
+            .post('/api/time-entries/batch-import')
+            .set('Authorization', `Bearer ${adminToken}`)
+            .send({
+                items: [
+                    { id: 'b-bad-1', employeeId: 'admin-1', jobId: 'job-1', hours: -5 }
+                ]
+            });
+        assert.strictEqual(resInvalidBatchItem.status, 400, 'Batch with schema-invalid items must return 400');
     });
 
     await t.test('batch import payload: imports multiple valid entries and computes costs', async () => {

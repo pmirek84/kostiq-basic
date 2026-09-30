@@ -138,7 +138,6 @@ export const TimeRegistrationView = () => {
                 description: newEntry.description,
             };
 
-            // @ts-ignore
             addTimeEntry(entryPayload);
             setIsSubmitting(false);
             setIsAddModalOpen(false);

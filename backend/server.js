@@ -1815,7 +1815,7 @@ async function validateAndNormalizeTimeEntryDoc(doc, { db, user, isBatch = false
         return { error: 'Nieprawidłowy obiekt wpisu czasu.' };
     }
 
-    // JSON Schema validation via Ajv from shared/contracts
+    // JSON Schema validation via Ajv from shared/contracts (FAIL-CLOSED)
     const schemaValidator = isPatch ? validateTimeEntryPatchSchema : validateTimeEntryPostSchema;
     const isValidSchema = schemaValidator(doc);
     if (!isValidSchema) {
@@ -1830,11 +1830,20 @@ async function validateAndNormalizeTimeEntryDoc(doc, { db, user, isBatch = false
             if (firstErr.instancePath.includes('hours')) {
                 if (firstErr.keyword === 'minimum') return { error: 'Godziny nie mogą być ujemne.' };
                 if (firstErr.keyword === 'maximum') return { error: 'Godziny nie mogą przekraczać 24h na jeden wpis.' };
+                if (firstErr.keyword === 'type') return { error: 'Pole hours musi być liczbą.' };
             }
             if (firstErr.instancePath.includes('status')) {
                 return { error: `Nieprawidłowy status wpisu czasu: '${doc.status}'. Dozwolone: ${VALID_TIME_ENTRY_STATUSES.join(', ')}.` };
             }
+            if (firstErr.instancePath.includes('billingType')) {
+                return { error: `Nieprawidłowy typ rozliczenia (billingType): '${doc.billingType}'. Dozwolone: ${BILLING_TYPES.join(', ')}.` };
+            }
+            if (firstErr.instancePath.includes('type')) {
+                return { error: `Nieprawidłowy typ wpisu (type): '${doc.type}'. Dozwolone: ${TIME_ENTRY_TYPES.join(', ')}.` };
+            }
         }
+        const errorDetails = ajv.errorsText(schemaValidator.errors, { dataVar: 'payload', separator: '; ' });
+        return { error: `Błąd walidacji schematu JSON: ${errorDetails}.` };
     }
     const effectiveEmpId = doc.employeeId || doc.employee_id;
     const effectiveJobId = doc.jobId || doc.project_id;
@@ -1983,6 +1992,18 @@ async function validateAndNormalizeTimeEntryDoc(doc, { db, user, isBatch = false
 
 async function validateTimeEntryBatch(req, res, next) {
     if (req.method !== 'POST') return next();
+
+    // Validate entire batch payload against JSON Schema
+    const isBatchValid = validateTimeEntryBatchSchema(req.body);
+    if (!isBatchValid) {
+        const firstErr = validateTimeEntryBatchSchema.errors?.[0];
+        if (firstErr && (firstErr.keyword === 'required' || firstErr.params?.missingProperty === 'items')) {
+            return res.status(400).json({ error: 'Brak tablicy items do zaimportowania.' });
+        }
+        const errorDetails = ajv.errorsText(validateTimeEntryBatchSchema.errors, { dataVar: 'batchPayload', separator: '; ' });
+        return res.status(400).json({ error: `Błąd walidacji schematu paczki importu: ${errorDetails}.` });
+    }
+
     const { items } = req.body;
     if (!Array.isArray(items) || items.length === 0) {
         return res.status(400).json({ error: 'Brak tablicy items do zaimportowania.' });
