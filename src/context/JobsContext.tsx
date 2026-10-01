@@ -303,19 +303,14 @@ export function JobsProvider({ children }: { children: ReactNode }) {
     };
 
     // --- Site Log Management ---
-            const updateJobsLaborAggregates = async (
-        jobAggregates: Map<string, { hours: number; cost: number; settledCost: number }>,
-        stageAggregates: Map<string, { hours: number; cost: number }>
+    const updateJobsLaborAggregates = async (
+        _jobAggregates: Map<string, { hours: number; cost: number; settledCost: number }>,
+        _stageAggregates: Map<string, { hours: number; cost: number }>
     ) => {
-        const allJobs = await jobStorage.getAllJobs();
-        const { changedJobs } = applyLaborAggregatesToJobs(allJobs, jobAggregates, stageAggregates);
-
-        if (changedJobs.length > 0) {
-            await Promise.all(changedJobs.map(job =>
-                jobStorage.saveJob({ ...job, updatedAt: new Date().toISOString() })
-            ));
-            await refreshJobs();
-        }
+        // Backend is the single authoritative source of truth for labor aggregates.
+        // Frontend does not write actualLabor* fields via PATCH to prevent stale browser tabs
+        // or client-side fabrication from overwriting authoritative triggers.
+        await refreshJobs();
     };
 
     // --- Job Stage Items (BOM) ---

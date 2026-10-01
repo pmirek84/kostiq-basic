@@ -24,7 +24,9 @@ export const useTiCoJobsSync = () => {
         timeoutRef.current = setTimeout(() => {
             const { jobAggregates, stageAggregates } = calculateLaborAggregates(timeEntries, settlements, employees);
 
-            console.log('Syncing TiCo -> Jobs:', { jobAggregates, stageAggregates });
+            if (import.meta.env?.DEV) {
+                console.log('TiCo client diagnostics:', { jobAggregates, stageAggregates });
+            }
             updateJobsLaborAggregates(jobAggregates, stageAggregates);
         }, 1000); // Debounce 1s
 

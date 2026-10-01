@@ -160,11 +160,6 @@ export interface JobPatchPayload {
   riskFlag?: JobRiskFlag;
   riskComment?: string;
   stages?: JobStagePostPayload[];
-  actualLaborHours?: number;
-  actualLaborCost?: number;
-  settledLaborCost?: number;
-  timeEntriesCount?: number;
-  timeEntriesHours?: number;
   [k: string]: unknown;
 }
 export interface JobBatchImportPayload {

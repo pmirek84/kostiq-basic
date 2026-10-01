@@ -21,7 +21,8 @@ const {
     validateJobPatchSchema,
     validateJobBatchSchema,
     validateJobPaginatedSchema,
-    recalculateJobLaborCosts
+    recalculateJobLaborCosts,
+    reconcilePendingJobAggregates
 } = require('../server');
 
 const { jobSchema } = require('../../shared/contracts/index.cjs');
@@ -143,6 +144,25 @@ test('Shared Contracts: Job JSON Schema, Statuses, Lifecycle and Financial Prote
             if (!existing) return { matchedCount: 0, modifiedCount: 0 };
             if (update.$set) Object.assign(existing, update.$set);
             return { matchedCount: 1, modifiedCount: 1 };
+        },
+        deleteOne: async (filter) => {
+            const id = filter.id || (filter.$or ? filter.$or[0].id : null);
+            const existed = timeEntriesStore.delete(id);
+            return { deletedCount: existed ? 1 : 0 };
+        },
+        bulkWrite: async (ops) => {
+            let count = 0;
+            for (const op of ops) {
+                if (op.updateOne) {
+                    const id = op.updateOne.filter.id;
+                    const doc = timeEntriesStore.get(id) || { id };
+                    if (op.updateOne.update.$set) Object.assign(doc, op.updateOne.update.$set);
+                    if (op.updateOne.update.$setOnInsert && !timeEntriesStore.has(id)) Object.assign(doc, op.updateOne.update.$setOnInsert);
+                    timeEntriesStore.set(id, doc);
+                    count++;
+                }
+            }
+            return { upsertedCount: count, modifiedCount: 0, matchedCount: 0 };
         }
     };
 
@@ -365,8 +385,8 @@ test('Shared Contracts: Job JSON Schema, Statuses, Lifecycle and Financial Prote
 
         assert.strictEqual(resPatch.status, 200);
         assert.strictEqual(resPatch.body.priority, 'high');
-        assert.strictEqual(resPatch.body.actualLaborCost, 456789, 'PATCH allows frontend labor sync to persist actualLaborCost');
-        assert.strictEqual(resPatch.body.settledLaborCost, 123456, 'PATCH allows frontend labor sync to persist settledLaborCost');
+        assert.strictEqual(resPatch.body.actualLaborCost, 0, 'PATCH must discard client fabricated actualLaborCost');
+        assert.strictEqual(resPatch.body.settledLaborCost, 0, 'PATCH must discard client fabricated settledLaborCost');
         assert.strictEqual(resPatch.body.revenueActualNet, 0, 'PATCH must discard client fabricated revenueActualNet');
         assert.strictEqual(resPatch.body.materialsActualNet, 0, 'PATCH must discard client fabricated materialsActualNet');
     });
@@ -656,6 +676,138 @@ test('Shared Contracts: Job JSON Schema, Statuses, Lifecycle and Financial Prote
         const jobAfterTrigger = jobsStore.get(jobId);
         assert.strictEqual(jobAfterTrigger.actualLaborHours, 29, 'Mutation hook recalculates labor hours');
         assert.strictEqual(jobAfterTrigger.actualLaborCost, 3250, 'Mutation hook recalculates labor cost');
+    });
+
+
+    await t.test('[P1] deleting a time entry (hard delete) triggers recalculation of affected job', async () => {
+        const delJobId = 'job-delete-test';
+        jobsStore.set(delJobId, {
+            id: delJobId,
+            name: 'Zlecenie do testu DELETE',
+            clientId: 'client-1',
+            actualLaborHours: 10,
+            actualLaborCost: 500,
+            timeEntriesCount: 1,
+            stages: []
+        });
+
+        timeEntriesStore.set('te-del-1', {
+            id: 'te-del-1',
+            jobId: delJobId,
+            hours: 10,
+            cost: 500,
+            status: 'approved',
+            isActive: true
+        });
+
+        // Hard delete time entry
+        const resDel = await request(app)
+            .delete('/api/time-entries/te-del-1')
+            .set('Authorization', 'Bearer ' + adminToken);
+
+        assert.strictEqual(resDel.status, 204);
+        assert.strictEqual(timeEntriesStore.has('te-del-1'), false);
+
+        const jobAfterDel = jobsStore.get(delJobId);
+        assert.strictEqual(jobAfterDel.actualLaborHours, 0, 'Hours must be 0 after deleting time entry');
+        assert.strictEqual(jobAfterDel.actualLaborCost, 0, 'Cost must be 0 after deleting time entry');
+        assert.strictEqual(jobAfterDel.timeEntriesCount, 0, 'Entries count must be 0');
+    });
+
+    await t.test('[P1] transferring a time entry between jobs on PATCH recalculates BOTH source and target jobs', async () => {
+        const srcJobId = 'job-source-transfer';
+        const tgtJobId = 'job-target-transfer';
+
+        jobsStore.set(srcJobId, {
+            id: srcJobId,
+            name: 'Zlecenie Źródłowe',
+            clientId: 'client-1',
+            actualLaborHours: 8,
+            actualLaborCost: 400,
+            timeEntriesCount: 1,
+            stages: []
+        });
+
+        jobsStore.set(tgtJobId, {
+            id: tgtJobId,
+            name: 'Zlecenie Docelowe',
+            clientId: 'client-1',
+            actualLaborHours: 0,
+            actualLaborCost: 0,
+            timeEntriesCount: 0,
+            stages: []
+        });
+
+        timeEntriesStore.set('te-transfer-1', {
+            id: 'te-transfer-1',
+            jobId: srcJobId,
+            hours: 8,
+            cost: 400,
+            status: 'approved',
+            isActive: true
+        });
+
+        // PATCH time entry changing jobId to target job
+        const resTransfer = await request(app)
+            .patch('/api/time-entries/te-transfer-1')
+            .set('Authorization', 'Bearer ' + adminToken)
+            .send({
+                jobId: tgtJobId
+            });
+
+        assert.strictEqual(resTransfer.status, 200);
+
+        const srcJob = jobsStore.get(srcJobId);
+        assert.strictEqual(srcJob.actualLaborHours, 0, 'Source job hours must decrease to 0 after entry transfer');
+        assert.strictEqual(srcJob.actualLaborCost, 0, 'Source job cost must decrease to 0 after entry transfer');
+
+        const tgtJob = jobsStore.get(tgtJobId);
+        assert.strictEqual(tgtJob.actualLaborHours, 8, 'Target job hours must increase to 8 after entry transfer');
+        assert.strictEqual(tgtJob.actualLaborCost, 400, 'Target job cost must increase to 400 after entry transfer');
+    });
+
+    await t.test('[P1] aggregation failure sets aggregationPending: true and can be reconciled on demand', async () => {
+        const errJobId = 'job-error-flag-test';
+        jobsStore.set(errJobId, {
+            id: errJobId,
+            name: 'Zlecenie z błędem agregacji',
+            clientId: 'client-1',
+            stages: []
+        });
+
+        // Simulate failure in time-entries search by injecting temporary thrower
+        let simulateFailure = true;
+        const originalFind = mockTimeEntriesColl.find;
+        mockTimeEntriesColl.find = (filter) => {
+            if (simulateFailure && filter?.$or?.some(c => c.jobId === errJobId)) {
+                throw new Error('Simulated transient DB failure during aggregation');
+            }
+            return originalFind(filter);
+        };
+
+        try {
+            await recalculateJobLaborCosts(errJobId);
+        } catch (e) {
+            // caught
+        }
+
+        const jobWithError = jobsStore.get(errJobId);
+        assert.strictEqual(jobWithError.aggregationPending, true, 'Job must be marked aggregationPending: true on failure');
+        assert.match(jobWithError.aggregationError, /Simulated transient DB failure/);
+        assert.ok(jobWithError.aggregationFailedAt, 'aggregationFailedAt must be stamped');
+
+        // Now resolve transient failure and trigger on-demand recalculation endpoint
+        simulateFailure = false;
+        mockTimeEntriesColl.find = originalFind;
+
+        const resRecalc = await request(app)
+            .post('/api/jobs/' + errJobId + '/recalculate-labor')
+            .set('Authorization', 'Bearer ' + adminToken);
+
+        assert.strictEqual(resRecalc.status, 200);
+        assert.strictEqual(resRecalc.body.success, true);
+        assert.strictEqual(resRecalc.body.job.aggregationPending, false, 'aggregationPending must be cleared on success');
+        assert.strictEqual(resRecalc.body.job.aggregationError, null);
     });
 
     await t.test('automated generation guard: verifies job.generated.ts is strictly up to date with job.schema.json', () => {

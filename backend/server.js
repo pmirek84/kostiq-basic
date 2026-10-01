@@ -1428,6 +1428,23 @@ const createRouter = (collectionName, options = {}) => {
                     };
                 });
 
+                // [P1 FIX] Pre-fetch existing documents to track old state for mutations
+                const itemIds = items.map(i => i.id).filter(Boolean);
+                const oldDocsMap = new Map();
+                if (itemIds.length > 0) {
+                    try {
+                        const existingList = await db.collection(collectionName).find({
+                            $or: [{ id: { $in: itemIds } }, { _id: { $in: itemIds } }]
+                        }).toArray();
+                        existingList.forEach(d => {
+                            if (d.id) oldDocsMap.set(d.id, d);
+                            if (d._id) oldDocsMap.set(d._id.toString(), d);
+                        });
+                    } catch (fetchErr) {
+                        console.warn(`[batch-import pre-fetch ${collectionName}]`, fetchErr.message);
+                    }
+                }
+
                 try {
                     const result = await db.collection(collectionName).bulkWrite(operations, { ordered: false });
                     const upsertedCount = result.upsertedCount || 0;
@@ -1437,7 +1454,7 @@ const createRouter = (collectionName, options = {}) => {
 
                     if (typeof options.afterMutation === 'function') {
                         try {
-                            await options.afterMutation('batch-import', { items, req });
+                            await options.afterMutation('batch-import', { items, oldDocsMap, req });
                         } catch (mErr) {
                             console.warn(`[afterMutation ${collectionName} batch-import]`, mErr.message);
                         }
@@ -1464,6 +1481,7 @@ const createRouter = (collectionName, options = {}) => {
                         const failedIndices = new Set(writeErrors.map(e => e.index));
                         const failedIds = [];
                         const succeededIds = [];
+                        const succeededItems = [];
 
                         for (let i = 0; i < items.length; i++) {
                             const itemId = items[i].id;
@@ -1471,6 +1489,16 @@ const createRouter = (collectionName, options = {}) => {
                                 failedIds.push(itemId);
                             } else {
                                 succeededIds.push(itemId);
+                                succeededItems.push(items[i]);
+                            }
+                        }
+
+                        // [P1 FIX] Call afterMutation for succeeded items in partial 207 response
+                        if (succeededItems.length > 0 && typeof options.afterMutation === 'function') {
+                            try {
+                                await options.afterMutation('batch-import', { items: succeededItems, oldDocsMap, req });
+                            } catch (mErr) {
+                                console.warn(`[afterMutation ${collectionName} batch-import partial]`, mErr.message);
                             }
                         }
 
@@ -1541,19 +1569,29 @@ const createRouter = (collectionName, options = {}) => {
                 }
             }
 
+            // [P1 FIX] Snapshot document before update to detect job transfers and state changes
+            let beforeDoc = null;
+            try {
+                const rawBefore = await db.collection(collectionName).findOne(filter);
+                if (rawBefore) beforeDoc = { ...rawBefore };
+            } catch (snapErr) {
+                console.warn(`[PATCH snapshot ${collectionName}]`, snapErr.message);
+            }
+
             // Always stamp updatedAt on every PATCH
             updates.updatedAt = new Date().toISOString();
 
             const result = await db.collection(collectionName).updateOne(filter, { $set: updates });
 
-            if (result.matchedCount === 0) {
+            const patchMatched = result.matchedCount !== undefined ? result.matchedCount : (result.modifiedCount !== undefined ? result.modifiedCount : 1);
+            if (patchMatched === 0) {
                 return res.status(404).json({ error: 'Item not found' });
             }
 
             const updated = await db.collection(collectionName).findOne(filter);
             if (typeof options.afterMutation === 'function') {
                 try {
-                    await options.afterMutation('update', { id, updates, doc: updated, req });
+                    await options.afterMutation('update', { id, updates, doc: updated, oldDoc: beforeDoc, req });
                 } catch (mErr) {
                     console.warn(`[afterMutation ${collectionName} update]`, mErr.message);
                 }
@@ -1565,41 +1603,58 @@ const createRouter = (collectionName, options = {}) => {
         }
     });
 
-    // DELETE (Now Soft Delete)
+    // DELETE (Soft Delete for critical entities, Hard Delete for child records)
     router.delete('/:id', async (req, res) => {
         try {
             if (!db) return res.status(503).json({ error: 'Database not connected' });
             const { id } = req.params;
+            const filter = { id: id };
+
+            // [P1 FIX] Fetch document before delete so afterMutation knows affected jobId/project_id
+            let beforeDoc = null;
+            try {
+                const rawDeleteBefore = await db.collection(collectionName).findOne(filter);
+                if (rawDeleteBefore) beforeDoc = { ...rawDeleteBefore };
+            } catch (snapErr) {
+                console.warn(`[DELETE snapshot ${collectionName}]`, snapErr.message);
+            }
 
             // Critical collections use soft delete
             const softDeleteCollections = ['jobs', 'offers', 'clients', 'employees', 'subcontractors'];
 
             if (softDeleteCollections.includes(collectionName)) {
                 const result = await db.collection(collectionName).updateOne(
-                    { id: id },
+                    filter,
                     { $set: { isActive: false, updatedAt: new Date().toISOString() } }
                 );
 
-                if (result.matchedCount === 0) {
+                const delMatched = result.matchedCount !== undefined ? result.matchedCount : (result.modifiedCount !== undefined ? result.modifiedCount : 1);
+                if (delMatched === 0) {
                     return res.status(404).json({ error: 'Item not found' });
                 }
                 if (typeof options.afterMutation === 'function') {
                     try {
-                        await options.afterMutation('delete', { id, req });
+                        await options.afterMutation('delete', { id, doc: beforeDoc ? { ...beforeDoc, isActive: false } : null, oldDoc: beforeDoc, req });
                     } catch (mErr) {
-                        console.warn(`[afterMutation ${collectionName} delete]`, mErr.message);
+                        console.warn(`[afterMutation ${collectionName} delete soft]`, mErr.message);
                     }
                 }
-                res.status(200).json({ success: true, message: 'Item archived' });
+                return res.status(200).json({ success: true, message: 'Item archived' });
             } else {
-                // Other collections can be hard deleted if appropriate, 
-                // but let's follow the user's "Great Cleanup" and default to soft delete for safety
-                // or keep hard delete for transient things like notifications if not specified.
-                const result = await db.collection(collectionName).deleteOne({ id: id });
+                // Hard delete branch (e.g. time-entries, settlements, site-logs)
+                const result = await db.collection(collectionName).deleteOne(filter);
                 if (result.deletedCount === 0) {
                     return res.status(404).json({ error: 'Item not found' });
                 }
-                res.status(204).send();
+                // [P1 FIX] Trigger afterMutation with oldDoc so labor aggregates are recalculated after hard delete!
+                if (typeof options.afterMutation === 'function') {
+                    try {
+                        await options.afterMutation('delete', { id, doc: null, oldDoc: beforeDoc, req });
+                    } catch (mErr) {
+                        console.warn(`[afterMutation ${collectionName} delete hard]`, mErr.message);
+                    }
+                }
+                return res.status(204).send();
             }
         } catch (err) {
             res.status(500).json({ error: err.message });
@@ -1631,7 +1686,7 @@ async function createNotification(data) {
 // Called after time-entry approval to update
 // actualLaborCost on the related Job document.
 // ==========================================
-async function recalculateJobLaborCosts(jobId) {
+async function recalculateJobLaborCosts(jobId, { throwOnError = false } = {}) {
     if (!db || !jobId) return;
 
     try {
@@ -1727,6 +1782,9 @@ async function recalculateJobLaborCosts(jobId) {
             actualLaborCost: totalCost,
             settledLaborCost: settledCost,
             timeEntriesCount: totalEntriesCount,
+            aggregationPending: false,
+            aggregationError: null,
+            aggregationFailedAt: null,
             updatedAt: new Date().toISOString()
         };
 
@@ -1753,7 +1811,48 @@ async function recalculateJobLaborCosts(jobId) {
         console.log(`[TRIGGER] Recalculated job ${jobId}: actualLaborHours=${totalHours}, actualLaborCost=${totalCost}, settledLaborCost=${settledCost}`);
     } catch (err) {
         console.error(`[TRIGGER ERROR] Failed to recalculate labor costs for job ${jobId}:`, err.message);
+        // [P1 FIX] Flag job as aggregationPending so the failure is persisted, traceable, and retryable
+        if (db && typeof db.collection === 'function') {
+            try {
+                const jobsColl = db.collection('jobs');
+                if (jobsColl && typeof jobsColl.updateOne === 'function') {
+                    await jobsColl.updateOne(
+                        { $or: [{ id: jobId }, { _id: jobId }] },
+                        {
+                            $set: {
+                                aggregationPending: true,
+                                aggregationError: err.message || String(err),
+                                aggregationFailedAt: new Date().toISOString()
+                            }
+                        }
+                    );
+                }
+            } catch (flagErr) {
+                console.error(`[TRIGGER ERROR] Failed to set aggregationPending for job ${jobId}:`, flagErr.message);
+            }
+        }
+        if (throwOnError) throw err;
     }
+}
+
+// [P1 FIX] Periodic or on-demand reconciliation of failed / pending job aggregations
+async function reconcilePendingJobAggregates() {
+    if (!db || typeof db.collection !== 'function') return { reconciledCount: 0, failedCount: 0, totalPending: 0 };
+    const pendingJobs = await db.collection('jobs').find({ aggregationPending: true }).toArray();
+    let reconciledCount = 0;
+    let failedCount = 0;
+    for (const j of pendingJobs) {
+        const jId = j.id || (j._id ? j._id.toString() : null);
+        if (!jId) continue;
+        try {
+            await recalculateJobLaborCosts(jId, { throwOnError: true });
+            reconciledCount++;
+        } catch (err) {
+            failedCount++;
+            console.error(`[RECONCILE] Failed to reconcile job ${jId}:`, err.message);
+        }
+    }
+    return { reconciledCount, failedCount, totalPending: pendingJobs.length };
 }
 
 // ==========================================
@@ -2937,14 +3036,26 @@ app.use('/api/time-entries', verifyToken, validateTimeEntry, createRouter('time-
     afterMutation: async (action, ctx) => {
         try {
             const jobIds = new Set();
+            // [P1 FIX] Collect old jobId so moving an entry or deleting an entry recalculates the old job
+            if (ctx.oldDoc?.jobId) jobIds.add(ctx.oldDoc.jobId);
+            if (ctx.oldDoc?.project_id) jobIds.add(ctx.oldDoc.project_id);
+
+            // Collect new jobId after creation or patch
             if (ctx.doc?.jobId) jobIds.add(ctx.doc.jobId);
             if (ctx.doc?.project_id) jobIds.add(ctx.doc.project_id);
             if (ctx.updates?.jobId) jobIds.add(ctx.updates.jobId);
             if (ctx.updates?.project_id) jobIds.add(ctx.updates.project_id);
+
+            // Collect from batch items and old documents map
             if (ctx.items && Array.isArray(ctx.items)) {
                 ctx.items.forEach(i => {
                     if (i.jobId) jobIds.add(i.jobId);
                     if (i.project_id) jobIds.add(i.project_id);
+                    if (ctx.oldDocsMap?.has(i.id)) {
+                        const old = ctx.oldDocsMap.get(i.id);
+                        if (old?.jobId) jobIds.add(old.jobId);
+                        if (old?.project_id) jobIds.add(old.project_id);
+                    }
                 });
             }
             if (ctx.id && db && typeof db.collection === 'function' && jobIds.size === 0) {
@@ -2965,16 +3076,34 @@ app.use('/api/settlements', verifyToken, validateSettlement, createRouter('settl
     afterMutation: async (action, ctx) => {
         try {
             const jobIds = new Set();
+            if (ctx.oldDoc?.jobId) jobIds.add(ctx.oldDoc.jobId);
             if (ctx.doc?.jobId) jobIds.add(ctx.doc.jobId);
             if (ctx.updates?.jobId) jobIds.add(ctx.updates.jobId);
-            if (ctx.id && db && typeof db.collection === 'function') {
-                const linkedEntries = await db.collection('time-entries').find({ settlementId: ctx.id }).toArray();
+
+            const settlementIds = new Set();
+            if (ctx.oldDoc?.id) settlementIds.add(ctx.oldDoc.id);
+            if (ctx.doc?.id) settlementIds.add(ctx.doc.id);
+            if (ctx.id) settlementIds.add(ctx.id);
+            if (ctx.items && Array.isArray(ctx.items)) {
+                ctx.items.forEach(s => {
+                    if (s.id) settlementIds.add(s.id);
+                    if (s.jobId) jobIds.add(s.jobId);
+                    if (ctx.oldDocsMap?.has(s.id)) {
+                        const old = ctx.oldDocsMap.get(s.id);
+                        if (old?.jobId) jobIds.add(old.jobId);
+                        if (old?.id) settlementIds.add(old.id);
+                    }
+                });
+            }
+
+            if (settlementIds.size > 0 && db && typeof db.collection === 'function') {
+                const linkedEntries = await db.collection('time-entries').find({
+                    settlementId: { $in: Array.from(settlementIds) }
+                }).toArray();
                 linkedEntries.forEach(e => {
                     if (e.jobId) jobIds.add(e.jobId);
                     if (e.project_id) jobIds.add(e.project_id);
                 });
-                const sDoc = await db.collection('settlements').findOne({ id: ctx.id });
-                if (sDoc?.jobId) jobIds.add(sDoc.jobId);
             }
             for (const jId of jobIds) {
                 await recalculateJobLaborCosts(jId);
@@ -3257,8 +3386,8 @@ async function validateAndNormalizeJobDoc(doc, { db, user, isBatch = false, isPa
                 stage.plannedRevenueNet = 0;
             }
 
-            // [P1 FIX] In batch import for existing job, preserve stage actuals from existing stage
-            if (isBatch && existingJob && existingJob.stages && Array.isArray(existingJob.stages)) {
+            // [P1 FIX] Preserve stage actuals from existing stage for both batch upsert and PATCH (cannot fabricate stage actuals)
+            if ((isBatch || isPatch) && existingJob && existingJob.stages && Array.isArray(existingJob.stages)) {
                 const prevStage = existingJob.stages.find(s => s.id === stage.id);
                 if (prevStage) {
                     stage.actualLaborHours = prevStage.actualLaborHours || 0;
@@ -3312,8 +3441,12 @@ async function validateAndNormalizeJobDoc(doc, { db, user, isBatch = false, isPa
         doc.actualTotalCost = 0;
         doc.marginActualPercent = 0;
     } else {
-        // On PATCH: allow frontend sync aggregates (actualLaborHours, actualLaborCost, settledLaborCost, timeEntriesCount)
-        // while stripping fabricated financial revenues/materials if not authenticated
+        // [P1 FIX] On PATCH: Client is strictly forbidden from fabricating or directly updating actual labor & financial aggregates
+        delete doc.actualLaborHours;
+        delete doc.actualLaborCost;
+        delete doc.settledLaborCost;
+        delete doc.timeEntriesCount;
+        delete doc.timeEntriesHours;
         delete doc.materialsActualNet;
         delete doc.logisticsActualNet;
         delete doc.equipmentActualNet;
@@ -3434,6 +3567,34 @@ async function validateJob(req, res, next) {
 
     next();
 }
+
+// [P1 FIX] Dedicated authoritative recalculation endpoint for a specific job
+app.post('/api/jobs/:id/recalculate-labor', verifyToken, requireRole('admin', 'manager'), async (req, res) => {
+    try {
+        if (!db) return res.status(503).json({ error: 'Database not connected' });
+        const { id } = req.params;
+        const job = await db.collection('jobs').findOne({ $or: [{ id }, { _id: id }] });
+        if (!job) {
+            return res.status(404).json({ error: `Zlecenie o identyfikatorze '${id}' nie istnieje.` });
+        }
+        await recalculateJobLaborCosts(id, { throwOnError: true });
+        const updated = await db.collection('jobs').findOne({ $or: [{ id }, { _id: id }] });
+        res.json({ success: true, job: updated });
+    } catch (err) {
+        res.status(500).json({ error: `Błąd przeliczania agregatów zlecenia: ${err.message}` });
+    }
+});
+
+// [P1 FIX] Dedicated reconciliation endpoint for all pending / failed job aggregations
+app.post('/api/jobs/reconcile-aggregates', verifyToken, requireRole('admin', 'manager'), async (req, res) => {
+    try {
+        if (!db) return res.status(503).json({ error: 'Database not connected' });
+        const result = await reconcilePendingJobAggregates();
+        res.json({ success: true, ...result });
+    } catch (err) {
+        res.status(500).json({ error: `Błąd rekonsyliacji agregatów: ${err.message}` });
+    }
+});
 
 app.use('/api/jobs', verifyToken, requireRoleOrSafeGet, validateJob, createRouter('jobs'));
 app.use('/api/materials', verifyToken, requireRole('admin', 'manager'), createRouter('materials'));
@@ -3992,5 +4153,6 @@ module.exports = {
     validateJobPatchSchema,
     validateJobBatchSchema,
     validateJobPaginatedSchema,
-    recalculateJobLaborCosts
+    recalculateJobLaborCosts,
+    reconcilePendingJobAggregates
 };
