@@ -1612,7 +1612,21 @@ const createRouter = (collectionName, options = {}) => {
             // Always stamp updatedAt on every PATCH
             updates.updatedAt = new Date().toISOString();
 
-            const result = await db.collection(collectionName).updateOne(filter, { $set: updates });
+            const updateDoc = { $set: updates };
+            if (collectionName === 'time-entries') {
+                const unsetFields = {};
+                if (updates.jobId !== undefined) {
+                    unsetFields.project_id = "";
+                }
+                if (updates.employeeId !== undefined) {
+                    unsetFields.employee_id = "";
+                }
+                if (Object.keys(unsetFields).length > 0) {
+                    updateDoc.$unset = unsetFields;
+                }
+            }
+
+            const result = await db.collection(collectionName).updateOne(filter, updateDoc);
 
             const patchMatched = result.matchedCount !== undefined ? result.matchedCount : (result.modifiedCount !== undefined ? result.modifiedCount : 1);
             if (patchMatched === 0) {
@@ -2070,82 +2084,7 @@ app.post('/api/migration/admin-record', verifyToken, requireRole('admin'), async
     }
 });
 
-app.post('/api/time-entries/batch-update', verifyToken, requireRole('admin', 'manager'), async (req, res) => {
-    try {
-        if (!db) return res.status(503).json({ error: 'Database not connected' });
-        const { ids, updates } = req.body;
-        if (!ids || !Array.isArray(ids)) {
-            return res.status(400).json({ error: 'Brak lub nieprawidłowa tablica identyfikatorów (ids).' });
-        }
-        if (ids.length === 0) {
-            return res.status(200).json({ success: true, count: 0, affectedJobs: [] });
-        }
-        if (!updates || typeof updates !== 'object') {
-            return res.status(400).json({ error: 'Brak obiektu aktualizacji (updates).' });
-        }
 
-        // 1. [P1 FIX] Fail-closed snapshot: pre-fetch affected entries before updateMany to identify all source jobs
-        let beforeEntries = [];
-        try {
-            beforeEntries = await db.collection('time-entries').find({
-                $or: [{ id: { $in: ids } }, { _id: { $in: ids } }]
-            }).toArray();
-        } catch (fetchErr) {
-            console.error('[batch-update snapshot time-entries ERROR]', fetchErr.message);
-            return res.status(500).json({
-                error: `Błąd pobierania wpisów czasu przed aktualizacją wsadową: ${fetchErr.message}`
-            });
-        }
-
-        // Collect all affected job IDs (both before and after mutation, supporting transfers & rejections)
-        const jobIds = new Set();
-        beforeEntries.forEach(e => {
-            if (e.jobId) jobIds.add(e.jobId);
-            if (e.project_id) jobIds.add(e.project_id);
-        });
-        if (updates.jobId) jobIds.add(updates.jobId);
-        if (updates.project_id) jobIds.add(updates.project_id);
-
-        // 2. Perform the update
-        const safeUpdates = { ...updates };
-        delete safeUpdates._id;
-        safeUpdates.updatedAt = safeUpdates.updatedAt || new Date().toISOString();
-
-        await db.collection('time-entries').updateMany(
-            { $or: [{ id: { $in: ids } }, { _id: { $in: ids } }] },
-            { $set: safeUpdates }
-        );
-
-        // 3. [P1 FIX] Authoritative recalculation of all affected jobs regardless of status transition
-        // (handles submitted → admin_approved/approved, and approved/admin_approved → rejected/admin_rejected)
-        for (const jobId of jobIds) {
-            await recalculateJobLaborCosts(jobId);
-
-            // AUTO-STATUS: planned → in_progress on approval (approved or admin_approved)
-            if (updates.status === 'approved' || updates.status === 'admin_approved') {
-                try {
-                    const job = await db.collection('jobs').findOne({
-                        $or: [{ id: jobId }, { _id: jobId }]
-                    });
-                    if (job && (job.status === 'planned' || job.status === 'planowane')) {
-                        await db.collection('jobs').updateOne(
-                            { $or: [{ id: jobId }, { _id: jobId }] },
-                            { $set: { status: 'in_progress', actualStartDate: new Date().toISOString(), updatedAt: new Date().toISOString() } }
-                        );
-                        console.log(`[AUTO-STATUS] Job ${jobId} transitioned: planned → in_progress`);
-                    }
-                } catch (autoStatusErr) {
-                    console.warn(`[AUTO-STATUS ERROR] Job ${jobId}:`, autoStatusErr.message);
-                }
-            }
-        }
-
-        res.status(200).json({ success: true, count: ids.length, affectedJobs: Array.from(jobIds) });
-    } catch (err) {
-        console.error('[BATCH-UPDATE ERROR]', err);
-        res.status(500).json({ error: err.message });
-    }
-});
 
 // ==========================================
 // PUBLIC ROUTES (before verifyToken)
@@ -3029,6 +2968,17 @@ async function validateTimeEntry(req, res, next) {
             }
         }
 
+        if (req.body?.jobId !== undefined && req.body?.project_id !== undefined) {
+            if (String(req.body.jobId).trim() !== String(req.body.project_id).trim()) {
+                return res.status(400).json({ error: 'Niespójne wartości jobId oraz project_id w obiekcie aktualizacji.' });
+            }
+        }
+        if (req.body?.employeeId !== undefined && req.body?.employee_id !== undefined) {
+            if (String(req.body.employeeId).trim() !== String(req.body.employee_id).trim()) {
+                return res.status(400).json({ error: 'Niespójne wartości employeeId oraz employee_id w obiekcie aktualizacji.' });
+            }
+        }
+
         const patchJobId = req.body?.jobId !== undefined ? req.body.jobId : req.body?.project_id;
         if (patchJobId !== undefined) {
             const trimmedJobId = typeof patchJobId === 'string' ? patchJobId.trim() : patchJobId;
@@ -3103,6 +3053,226 @@ app.use('/api/logistics-rates', verifyToken, requireRoleOrSafeGet, createRouter(
 app.use('/api/rental-rates', verifyToken, requireRoleOrSafeGet, createRouter('rental-rates'));
 app.use('/api/sheet-metal', verifyToken, requireRoleOrSafeGet, createRouter('sheet-metal'));
 app.use('/api/crews', verifyToken, requireRoleOrSafeGet, createRouter('crews'));
+app.post('/api/time-entries/batch-update', verifyToken, requireRole('admin', 'manager'), async (req, res) => {
+    try {
+        if (!db) return res.status(503).json({ error: 'Database not connected' });
+        const { ids, updates } = req.body;
+        if (!ids || !Array.isArray(ids)) {
+            return res.status(400).json({ error: 'Brak lub nieprawidłowa tablica identyfikatorów (ids).' });
+        }
+        if (ids.length === 0) {
+            return res.status(200).json({ success: true, count: 0, affectedJobs: [] });
+        }
+        if (!updates || typeof updates !== 'object' || Array.isArray(updates)) {
+            return res.status(400).json({ error: 'Brak obiektu aktualizacji (updates).' });
+        }
+
+        // [P1 FIX] Guard against conflicting legacy and canonical fields in updates
+        if (updates.jobId !== undefined && updates.project_id !== undefined) {
+            if (String(updates.jobId).trim() !== String(updates.project_id).trim()) {
+                return res.status(400).json({ error: 'Niespójne wartości jobId oraz project_id w obiekcie aktualizacji.' });
+            }
+        }
+        if (updates.employeeId !== undefined && updates.employee_id !== undefined) {
+            if (String(updates.employeeId).trim() !== String(updates.employee_id).trim()) {
+                return res.status(400).json({ error: 'Niespójne wartości employeeId oraz employee_id w obiekcie aktualizacji.' });
+            }
+        }
+
+        // [P1 FIX] Strip forbidden identifiers and normalize legacy keys in safeUpdates
+        const safeUpdates = { ...updates };
+        delete safeUpdates._id;
+        delete safeUpdates.id; // Document identity must never be mutated via batch-update
+
+        const isJobUpdated = safeUpdates.jobId !== undefined || safeUpdates.project_id !== undefined;
+        if (isJobUpdated) {
+            const rawJobId = safeUpdates.jobId !== undefined ? safeUpdates.jobId : safeUpdates.project_id;
+            const effectiveJobId = typeof rawJobId === 'string' ? rawJobId.trim() : rawJobId;
+            if (!effectiveJobId) {
+                return res.status(400).json({ error: 'Pole jobId nie może być puste.' });
+            }
+            safeUpdates.jobId = effectiveJobId;
+            delete safeUpdates.project_id;
+        }
+
+        const isEmpUpdated = safeUpdates.employeeId !== undefined || safeUpdates.employee_id !== undefined;
+        if (isEmpUpdated) {
+            const rawEmpId = safeUpdates.employeeId !== undefined ? safeUpdates.employeeId : safeUpdates.employee_id;
+            const effectiveEmpId = typeof rawEmpId === 'string' ? rawEmpId.trim() : rawEmpId;
+            if (!effectiveEmpId) {
+                return res.status(400).json({ error: 'Pole employeeId nie może być puste.' });
+            }
+            safeUpdates.employeeId = effectiveEmpId;
+            delete safeUpdates.employee_id;
+        }
+
+        // [P1 FIX] Validate safeUpdates against TimeEntry PATCH JSON schema (Ajv)
+        const isPatchValid = validateTimeEntryPatchSchema(safeUpdates);
+        if (!isPatchValid) {
+            const firstErr = validateTimeEntryPatchSchema.errors?.[0];
+            if (firstErr) {
+                if (firstErr.instancePath.includes('status')) {
+                    return res.status(400).json({
+                        error: `Nieprawidłowy status wpisu czasu: '${safeUpdates.status}'. Dozwolone: ${VALID_TIME_ENTRY_STATUSES.join(', ')}.`
+                    });
+                }
+                if (firstErr.instancePath.includes('hours')) {
+                    if (firstErr.keyword === 'minimum') return res.status(400).json({ error: 'Godziny nie mogą być ujemne.' });
+                    if (firstErr.keyword === 'maximum') return res.status(400).json({ error: 'Godziny nie mogą przekraczać 24h na jeden wpis.' });
+                    if (firstErr.keyword === 'type') return res.status(400).json({ error: 'Pole hours musi być liczbą.' });
+                }
+                if (firstErr.instancePath.includes('billingType')) {
+                    return res.status(400).json({
+                        error: `Nieprawidłowy typ rozliczenia (billingType): '${safeUpdates.billingType}'. Dozwolone: ${BILLING_TYPES.join(', ')}.`
+                    });
+                }
+                if (firstErr.keyword === 'minLength') {
+                    return res.status(400).json({ error: `Pole ${firstErr.instancePath.replace('/', '')} nie może być puste.` });
+                }
+            }
+            const errorDetails = ajv.errorsText(validateTimeEntryPatchSchema.errors, { dataVar: 'safeUpdates', separator: '; ' });
+            return res.status(400).json({ error: `Błąd walidacji schematu aktualizacji wsadowej: ${errorDetails}.` });
+        }
+
+        // 1. [P1 FIX] Fail-closed snapshot: pre-fetch affected entries before mutation to identify all source jobs
+        let beforeEntries = [];
+        try {
+            beforeEntries = await db.collection('time-entries').find({
+                $or: [{ id: { $in: ids } }, { _id: { $in: ids } }]
+            }).toArray();
+        } catch (fetchErr) {
+            console.error('[batch-update snapshot time-entries ERROR]', fetchErr.message);
+            return res.status(500).json({
+                error: `Błąd pobierania wpisów czasu przed aktualizacją wsadową: ${fetchErr.message}`
+            });
+        }
+
+        if (beforeEntries.length === 0) {
+            return res.status(404).json({ error: 'Nie znaleziono wskazanych wpisów czasu.' });
+        }
+
+        // [P1 FIX] Validate and normalize every resulting document against the authoritative TimeEntry rules
+        const validatedCandidates = [];
+        for (const entry of beforeEntries) {
+            const candidate = { ...entry, ...safeUpdates };
+            const valError = await validateAndNormalizeTimeEntryDoc(candidate, {
+                db,
+                user: req.user,
+                isBatch: true,
+                isPatch: true,
+                existingEntry: entry
+            });
+            if (valError) {
+                return res.status(valError.status || 400).json({
+                    error: valError.error || 'Błąd walidacji wpisu czasu w operacji wsadowej.'
+                });
+            }
+            validatedCandidates.push(candidate);
+        }
+
+        // Collect all affected job IDs (both before and after mutation, supporting transfers & rejections)
+        const jobIds = new Set();
+        beforeEntries.forEach(e => {
+            if (e.jobId) jobIds.add(e.jobId);
+            if (e.project_id) jobIds.add(e.project_id);
+        });
+        if (safeUpdates.jobId) jobIds.add(safeUpdates.jobId);
+
+        // 2. [P1 FIX] Perform the update: $unset legacy project_id / employee_id so transfers don't match old jobs
+        const unsetDoc = {};
+        if (isJobUpdated) {
+            unsetDoc.project_id = "";
+        }
+        if (isEmpUpdated) {
+            unsetDoc.employee_id = "";
+        }
+
+        const nowIso = new Date().toISOString();
+        const hasPerItemCostRecalc = safeUpdates.hours !== undefined || safeUpdates.cost !== undefined || safeUpdates.billingType !== undefined;
+
+        if (hasPerItemCostRecalc) {
+            const bulkOps = validatedCandidates.map(c => {
+                const setDoc = {
+                    ...safeUpdates,
+                    cost: c.cost,
+                    hourlyRate: c.hourlyRate,
+                    workerType: c.workerType,
+                    activityType: c.activityType,
+                    updatedAt: nowIso
+                };
+                delete setDoc._id;
+                delete setDoc.id;
+                if (isJobUpdated) delete setDoc.project_id;
+                if (isEmpUpdated) delete setDoc.employee_id;
+
+                const op = {
+                    updateOne: {
+                        filter: { $or: [{ id: c.id }, { _id: c.id }] },
+                        update: { $set: setDoc }
+                    }
+                };
+                if (Object.keys(unsetDoc).length > 0) {
+                    op.updateOne.update.$unset = unsetDoc;
+                }
+                return op;
+            });
+            await db.collection('time-entries').bulkWrite(bulkOps);
+        } else {
+            const updateDoc = {
+                $set: {
+                    ...safeUpdates,
+                    updatedAt: nowIso
+                }
+            };
+            if (Object.keys(unsetDoc).length > 0) {
+                updateDoc.$unset = unsetDoc;
+            }
+
+            await db.collection('time-entries').updateMany(
+                { $or: [{ id: { $in: ids } }, { _id: { $in: ids } }] },
+                updateDoc
+            );
+        }
+
+        // 3. [P1 FIX] Authoritative recalculation of all affected jobs regardless of status transition
+        // (handles additions, deductions, transfers, and rejections)
+        for (const jobId of jobIds) {
+            await recalculateJobLaborCosts(jobId);
+
+            // [P2 FIX] AUTO-STATUS: planned → in_progress on approval (approved or admin_approved)
+            // Target-only guard: only transition if the job ACTUALLY contains at least one approved entry post-mutation!
+            if (safeUpdates.status === 'approved' || safeUpdates.status === 'admin_approved') {
+                try {
+                    const job = await db.collection('jobs').findOne({
+                        $or: [{ id: jobId }, { _id: jobId }]
+                    });
+                    if (job && (job.status === 'planned' || job.status === 'planowane')) {
+                        const hasApprovedEntry = await db.collection('time-entries').findOne({
+                            $or: [{ jobId: jobId }, { project_id: jobId }],
+                            status: { $in: ['approved', 'admin_approved'] },
+                            isActive: { $ne: false }
+                        });
+                        if (hasApprovedEntry) {
+                            await db.collection('jobs').updateOne(
+                                { $or: [{ id: jobId }, { _id: jobId }] },
+                                { $set: { status: 'in_progress', actualStartDate: new Date().toISOString(), updatedAt: new Date().toISOString() } }
+                            );
+                            console.log(`[AUTO-STATUS] Job ${jobId} transitioned: planned → in_progress`);
+                        }
+                    }
+                } catch (autoStatusErr) {
+                    console.warn(`[AUTO-STATUS ERROR] Job ${jobId}:`, autoStatusErr.message);
+                }
+            }
+        }
+
+        res.status(200).json({ success: true, count: ids.length, affectedJobs: Array.from(jobIds) });
+    } catch (err) {
+        console.error('[BATCH-UPDATE ERROR]', err);
+        res.status(500).json({ error: err.message });
+    }
+});
+
 app.use('/api/time-entries', verifyToken, validateTimeEntry, createRouter('time-entries', {
     allowBatchImport: true,
     afterMutation: async (action, ctx) => {

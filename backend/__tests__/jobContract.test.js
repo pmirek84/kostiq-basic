@@ -145,7 +145,24 @@ test('Shared Contracts: Job JSON Schema, Statuses, Lifecycle and Financial Prote
             return list.length;
         },
         findOne: async (filter) => {
-            const id = filter.$or ? filter.$or[0].id : filter.id;
+            if (!filter) return null;
+            if (filter.$or) {
+                for (const e of timeEntriesStore.values()) {
+                    const match = filter.$or.some(c => {
+                        if (c.id && e.id === c.id) return true;
+                        if (c._id && (e._id || e.id) === c._id) return true;
+                        if (c.jobId && e.jobId === c.jobId) return true;
+                        if (c.project_id && e.project_id === c.project_id) return true;
+                        return false;
+                    });
+                    if (!match) continue;
+                    if (filter.status?.$in && !filter.status.$in.includes(e.status)) continue;
+                    if (filter.isActive?.$ne !== undefined && e.isActive === filter.isActive.$ne) continue;
+                    return e;
+                }
+                return null;
+            }
+            const id = filter.id;
             return timeEntriesStore.get(id) || null;
         },
         insertOne: async (doc) => {
@@ -157,6 +174,11 @@ test('Shared Contracts: Job JSON Schema, Statuses, Lifecycle and Financial Prote
             const existing = timeEntriesStore.get(id);
             if (!existing) return { matchedCount: 0, modifiedCount: 0 };
             if (update.$set) Object.assign(existing, update.$set);
+            if (update.$unset) {
+                for (const k of Object.keys(update.$unset)) {
+                    delete existing[k];
+                }
+            }
             return { matchedCount: 1, modifiedCount: 1 };
         },
         updateMany: async (filter, update) => {
@@ -186,6 +208,11 @@ test('Shared Contracts: Job JSON Schema, Statuses, Lifecycle and Financial Prote
                         Object.assign(doc, update.$set);
                         modifiedCount++;
                     }
+                    if (update.$unset) {
+                        for (const k of Object.keys(update.$unset)) {
+                            delete doc[k];
+                        }
+                    }
                 }
             }
             return { matchedCount, modifiedCount };
@@ -199,9 +226,14 @@ test('Shared Contracts: Job JSON Schema, Statuses, Lifecycle and Financial Prote
             let count = 0;
             for (const op of ops) {
                 if (op.updateOne) {
-                    const id = op.updateOne.filter.id;
+                    const id = op.updateOne.filter.id || (op.updateOne.filter.$or ? op.updateOne.filter.$or[0].id : null);
                     const doc = timeEntriesStore.get(id) || { id };
                     if (op.updateOne.update.$set) Object.assign(doc, op.updateOne.update.$set);
+                    if (op.updateOne.update.$unset) {
+                        for (const k of Object.keys(op.updateOne.update.$unset)) {
+                            delete doc[k];
+                        }
+                    }
                     if (op.updateOne.update.$setOnInsert && !timeEntriesStore.has(id)) Object.assign(doc, op.updateOne.update.$setOnInsert);
                     timeEntriesStore.set(id, doc);
                     count++;
@@ -966,6 +998,176 @@ test('Shared Contracts: Job JSON Schema, Statuses, Lifecycle and Financial Prote
         assert.strictEqual(recoveredJob.aggregationPending, false, 'Pending flag must be cleared');
         assert.strictEqual(recoveredJob.actualLaborHours, 7, 'Labor hours recalculated accurately');
         assert.strictEqual(recoveredJob.actualLaborCost, 350, 'Labor cost recalculated accurately');
+    });
+
+    await t.test('[P1 & P2] batch-update handles legacy project_id transfer with $unset and does not transition source job', async () => {
+        const srcJobId = 'job-legacy-src';
+        const tgtJobId = 'job-transfer-tgt';
+
+        jobsStore.set(srcJobId, {
+            id: srcJobId,
+            name: 'Zlecenie Źródłowe Legacy',
+            clientId: 'client-1',
+            status: 'planned',
+            actualLaborHours: 0,
+            actualLaborCost: 0,
+            stages: []
+        });
+
+        jobsStore.set(tgtJobId, {
+            id: tgtJobId,
+            name: 'Zlecenie Docelowe Transfer',
+            clientId: 'client-1',
+            status: 'planned',
+            actualLaborHours: 0,
+            actualLaborCost: 0,
+            stages: []
+        });
+
+        // Create legacy entry referencing srcJobId only via project_id
+        timeEntriesStore.set('te-legacy-transfer', {
+            id: 'te-legacy-transfer',
+            project_id: srcJobId,
+            employeeId: 'admin-1',
+            hours: 8,
+            cost: 400,
+            status: 'submitted',
+            isActive: true
+        });
+
+        // Execute batch-update transferring to tgtJobId and approving
+        const resTransfer = await request(app)
+            .post('/api/time-entries/batch-update')
+            .set('Authorization', 'Bearer ' + adminToken)
+            .send({
+                ids: ['te-legacy-transfer'],
+                updates: {
+                    jobId: tgtJobId,
+                    status: 'admin_approved',
+                    adminId: 'admin-1',
+                    adminApprovedAt: new Date().toISOString()
+                }
+            });
+
+        assert.strictEqual(resTransfer.status, 200, 'Batch-update transfer returns 200');
+        const updatedEntry = timeEntriesStore.get('te-legacy-transfer');
+        assert.strictEqual(updatedEntry.jobId, tgtJobId, 'jobId must be updated to target job');
+        assert.strictEqual(updatedEntry.project_id, undefined, 'legacy project_id must be completely $unset');
+        assert.strictEqual(updatedEntry.status, 'admin_approved');
+
+        // [P2 CHECK] Source job must NOT be transitioned to in_progress (it has 0 approved entries)
+        const srcJob = jobsStore.get(srcJobId);
+        assert.strictEqual(srcJob.actualLaborHours, 0, 'Source job has 0 hours after transfer');
+        assert.strictEqual(srcJob.actualLaborCost, 0, 'Source job has 0 cost after transfer');
+        assert.strictEqual(srcJob.status, 'planned', 'Source job without approved entries must stay planned');
+
+        // Target job must receive hours, cost, and transition to in_progress
+        const tgtJob = jobsStore.get(tgtJobId);
+        assert.strictEqual(tgtJob.actualLaborHours, 8, 'Target job receives transferred hours');
+        assert.strictEqual(tgtJob.actualLaborCost, 400, 'Target job receives transferred cost');
+        assert.strictEqual(tgtJob.status, 'in_progress', 'Target job transitions planned → in_progress');
+
+        // Verify that re-running recalculateJobLaborCosts on source job still finds 0 entries (no double counting)
+        await recalculateJobLaborCosts(srcJobId);
+        assert.strictEqual(jobsStore.get(srcJobId).actualLaborHours, 0, 'No double counting in source job');
+    });
+
+    await t.test('[P1] batch-update rejects invalid payloads, enforces TimeEntry schema, and prevents identity mutation', async () => {
+        jobsStore.set('job-val-guard', {
+            id: 'job-val-guard',
+            name: 'Zlecenie Walidacja Guard',
+            clientId: 'client-1',
+            status: 'in_progress',
+            stages: []
+        });
+
+        timeEntriesStore.set('te-val-guard', {
+            id: 'te-val-guard',
+            jobId: 'job-val-guard',
+            employeeId: 'admin-1',
+            hours: 4,
+            cost: 200,
+            status: 'submitted',
+            isActive: true
+        });
+
+        // 1. Conflicting jobId and project_id in updates
+        const resConflict = await request(app)
+            .post('/api/time-entries/batch-update')
+            .set('Authorization', 'Bearer ' + adminToken)
+            .send({
+                ids: ['te-val-guard'],
+                updates: { jobId: 'job-1', project_id: 'job-2' }
+            });
+        assert.strictEqual(resConflict.status, 400, 'Rejects conflicting jobId and project_id');
+        assert.match(resConflict.body.error, /Niespójne wartości jobId oraz project_id/);
+
+        // 2. Empty string jobId
+        const resEmptyJob = await request(app)
+            .post('/api/time-entries/batch-update')
+            .set('Authorization', 'Bearer ' + adminToken)
+            .send({
+                ids: ['te-val-guard'],
+                updates: { jobId: '   ' }
+            });
+        assert.strictEqual(resEmptyJob.status, 400, 'Rejects empty jobId');
+        assert.match(resEmptyJob.body.error, /Pole jobId nie może być puste/);
+
+        // 3. Empty string employeeId
+        const resEmptyEmp = await request(app)
+            .post('/api/time-entries/batch-update')
+            .set('Authorization', 'Bearer ' + adminToken)
+            .send({
+                ids: ['te-val-guard'],
+                updates: { employeeId: '' }
+            });
+        assert.strictEqual(resEmptyEmp.status, 400, 'Rejects empty employeeId');
+        assert.match(resEmptyEmp.body.error, /Pole employeeId nie może być puste/);
+
+        // 4. Unknown status
+        const resBadStatus = await request(app)
+            .post('/api/time-entries/batch-update')
+            .set('Authorization', 'Bearer ' + adminToken)
+            .send({
+                ids: ['te-val-guard'],
+                updates: { status: 'invalid_status_xyz' }
+            });
+        assert.strictEqual(resBadStatus.status, 400, 'Rejects unknown status');
+        assert.match(resBadStatus.body.error, /Nieprawidłowy status wpisu czasu/);
+
+        // 5. Negative hours
+        const resNegHours = await request(app)
+            .post('/api/time-entries/batch-update')
+            .set('Authorization', 'Bearer ' + adminToken)
+            .send({
+                ids: ['te-val-guard'],
+                updates: { hours: -5 }
+            });
+        assert.strictEqual(resNegHours.status, 400, 'Rejects negative hours');
+        assert.match(resNegHours.body.error, /Godziny nie mogą być ujemne/);
+
+        // 6. Non-existent target job
+        const resMissingJob = await request(app)
+            .post('/api/time-entries/batch-update')
+            .set('Authorization', 'Bearer ' + adminToken)
+            .send({
+                ids: ['te-val-guard'],
+                updates: { jobId: 'job-non-existent-999' }
+            });
+        assert.strictEqual(resMissingJob.status, 404, 'Rejects transfer to non-existent job');
+        assert.match(resMissingJob.body.error, /nie zostało odnalezione/);
+
+        // 7. Identity immutability: passing id in updates does not alter record id
+        const resIdImm = await request(app)
+            .post('/api/time-entries/batch-update')
+            .set('Authorization', 'Bearer ' + adminToken)
+            .send({
+                ids: ['te-val-guard'],
+                updates: { id: 'forged-new-id', status: 'approved' }
+            });
+        assert.strictEqual(resIdImm.status, 200, 'Batch-update succeeds by stripping id');
+        assert.strictEqual(timeEntriesStore.has('te-val-guard'), true, 'Original ID must remain intact');
+        assert.strictEqual(timeEntriesStore.has('forged-new-id'), false, 'Forged ID must not be created');
     });
 
     await t.test('[P1] batch-update recalculates job labor aggregates on real approval and rejection statuses', async () => {
