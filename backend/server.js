@@ -484,18 +484,36 @@ async function repairLegacyC4c2ac3Standards(targetDb) {
 const repairIncompleteStandards = repairLegacyC4c2ac3Standards;
 
 async function backfillTimeEntriesWorkerType(targetDb) {
-    if (!targetDb) return 0;
+    if (!targetDb) return { resolvedCount: 0, unresolvedCount: 0, status: 'no_db' };
     const migrationsColl = targetDb.collection('system_migrations');
     const migrationId = 'backfill_time_entries_worker_type_v1';
 
-    const alreadyApplied = await migrationsColl.findOne({ id: migrationId });
-    if (alreadyApplied) {
-        return 0;
+    const existingMigration = await migrationsColl.findOne({ id: migrationId });
+    if (existingMigration && existingMigration.status === 'completed') {
+        return { resolvedCount: 0, unresolvedCount: 0, status: 'already_completed' };
     }
 
     const timeEntriesColl = targetDb.collection('time-entries');
     const employeesColl = targetDb.collection('employees');
     const subcontractorsColl = targetDb.collection('subcontractors');
+
+    // Pre-fetch all known contractor and employee IDs in ONE query each (eliminates N+1)
+    const [subDocs, empDocs] = await Promise.all([
+        subcontractorsColl.find({}, { projection: { id: 1, _id: 1 } }).toArray(),
+        employeesColl.find({}, { projection: { id: 1, _id: 1 } }).toArray()
+    ]);
+
+    const subIdSet = new Set();
+    subDocs.forEach(s => {
+        if (s.id) subIdSet.add(String(s.id));
+        if (s._id) subIdSet.add(String(s._id));
+    });
+
+    const empIdSet = new Set();
+    empDocs.forEach(e => {
+        if (e.id) empIdSet.add(String(e.id));
+        if (e._id) empIdSet.add(String(e._id));
+    });
 
     const cursor = timeEntriesColl.find({
         $or: [
@@ -505,69 +523,134 @@ async function backfillTimeEntriesWorkerType(targetDb) {
         ]
     });
 
-    const entriesToUpdate = await cursor.toArray();
-    let updatedCount = 0;
+    let batchOps = [];
+    const unresolvedRecords = [];
+    let resolvedCount = 0;
+    let totalScanned = 0;
+    const now = new Date().toISOString();
 
-    for (const entry of entriesToUpdate) {
+    while (await cursor.hasNext()) {
+        const entry = await cursor.next();
+        totalScanned++;
         const empId = entry.employeeId || entry.employee_id;
         let resolvedWorkerType = null;
 
-        if (empId) {
-            const isSub = await subcontractorsColl.findOne({
-                $or: [{ id: empId }, { _id: empId }]
-            });
-            if (isSub) {
-                resolvedWorkerType = 'subcontractor';
-            } else {
-                const isEmp = await employeesColl.findOne({
-                    $or: [{ id: empId }, { _id: empId }]
-                });
-                if (isEmp) {
-                    resolvedWorkerType = 'employee';
-                }
-            }
+        if (empId && subIdSet.has(String(empId))) {
+            resolvedWorkerType = 'subcontractor';
+        } else if (empId && empIdSet.has(String(empId))) {
+            resolvedWorkerType = 'employee';
+        } else if (entry.type === 'subcontractor') {
+            resolvedWorkerType = 'subcontractor';
+        } else if (entry.type === 'employee') {
+            resolvedWorkerType = 'employee';
         }
-
-        if (!resolvedWorkerType) {
-            resolvedWorkerType = entry.type === 'subcontractor' ? 'subcontractor' : 'employee';
-        }
+        // FAIL-SAFE: If not found in either and type is ambiguous (e.g. 'work'),
+        // DO NOT guess 'employee'! Leave resolvedWorkerType as null.
 
         let resolvedActivityType = entry.activityType;
         if (!resolvedActivityType) {
             resolvedActivityType = ['drive', 'work', 'other'].includes(entry.type) ? entry.type : 'work';
         }
 
-        await timeEntriesColl.updateOne(
-            { _id: entry._id },
-            {
-                $set: {
-                    workerType: resolvedWorkerType,
-                    activityType: resolvedActivityType,
-                    updatedAt: entry.updatedAt || new Date().toISOString()
+        if (resolvedWorkerType) {
+            batchOps.push({
+                updateOne: {
+                    filter: { _id: entry._id },
+                    update: {
+                        $set: {
+                            workerType: resolvedWorkerType,
+                            activityType: resolvedActivityType,
+                            updatedAt: entry.updatedAt || now
+                        }
+                    }
+                }
+            });
+            resolvedCount++;
+        } else {
+            // Unresolved record
+            unresolvedRecords.push({
+                entryId: entry.id || String(entry._id),
+                employeeId: empId,
+                type: entry.type,
+                reason: 'Entity not found in employees or subcontractors, and legacy type is ambiguous'
+            });
+
+            // Normalize activityType if missing, but leave workerType untouched
+            if (!entry.activityType && resolvedActivityType) {
+                batchOps.push({
+                    updateOne: {
+                        filter: { _id: entry._id },
+                        update: {
+                            $set: {
+                                activityType: resolvedActivityType,
+                                updatedAt: entry.updatedAt || now
+                            }
+                        }
+                    }
+                });
+            }
+        }
+
+        if (batchOps.length >= 500) {
+            if (typeof timeEntriesColl.bulkWrite === 'function') {
+                await timeEntriesColl.bulkWrite(batchOps, { ordered: false });
+            } else {
+                for (const op of batchOps) {
+                    await timeEntriesColl.updateOne(op.updateOne.filter, op.updateOne.update);
                 }
             }
-        );
-        updatedCount++;
+            batchOps = [];
+        }
     }
+
+    if (batchOps.length > 0) {
+        if (typeof timeEntriesColl.bulkWrite === 'function') {
+            await timeEntriesColl.bulkWrite(batchOps, { ordered: false });
+        } else {
+            for (const op of batchOps) {
+                await timeEntriesColl.updateOne(op.updateOne.filter, op.updateOne.update);
+            }
+        }
+    }
+
+    const migrationLogsCol = targetDb.collection('_migration_logs');
+    if (unresolvedRecords.length > 0) {
+        console.warn(`[MIGRATION] Warning: ${unresolvedRecords.length} time entries could not be resolved to employee/subcontractor.`);
+        if (migrationLogsCol && typeof migrationLogsCol.insertOne === 'function') {
+            await migrationLogsCol.insertOne({
+                migrationId,
+                executedAt: now,
+                totalScanned,
+                resolvedCount,
+                unresolvedCount: unresolvedRecords.length,
+                unresolvedRecords: unresolvedRecords.slice(0, 100)
+            });
+        }
+    }
+
+    const status = unresolvedRecords.length === 0 ? 'completed' : 'partial';
 
     await migrationsColl.updateOne(
         { id: migrationId },
         {
-            $setOnInsert: {
+            $set: {
                 id: migrationId,
-                appliedAt: new Date().toISOString(),
+                status,
+                appliedAt: now,
                 version: 1,
-                updatedCount
+                totalScanned,
+                resolvedCount,
+                unresolvedCount: unresolvedRecords.length
             }
         },
         { upsert: true }
     );
 
-    if (updatedCount > 0) {
-        console.log(`[MIGRATION] Backfilled workerType & activityType for ${updatedCount} legacy time-entry records.`);
+    if (resolvedCount > 0 || unresolvedRecords.length > 0) {
+        console.log(`[MIGRATION] WorkerType backfill finished: ${resolvedCount} resolved, ${unresolvedRecords.length} unresolved (status: ${status}).`);
     }
 
-    return updatedCount;
+    return { totalScanned, resolvedCount, unresolvedCount: unresolvedRecords.length, status };
 }
 
 
@@ -1001,8 +1084,15 @@ const createRouter = (collectionName, options = {}) => {
             let total = null;
 
             if (usePagination && limit > 0) {
-                total = await db.collection(collectionName).countDocuments(query);
-                cursor = cursor.skip(skip).limit(limit);
+                if (typeof db.collection(collectionName).countDocuments === 'function') {
+                    total = await db.collection(collectionName).countDocuments(query);
+                }
+                if (cursor && typeof cursor.skip === 'function') {
+                    cursor = cursor.skip(skip);
+                }
+                if (cursor && typeof cursor.limit === 'function') {
+                    cursor = cursor.limit(limit);
+                }
             }
 
             const items = await cursor.toArray();
@@ -1010,6 +1100,77 @@ const createRouter = (collectionName, options = {}) => {
                 const { _id, ...rest } = item;
                 return { ...rest, id: rest.id || _id.toString() };
             });
+
+            // Authoritative dynamic enrichment for time-entries
+            if (collectionName === 'time-entries') {
+                const missingWorkerTypeEntries = mapped.filter(e => !e.workerType);
+                let subIdSet = new Set();
+                let empIdSet = new Set();
+
+                if (missingWorkerTypeEntries.length > 0 && db && typeof db.collection === 'function') {
+                    const empIdsToCheck = missingWorkerTypeEntries
+                        .map(e => e.employeeId || e.employee_id)
+                        .filter(Boolean);
+
+                    if (empIdsToCheck.length > 0) {
+                        try {
+                            const hasFind = typeof db.collection('subcontractors').find === 'function' && typeof db.collection('employees').find === 'function';
+                            if (hasFind) {
+                                const [subs, emps] = await Promise.all([
+                                    db.collection('subcontractors').find(
+                                        { $or: [{ id: { $in: empIdsToCheck } }, { _id: { $in: empIdsToCheck } }] },
+                                        { projection: { id: 1, _id: 1 } }
+                                    ).toArray(),
+                                    db.collection('employees').find(
+                                        { $or: [{ id: { $in: empIdsToCheck } }, { _id: { $in: empIdsToCheck } }] },
+                                        { projection: { id: 1, _id: 1 } }
+                                    ).toArray()
+                                ]);
+                                subs.forEach(s => {
+                                    if (s.id) subIdSet.add(String(s.id));
+                                    if (s._id) subIdSet.add(String(s._id));
+                                });
+                                emps.forEach(e => {
+                                    if (e.id) empIdSet.add(String(e.id));
+                                    if (e._id) empIdSet.add(String(e._id));
+                                });
+                            } else {
+                                for (const empId of empIdsToCheck) {
+                                    if (typeof db.collection('subcontractors').findOne === 'function') {
+                                        const isSub = await db.collection('subcontractors').findOne({ $or: [{ id: empId }, { _id: empId }] });
+                                        if (isSub) subIdSet.add(String(empId));
+                                    }
+                                    if (typeof db.collection('employees').findOne === 'function') {
+                                        const isEmp = await db.collection('employees').findOne({ $or: [{ id: empId }, { _id: empId }] });
+                                        if (isEmp) empIdSet.add(String(empId));
+                                    }
+                                }
+                            }
+                        } catch (err) {
+                            console.warn('[time-entries GET] Entity enrichment lookup failed:', err.message);
+                        }
+                    }
+                }
+
+                mapped = mapped.map(entry => {
+                    if (!entry.workerType) {
+                        const empId = entry.employeeId || entry.employee_id;
+                        if (empId && subIdSet.has(String(empId))) {
+                            entry.workerType = 'subcontractor';
+                        } else if (empId && empIdSet.has(String(empId))) {
+                            entry.workerType = 'employee';
+                        } else if (entry.type === 'subcontractor') {
+                            entry.workerType = 'subcontractor';
+                        } else if (entry.type === 'employee') {
+                            entry.workerType = 'employee';
+                        }
+                    }
+                    if (!entry.activityType) {
+                        entry.activityType = ['drive', 'work', 'other'].includes(entry.type) ? entry.type : 'work';
+                    }
+                    return entry;
+                });
+            }
 
             // DATA FILTERING: Strip sensitive fields for non-admin roles
             if (req.user && (req.user.role === 'worker' || req.user.role === 'foreman')) {
@@ -1070,6 +1231,45 @@ const createRouter = (collectionName, options = {}) => {
             }
             const { _id, ...rest } = item;
             let mapped = { ...rest, id: rest.id || _id.toString() };
+
+            // Authoritative dynamic enrichment for single time-entry
+            if (collectionName === 'time-entries') {
+                if (!mapped.workerType && db && typeof db.collection === 'function') {
+                    const empId = mapped.employeeId || mapped.employee_id;
+                    if (empId) {
+                        try {
+                            const isSub = await db.collection('subcontractors').findOne(
+                                { $or: [{ id: empId }, { _id: empId }] },
+                                { projection: { id: 1 } }
+                            );
+                            if (isSub) {
+                                mapped.workerType = 'subcontractor';
+                            } else {
+                                const isEmp = await db.collection('employees').findOne(
+                                    { $or: [{ id: empId }, { _id: empId }] },
+                                    { projection: { id: 1 } }
+                                );
+                                if (isEmp) {
+                                    mapped.workerType = 'employee';
+                                } else if (mapped.type === 'subcontractor') {
+                                    mapped.workerType = 'subcontractor';
+                                } else if (mapped.type === 'employee') {
+                                    mapped.workerType = 'employee';
+                                }
+                            }
+                        } catch (err) {
+                            console.warn('[time-entries GET /:id] Entity enrichment failed:', err.message);
+                        }
+                    } else if (mapped.type === 'subcontractor') {
+                        mapped.workerType = 'subcontractor';
+                    } else if (mapped.type === 'employee') {
+                        mapped.workerType = 'employee';
+                    }
+                }
+                if (!mapped.activityType) {
+                    mapped.activityType = ['drive', 'work', 'other'].includes(mapped.type) ? mapped.type : 'work';
+                }
+            }
 
             // Apply same security role filtering as GET All
             if (req.user && (req.user.role === 'worker' || req.user.role === 'foreman')) {

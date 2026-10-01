@@ -5,12 +5,13 @@ import { PieChart, Pie, Cell, ResponsiveContainer, BarChart, Bar, XAxis, YAxis, 
 import { Download } from 'lucide-react';
 
 export const ReportsView = () => {
-    const { timeEntries, subcontractors } = useTiCo();
+    const { timeEntries, subcontractors, employees } = useTiCo();
     const { jobs } = useJobs();
     const [viewMode, setViewMode] = useState<'project' | 'category'>('project');
 
-    // Build Set of known subcontractor IDs for reliable category classification of legacy entries
+    // Build Sets of known subcontractor and employee IDs for reliable category classification
     const subIds = useMemo(() => new Set((subcontractors || []).map(s => s.id)), [subcontractors]);
+    const empIds = useMemo(() => new Set((employees || []).map(e => e.id)), [employees]);
 
     // --- Analytics Data ---
     const data = useMemo(() => {
@@ -19,9 +20,10 @@ export const ReportsView = () => {
         jobs.forEach(j => projectCosts.set(j.id, 0));
         projectCosts.set('other', 0); // For entries without valid job reference or misc
 
-        // Group by Category (Employee vs Subcontractor)
+        // Group by Category (Employee vs Subcontractor vs Unresolved)
         let empCost = 0;
         let subCost = 0;
+        let unresolvedCost = 0;
 
         timeEntries.forEach(entry => {
             const cost = entry.cost || (entry.hours * (entry.rate || 0));
@@ -33,14 +35,18 @@ export const ReportsView = () => {
                 projectCosts.set('other', projectCosts.get('other')! + cost);
             }
 
-            // Category Aggregation: authoritative workerType with fallback to subcontractor IDs and legacy type
-            const isSub = entry.workerType
-                ? entry.workerType === 'subcontractor'
-                : (subIds.has(entry.employeeId) || entry.type === 'subcontractor');
+            // Category Aggregation: authoritative workerType with fallback to sub/emp IDs and explicit legacy type
+            const isSub = entry.workerType === 'subcontractor'
+                || (!entry.workerType && (subIds.has(entry.employeeId) || entry.type === 'subcontractor'));
+            const isEmp = entry.workerType === 'employee'
+                || (!entry.workerType && (empIds.has(entry.employeeId) || entry.type === 'employee'));
+
             if (isSub) {
                 subCost += cost;
-            } else {
+            } else if (isEmp) {
                 empCost += cost;
+            } else {
+                unresolvedCost += cost;
             }
         });
 
@@ -61,9 +67,12 @@ export const ReportsView = () => {
             { name: 'Pracownicy', value: empCost },
             { name: 'Podwykonawcy', value: subCost }
         ];
+        if (unresolvedCost > 0) {
+            categoryChartData.push({ name: 'Nierozpoznane', value: unresolvedCost });
+        }
 
-        return { projectChartData, categoryChartData, totalCost: empCost + subCost };
-    }, [timeEntries, jobs, subIds]);
+        return { projectChartData, categoryChartData, totalCost: empCost + subCost + unresolvedCost };
+    }, [timeEntries, jobs, subIds, empIds]);
 
     const COLORS = ['#0088FE', '#00C49F', '#FFBB28', '#FF8042', '#8884d8', '#82ca9d'];
 

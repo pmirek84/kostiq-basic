@@ -46,15 +46,21 @@ test('Shared Contracts: TimeEntry JSON Schema, Statuses and Payload Conformity',
     const store = new Map();
 
     const mockTimeEntriesColl = {
+        countDocuments: async () => store.size,
         findOne: async (f) => store.get(f.id) || null,
-        find: (filter) => ({
-            toArray: async () => {
-                if (filter && filter.id && filter.id.$in) {
-                    return filter.id.$in.map(id => store.get(id)).filter(Boolean);
+        find: (filter) => {
+            const cursor = {
+                skip: () => cursor,
+                limit: () => cursor,
+                toArray: async () => {
+                    if (filter && filter.id && filter.id.$in) {
+                        return filter.id.$in.map(id => store.get(id)).filter(Boolean);
+                    }
+                    return Array.from(store.values());
                 }
-                return Array.from(store.values());
-            }
-        }),
+            };
+            return cursor;
+        },
         insertOne: async (doc) => {
             store.set(doc.id, { ...doc });
             return { insertedId: doc.id };
@@ -93,12 +99,18 @@ test('Shared Contracts: TimeEntry JSON Schema, Statuses and Payload Conformity',
     };
 
     const mockEmployeesColl = {
+        find: (f) => ({
+            toArray: async () => [
+                { id: 'test-user', hourlyRate: 50, dailyRate: 400, projectRate: 1500 },
+                { id: 'admin-1', hourlyRate: 50, dailyRate: 400, projectRate: 1500 }
+            ]
+        }),
         findOne: async (f) => {
             const id = f.$or ? f.$or[0].id : f.id;
             if (id === 'emp-db-error') {
                 throw new Error('Database query failure');
             }
-            if (id === 'emp-not-found' || id === 'emp-and-sub-not-found' || id === 'does-not-exist' || (id && id.startsWith('sub-'))) {
+            if (id === 'emp-not-found' || id === 'emp-and-sub-not-found' || id === 'does-not-exist' || id === 'completely-unknown-entity' || (id && id.startsWith('sub-'))) {
                 return null;
             }
             if (id === 'test-user') {
@@ -109,6 +121,14 @@ test('Shared Contracts: TimeEntry JSON Schema, Statuses and Payload Conformity',
     };
 
     const mockSubcontractorsColl = {
+        find: (f) => ({
+            toArray: async () => [
+                { id: 'sub-1', rate: 250, defaultHourlyRate: 250, settlementType: 'godzina' },
+                { id: 'sub-m2', rate: 80, settlementType: 'm2' },
+                { id: 'sub-mb', rate: 60, settlementType: 'mb' },
+                { id: 'sub-ryczalt', rate: 5000, settlementType: 'ryczałt' }
+            ]
+        }),
         findOne: async (f) => {
             const id = f.$or ? f.$or[0].id : f.id;
             if (id === 'sub-1') {
@@ -911,35 +931,45 @@ test('Shared Contracts: TimeEntry JSON Schema, Statuses and Payload Conformity',
         assert.match(resAdminEmptyEmp.body.error, /employeeId nie może być puste/);
     });
 
-    await t.test('[P2] Historical migration backfill: backfills workerType and activityType for legacy entries and GET enriches missing values', async () => {
-        // Setup legacy entries in a simulated targetDb with system_migrations
+    await t.test('[P1 & P2] Historical migration backfill: bulkWrite batching, no N+1, safe unresolved handling, and no guessing', async () => {
         const legacyEntries = [
             {
                 _id: 'legacy-sub-entry',
                 id: 'legacy-sub-entry',
-                employeeId: 'sub-1', // points to subcontractor
-                jobId: 'job-1',
-                type: 'work', // legacy type with activity instead of worker
-                hours: 8,
-                billingType: 'hourly',
-                cost: 400
-                // workerType and activityType are missing
-            },
-            {
-                _id: 'legacy-emp-entry',
-                id: 'legacy-emp-entry',
-                employeeId: 'admin-1', // points to employee
+                employeeId: 'sub-1', // exists in subcontractors
                 jobId: 'job-1',
                 type: 'work',
                 hours: 8,
                 billingType: 'hourly',
                 cost: 400
-                // workerType and activityType are missing
+            },
+            {
+                _id: 'legacy-emp-entry',
+                id: 'legacy-emp-entry',
+                employeeId: 'admin-1', // exists in employees
+                jobId: 'job-1',
+                type: 'work',
+                hours: 8,
+                billingType: 'hourly',
+                cost: 400
+            },
+            {
+                _id: 'legacy-orphan-entry',
+                id: 'legacy-orphan-entry',
+                employeeId: 'orphan-contractor-999', // NOT in subcontractors NOR employees
+                jobId: 'job-1',
+                type: 'work', // ambiguous activity type
+                hours: 8,
+                billingType: 'hourly',
+                cost: 400
             }
         ];
 
         const legacyStore = new Map(legacyEntries.map(e => [e._id, { ...e }]));
         const migrationsStore = new Map();
+        const migrationLogs = [];
+        const dynamicSubcontractors = [{ id: 'sub-1', name: 'Podwykonawca 1' }];
+        const dynamicEmployees = [{ id: 'admin-1', name: 'Pracownik 1' }];
 
         const mockMigrationDb = {
             collection: (name) => {
@@ -947,62 +977,177 @@ test('Shared Contracts: TimeEntry JSON Schema, Statuses and Payload Conformity',
                     return {
                         findOne: async (query) => migrationsStore.get(query.id) || null,
                         updateOne: async (query, update, opts) => {
-                            if (opts && opts.upsert && !migrationsStore.has(query.id)) {
-                                migrationsStore.set(query.id, { id: query.id, ...update.$setOnInsert });
-                            }
+                            const existing = migrationsStore.get(query.id) || {};
+                            const merged = { ...existing, ...update.$set, id: query.id };
+                            migrationsStore.set(query.id, merged);
+                        }
+                    };
+                }
+                if (name === '_migration_logs') {
+                    return {
+                        insertOne: async (doc) => {
+                            migrationLogs.push(doc);
                         }
                     };
                 }
                 if (name === 'time-entries') {
                     return {
-                        find: (query) => ({
-                            toArray: async () => Array.from(legacyStore.values()).filter(e => !e.workerType)
-                        }),
-                        updateOne: async (filter, update) => {
-                            const doc = legacyStore.get(filter._id);
-                            if (doc && update.$set) {
-                                Object.assign(doc, update.$set);
+                        find: (query) => {
+                            const unmigrated = Array.from(legacyStore.values()).filter(e => !e.workerType);
+                            let index = 0;
+                            return {
+                                hasNext: async () => index < unmigrated.length,
+                                next: async () => unmigrated[index++]
+                            };
+                        },
+                        bulkWrite: async (ops) => {
+                            for (const op of ops) {
+                                const filter = op.updateOne.filter;
+                                const update = op.updateOne.update;
+                                const doc = legacyStore.get(filter._id);
+                                if (doc && update.$set) {
+                                    Object.assign(doc, update.$set);
+                                }
                             }
                         }
                     };
                 }
                 if (name === 'subcontractors') {
                     return {
-                        findOne: async (query) => {
-                            const qId = query.$or?.[0]?.id;
-                            if (qId === 'sub-1') return { id: 'sub-1', name: 'Podwykonawca 1' };
-                            return null;
-                        }
+                        find: () => ({
+                            toArray: async () => dynamicSubcontractors
+                        })
                     };
                 }
                 if (name === 'employees') {
                     return {
-                        findOne: async (query) => {
-                            const qId = query.$or?.[0]?.id;
-                            if (qId === 'admin-1') return { id: 'admin-1', name: 'Pracownik 1' };
-                            return null;
-                        }
+                        find: () => ({
+                            toArray: async () => dynamicEmployees
+                        })
                     };
                 }
                 return { findOne: async () => null };
             }
         };
 
-        // Run backfill
-        const updatedCount = await backfillTimeEntriesWorkerType(mockMigrationDb);
-        assert.strictEqual(updatedCount, 2, 'Should backfill exactly 2 legacy entries');
+        // Run initial backfill
+        const result1 = await backfillTimeEntriesWorkerType(mockMigrationDb);
+        assert.strictEqual(result1.resolvedCount, 2, 'Should resolve sub-1 and admin-1');
+        assert.strictEqual(result1.unresolvedCount, 1, 'orphan-contractor-999 must remain unresolved');
+        assert.strictEqual(result1.status, 'partial', 'Status must be partial while unresolved entries remain');
 
-        const migratedSub = legacyStore.get('legacy-sub-entry');
-        assert.strictEqual(migratedSub.workerType, 'subcontractor', 'Subcontractor ID must resolve to workerType: subcontractor even with legacy type: work');
-        assert.strictEqual(migratedSub.activityType, 'work');
+        // Check resolved records
+        const sub = legacyStore.get('legacy-sub-entry');
+        assert.strictEqual(sub.workerType, 'subcontractor');
+        assert.strictEqual(sub.activityType, 'work');
 
-        const migratedEmp = legacyStore.get('legacy-emp-entry');
-        assert.strictEqual(migratedEmp.workerType, 'employee', 'Employee ID must resolve to workerType: employee');
-        assert.strictEqual(migratedEmp.activityType, 'work');
+        const emp = legacyStore.get('legacy-emp-entry');
+        assert.strictEqual(emp.workerType, 'employee');
+        assert.strictEqual(emp.activityType, 'work');
 
-        // Running again is a no-op (idempotent via system_migrations)
-        const secondRun = await backfillTimeEntriesWorkerType(mockMigrationDb);
-        assert.strictEqual(secondRun, 0, 'Second run must be a no-op due to migration marker');
+        // CRITICAL CHECK: Unresolved record must NEVER be guessed as employee!
+        const orphan = legacyStore.get('legacy-orphan-entry');
+        assert.strictEqual(orphan.workerType, undefined, 'Orphan record workerType must NOT be guessed as employee');
+        assert.strictEqual(orphan.activityType, 'work', 'Activity type should still be normalized');
+
+        // Verify audit record logged in _migration_logs
+        assert.strictEqual(migrationLogs.length, 1);
+        assert.strictEqual(migrationLogs[0].unresolvedCount, 1);
+        assert.strictEqual(migrationLogs[0].unresolvedRecords[0].employeeId, 'orphan-contractor-999');
+
+        // Now simulate the missing contractor being restored in subcontractors dictionary
+        dynamicSubcontractors.push({ id: 'orphan-contractor-999', name: 'Przywrócony Podwykonawca' });
+
+        // Second run re-attempts unresolved records (since previous status was partial)
+        const result2 = await backfillTimeEntriesWorkerType(mockMigrationDb);
+        assert.strictEqual(result2.resolvedCount, 1, 'Should now resolve the restored contractor');
+        assert.strictEqual(result2.unresolvedCount, 0, 'No more unresolved entries');
+        assert.strictEqual(result2.status, 'completed', 'Status must now be completed');
+        assert.strictEqual(orphan.workerType, 'subcontractor', 'Now correctly resolved to subcontractor');
+
+        // Third run: no-op since status is completed
+        const result3 = await backfillTimeEntriesWorkerType(mockMigrationDb);
+        assert.strictEqual(result3.status, 'already_completed');
+    });
+
+    await t.test('[P2] GET /api/time-entries and GET /api/time-entries/:id dynamically enrich missing workerType and activityType', async () => {
+        // Place unmigrated records into the live test store
+        store.set('get-enrich-sub', {
+            id: 'get-enrich-sub',
+            employeeId: 'sub-1', // known subcontractor in mock DB
+            jobId: 'job-1',
+            type: 'drive', // legacy activity without workerType
+            hours: 3,
+            billingType: 'hourly',
+            cost: 150
+            // workerType is omitted
+        });
+
+        store.set('get-enrich-emp', {
+            id: 'get-enrich-emp',
+            employeeId: 'test-user', // known employee in mock DB
+            jobId: 'job-1',
+            type: 'work',
+            hours: 4,
+            billingType: 'hourly',
+            cost: 200
+            // workerType is omitted
+        });
+
+        store.set('get-enrich-unknown', {
+            id: 'get-enrich-unknown',
+            employeeId: 'completely-unknown-entity',
+            jobId: 'job-1',
+            type: 'work',
+            hours: 2,
+            billingType: 'hourly',
+            cost: 100
+            // workerType is omitted
+        });
+
+        // 1. GET /api/time-entries (list)
+        const resList = await request(app)
+            .get('/api/time-entries')
+            .set('Authorization', 'Bearer ' + adminToken);
+        assert.strictEqual(resList.status, 200);
+
+        const listItems = resList.body.data || resList.body;
+        const subItem = listItems.find(it => it.id === 'get-enrich-sub');
+        assert.ok(subItem, 'get-enrich-sub must be returned in list');
+        assert.strictEqual(subItem.workerType, 'subcontractor', 'GET must enrich workerType to subcontractor');
+        assert.strictEqual(subItem.activityType, 'drive', 'GET must enrich activityType to drive');
+
+        const empItem = listItems.find(it => it.id === 'get-enrich-emp');
+        assert.ok(empItem, 'get-enrich-emp must be returned in list');
+        assert.strictEqual(empItem.workerType, 'employee', 'GET must enrich workerType to employee');
+        assert.strictEqual(empItem.activityType, 'work', 'GET must enrich activityType to work');
+
+        const unknownItem = listItems.find(it => it.id === 'get-enrich-unknown');
+        assert.ok(unknownItem, 'get-enrich-unknown must be returned in list');
+        assert.strictEqual(unknownItem.workerType, undefined, 'GET must NOT fabricate employee for unknown entity');
+        assert.strictEqual(unknownItem.activityType, 'work', 'GET must still normalize activityType to work');
+
+        // 2. GET /api/time-entries/:id (single entry)
+        const resSingleSub = await request(app)
+            .get('/api/time-entries/get-enrich-sub')
+            .set('Authorization', 'Bearer ' + adminToken);
+        assert.strictEqual(resSingleSub.status, 200);
+        assert.strictEqual(resSingleSub.body.workerType, 'subcontractor');
+        assert.strictEqual(resSingleSub.body.activityType, 'drive');
+
+        const resSingleEmp = await request(app)
+            .get('/api/time-entries/get-enrich-emp')
+            .set('Authorization', 'Bearer ' + adminToken);
+        assert.strictEqual(resSingleEmp.status, 200);
+        assert.strictEqual(resSingleEmp.body.workerType, 'employee');
+        assert.strictEqual(resSingleEmp.body.activityType, 'work');
+
+        const resSingleUnknown = await request(app)
+            .get('/api/time-entries/get-enrich-unknown')
+            .set('Authorization', 'Bearer ' + adminToken);
+        assert.strictEqual(resSingleUnknown.status, 200);
+        assert.strictEqual(resSingleUnknown.body.workerType, undefined, 'GET single must NOT fabricate employee');
+        assert.strictEqual(resSingleUnknown.body.activityType, 'work');
     });
 
     await t.test('automated generation guard: verifies timeEntry.generated.ts is strictly up to date with timeEntry.schema.json', async () => {
