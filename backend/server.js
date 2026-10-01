@@ -524,7 +524,9 @@ async function backfillTimeEntriesWorkerType(targetDb) {
     });
 
     let batchOps = [];
-    const unresolvedRecords = [];
+    const MAX_UNRESOLVED_SAMPLES = 100;
+    const unresolvedSamples = [];
+    let unresolvedCount = 0;
     let resolvedCount = 0;
     let totalScanned = 0;
     const now = new Date().toISOString();
@@ -535,17 +537,28 @@ async function backfillTimeEntriesWorkerType(targetDb) {
         const empId = entry.employeeId || entry.employee_id;
         let resolvedWorkerType = null;
 
-        if (empId && subIdSet.has(String(empId))) {
+        const inSub = empId && subIdSet.has(String(empId));
+        const inEmp = empId && empIdSet.has(String(empId));
+
+        if (inSub && inEmp) {
+            // Collision between employee and subcontractor collections
+            if (entry.type === 'subcontractor') {
+                resolvedWorkerType = 'subcontractor';
+            } else if (entry.type === 'employee') {
+                resolvedWorkerType = 'employee';
+            } else {
+                // Ambiguous collision - DO NOT arbitrarily choose one
+                resolvedWorkerType = null;
+            }
+        } else if (inSub) {
             resolvedWorkerType = 'subcontractor';
-        } else if (empId && empIdSet.has(String(empId))) {
+        } else if (inEmp) {
             resolvedWorkerType = 'employee';
         } else if (entry.type === 'subcontractor') {
             resolvedWorkerType = 'subcontractor';
         } else if (entry.type === 'employee') {
             resolvedWorkerType = 'employee';
         }
-        // FAIL-SAFE: If not found in either and type is ambiguous (e.g. 'work'),
-        // DO NOT guess 'employee'! Leave resolvedWorkerType as null.
 
         let resolvedActivityType = entry.activityType;
         if (!resolvedActivityType) {
@@ -567,13 +580,18 @@ async function backfillTimeEntriesWorkerType(targetDb) {
             });
             resolvedCount++;
         } else {
-            // Unresolved record
-            unresolvedRecords.push({
-                entryId: entry.id || String(entry._id),
-                employeeId: empId,
-                type: entry.type,
-                reason: 'Entity not found in employees or subcontractors, and legacy type is ambiguous'
-            });
+            // Unresolved record (collision or not found in either collection)
+            unresolvedCount++;
+            if (unresolvedSamples.length < MAX_UNRESOLVED_SAMPLES) {
+                unresolvedSamples.push({
+                    entryId: entry.id || String(entry._id),
+                    employeeId: empId,
+                    type: entry.type,
+                    reason: inSub && inEmp
+                        ? 'Identifier collision: ID exists in both employees and subcontractors with ambiguous type'
+                        : 'Entity not found in employees or subcontractors, and legacy type is ambiguous'
+                });
+            }
 
             // Normalize activityType if missing, but leave workerType untouched
             if (!entry.activityType && resolvedActivityType) {
@@ -614,21 +632,21 @@ async function backfillTimeEntriesWorkerType(targetDb) {
     }
 
     const migrationLogsCol = targetDb.collection('_migration_logs');
-    if (unresolvedRecords.length > 0) {
-        console.warn(`[MIGRATION] Warning: ${unresolvedRecords.length} time entries could not be resolved to employee/subcontractor.`);
+    if (unresolvedCount > 0) {
+        console.warn(`[MIGRATION] Warning: ${unresolvedCount} time entries could not be resolved to employee/subcontractor.`);
         if (migrationLogsCol && typeof migrationLogsCol.insertOne === 'function') {
             await migrationLogsCol.insertOne({
                 migrationId,
                 executedAt: now,
                 totalScanned,
                 resolvedCount,
-                unresolvedCount: unresolvedRecords.length,
-                unresolvedRecords: unresolvedRecords.slice(0, 100)
+                unresolvedCount,
+                unresolvedRecords: unresolvedSamples
             });
         }
     }
 
-    const status = unresolvedRecords.length === 0 ? 'completed' : 'partial';
+    const status = unresolvedCount === 0 ? 'completed' : 'partial';
 
     await migrationsColl.updateOne(
         { id: migrationId },
@@ -640,17 +658,17 @@ async function backfillTimeEntriesWorkerType(targetDb) {
                 version: 1,
                 totalScanned,
                 resolvedCount,
-                unresolvedCount: unresolvedRecords.length
+                unresolvedCount
             }
         },
         { upsert: true }
     );
 
-    if (resolvedCount > 0 || unresolvedRecords.length > 0) {
-        console.log(`[MIGRATION] WorkerType backfill finished: ${resolvedCount} resolved, ${unresolvedRecords.length} unresolved (status: ${status}).`);
+    if (resolvedCount > 0 || unresolvedCount > 0) {
+        console.log(`[MIGRATION] WorkerType backfill finished: ${resolvedCount} resolved, ${unresolvedCount} unresolved (status: ${status}).`);
     }
 
-    return { totalScanned, resolvedCount, unresolvedCount: unresolvedRecords.length, status };
+    return { totalScanned, resolvedCount, unresolvedCount, status };
 }
 
 
@@ -1155,9 +1173,18 @@ const createRouter = (collectionName, options = {}) => {
                 mapped = mapped.map(entry => {
                     if (!entry.workerType) {
                         const empId = entry.employeeId || entry.employee_id;
-                        if (empId && subIdSet.has(String(empId))) {
+                        const inSub = empId && subIdSet.has(String(empId));
+                        const inEmp = empId && empIdSet.has(String(empId));
+
+                        if (inSub && inEmp) {
+                            if (entry.type === 'subcontractor') {
+                                entry.workerType = 'subcontractor';
+                            } else if (entry.type === 'employee') {
+                                entry.workerType = 'employee';
+                            }
+                        } else if (inSub) {
                             entry.workerType = 'subcontractor';
-                        } else if (empId && empIdSet.has(String(empId))) {
+                        } else if (inEmp) {
                             entry.workerType = 'employee';
                         } else if (entry.type === 'subcontractor') {
                             entry.workerType = 'subcontractor';
@@ -1238,24 +1265,31 @@ const createRouter = (collectionName, options = {}) => {
                     const empId = mapped.employeeId || mapped.employee_id;
                     if (empId) {
                         try {
-                            const isSub = await db.collection('subcontractors').findOne(
-                                { $or: [{ id: empId }, { _id: empId }] },
-                                { projection: { id: 1 } }
-                            );
-                            if (isSub) {
-                                mapped.workerType = 'subcontractor';
-                            } else {
-                                const isEmp = await db.collection('employees').findOne(
+                            const [isSub, isEmp] = await Promise.all([
+                                db.collection('subcontractors').findOne(
                                     { $or: [{ id: empId }, { _id: empId }] },
                                     { projection: { id: 1 } }
-                                );
-                                if (isEmp) {
-                                    mapped.workerType = 'employee';
-                                } else if (mapped.type === 'subcontractor') {
+                                ),
+                                db.collection('employees').findOne(
+                                    { $or: [{ id: empId }, { _id: empId }] },
+                                    { projection: { id: 1 } }
+                                )
+                            ]);
+
+                            if (isSub && isEmp) {
+                                if (mapped.type === 'subcontractor') {
                                     mapped.workerType = 'subcontractor';
                                 } else if (mapped.type === 'employee') {
                                     mapped.workerType = 'employee';
                                 }
+                            } else if (isSub) {
+                                mapped.workerType = 'subcontractor';
+                            } else if (isEmp) {
+                                mapped.workerType = 'employee';
+                            } else if (mapped.type === 'subcontractor') {
+                                mapped.workerType = 'subcontractor';
+                            } else if (mapped.type === 'employee') {
+                                mapped.workerType = 'employee';
                             }
                         } catch (err) {
                             console.warn('[time-entries GET /:id] Entity enrichment failed:', err.message);

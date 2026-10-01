@@ -35,11 +35,28 @@ export const ReportsView = () => {
                 projectCosts.set('other', projectCosts.get('other')! + cost);
             }
 
-            // Category Aggregation: authoritative workerType with fallback to sub/emp IDs and explicit legacy type
-            const isSub = entry.workerType === 'subcontractor'
-                || (!entry.workerType && (subIds.has(entry.employeeId) || entry.type === 'subcontractor'));
-            const isEmp = entry.workerType === 'employee'
-                || (!entry.workerType && (empIds.has(entry.employeeId) || entry.type === 'employee'));
+            // Category Aggregation: authoritative workerType with fallback to sub/emp IDs and collision resolution
+            let isSub = false;
+            let isEmp = false;
+
+            if (entry.workerType === 'subcontractor') {
+                isSub = true;
+            } else if (entry.workerType === 'employee') {
+                isEmp = true;
+            } else {
+                const inSub = subIds.has(entry.employeeId);
+                const inEmp = empIds.has(entry.employeeId);
+
+                if (inSub && inEmp) {
+                    if (entry.type === 'subcontractor') isSub = true;
+                    else if (entry.type === 'employee') isEmp = true;
+                    // Otherwise remains unresolved
+                } else if (inSub || entry.type === 'subcontractor') {
+                    isSub = true;
+                } else if (inEmp || entry.type === 'employee') {
+                    isEmp = true;
+                }
+            }
 
             if (isSub) {
                 subCost += cost;

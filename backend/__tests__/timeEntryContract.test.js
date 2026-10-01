@@ -102,7 +102,8 @@ test('Shared Contracts: TimeEntry JSON Schema, Statuses and Payload Conformity',
         find: (f) => ({
             toArray: async () => [
                 { id: 'test-user', hourlyRate: 50, dailyRate: 400, projectRate: 1500 },
-                { id: 'admin-1', hourlyRate: 50, dailyRate: 400, projectRate: 1500 }
+                { id: 'admin-1', hourlyRate: 50, dailyRate: 400, projectRate: 1500 },
+                { id: 'collision-user', hourlyRate: 50, dailyRate: 400, projectRate: 1500 }
             ]
         }),
         findOne: async (f) => {
@@ -116,6 +117,9 @@ test('Shared Contracts: TimeEntry JSON Schema, Statuses and Payload Conformity',
             if (id === 'test-user') {
                 return { id: 'test-user', hourlyRate: 50, dailyRate: 400, projectRate: 1500 };
             }
+            if (id === 'collision-user') {
+                return { id: 'collision-user', hourlyRate: 50, dailyRate: 400, projectRate: 1500 };
+            }
             return { id: id || 'admin-1', hourlyRate: 50, dailyRate: 400, projectRate: 1500 };
         }
     };
@@ -126,13 +130,17 @@ test('Shared Contracts: TimeEntry JSON Schema, Statuses and Payload Conformity',
                 { id: 'sub-1', rate: 250, defaultHourlyRate: 250, settlementType: 'godzina' },
                 { id: 'sub-m2', rate: 80, settlementType: 'm2' },
                 { id: 'sub-mb', rate: 60, settlementType: 'mb' },
-                { id: 'sub-ryczalt', rate: 5000, settlementType: 'ryczałt' }
+                { id: 'sub-ryczalt', rate: 5000, settlementType: 'ryczałt' },
+                { id: 'collision-user', rate: 250, defaultHourlyRate: 250, settlementType: 'godzina' }
             ]
         }),
         findOne: async (f) => {
             const id = f.$or ? f.$or[0].id : f.id;
             if (id === 'sub-1') {
                 return { id: 'sub-1', rate: 250, defaultHourlyRate: 250, settlementType: 'godzina' };
+            }
+            if (id === 'collision-user') {
+                return { id: 'collision-user', rate: 250, defaultHourlyRate: 250, settlementType: 'godzina' };
             }
             if (id === 'sub-m2') {
                 return { id: 'sub-m2', rate: 80, settlementType: 'm2' };
@@ -1070,6 +1078,126 @@ test('Shared Contracts: TimeEntry JSON Schema, Statuses and Payload Conformity',
         assert.strictEqual(result3.status, 'already_completed');
     });
 
+    await t.test('[P1 & P2] Historical migration backfill: ID collision resolution and memory buffer capping', async () => {
+        const collisionSubcontractors = [
+            { id: 'collision-id', name: 'Podwykonawca Kolizyjny' }
+        ];
+        const collisionEmployees = [
+            { id: 'collision-id', name: 'Pracownik Kolizyjny' }
+        ];
+
+        // 1. Ambiguous collision (type: 'work') -> must remain unresolved
+        // 2. Explicit collision with type: 'subcontractor' -> resolves to subcontractor
+        // 3. Explicit collision with type: 'employee' -> resolves to employee
+        // 4. Over 100 unresolved records -> memory buffer capped at 100 samples
+        const testEntries = [
+            {
+                _id: 'col-ambiguous',
+                id: 'col-ambiguous',
+                employeeId: 'collision-id',
+                jobId: 'job-1',
+                type: 'work',
+                hours: 8
+            },
+            {
+                _id: 'col-sub',
+                id: 'col-sub',
+                employeeId: 'collision-id',
+                jobId: 'job-1',
+                type: 'subcontractor',
+                hours: 8
+            },
+            {
+                _id: 'col-emp',
+                id: 'col-emp',
+                employeeId: 'collision-id',
+                jobId: 'job-1',
+                type: 'employee',
+                hours: 8
+            }
+        ];
+
+        // Add 120 orphan entries to verify capping at 100
+        for (let i = 0; i < 120; i++) {
+            testEntries.push({
+                _id: `orphan-${i}`,
+                id: `orphan-${i}`,
+                employeeId: `unknown-entity-${i}`,
+                jobId: 'job-1',
+                type: 'work',
+                hours: 8
+            });
+        }
+
+        const entriesStore = new Map(testEntries.map(e => [e._id, { ...e }]));
+        const migrationsStore = new Map();
+        const logs = [];
+
+        const mockDb = {
+            collection: (name) => {
+                if (name === 'system_migrations') {
+                    return {
+                        findOne: async (query) => migrationsStore.get(query.id) || null,
+                        updateOne: async (query, update) => {
+                            const existing = migrationsStore.get(query.id) || {};
+                            migrationsStore.set(query.id, { ...existing, ...update.$set, id: query.id });
+                        }
+                    };
+                }
+                if (name === '_migration_logs') {
+                    return {
+                        insertOne: async (doc) => { logs.push(doc); }
+                    };
+                }
+                if (name === 'time-entries') {
+                    return {
+                        find: () => {
+                            const unmigrated = Array.from(entriesStore.values()).filter(e => !e.workerType);
+                            let idx = 0;
+                            return {
+                                hasNext: async () => idx < unmigrated.length,
+                                next: async () => unmigrated[idx++]
+                            };
+                        },
+                        bulkWrite: async (ops) => {
+                            for (const op of ops) {
+                                const doc = entriesStore.get(op.updateOne.filter._id);
+                                if (doc && op.updateOne.update.$set) {
+                                    Object.assign(doc, op.updateOne.update.$set);
+                                }
+                            }
+                        }
+                    };
+                }
+                if (name === 'subcontractors') {
+                    return { find: () => ({ toArray: async () => collisionSubcontractors }) };
+                }
+                if (name === 'employees') {
+                    return { find: () => ({ toArray: async () => collisionEmployees }) };
+                }
+                return { findOne: async () => null };
+            }
+        };
+
+        const result = await backfillTimeEntriesWorkerType(mockDb);
+
+        // 2 resolved: col-sub and col-emp
+        assert.strictEqual(result.resolvedCount, 2);
+        // 121 unresolved: col-ambiguous + 120 orphans
+        assert.strictEqual(result.unresolvedCount, 121);
+        assert.strictEqual(result.status, 'partial');
+
+        // Check resolutions
+        assert.strictEqual(entriesStore.get('col-ambiguous').workerType, undefined, 'Ambiguous collision must remain unresolved');
+        assert.strictEqual(entriesStore.get('col-sub').workerType, 'subcontractor', 'Explicit subcontractor type resolves collision');
+        assert.strictEqual(entriesStore.get('col-emp').workerType, 'employee', 'Explicit employee type resolves collision');
+
+        // Check memory buffer capping in logs
+        assert.strictEqual(logs.length, 1);
+        assert.strictEqual(logs[0].unresolvedCount, 121, 'unresolvedCount integer accurately reflects total 121');
+        assert.strictEqual(logs[0].unresolvedRecords.length, 100, 'unresolvedRecords sample array strictly capped at 100');
+    });
+
     await t.test('[P2] GET /api/time-entries and GET /api/time-entries/:id dynamically enrich missing workerType and activityType', async () => {
         // Place unmigrated records into the live test store
         store.set('get-enrich-sub', {
@@ -1103,6 +1231,36 @@ test('Shared Contracts: TimeEntry JSON Schema, Statuses and Payload Conformity',
             billingType: 'hourly',
             cost: 100
             // workerType is omitted
+        });
+
+        store.set('get-enrich-col-ambiguous', {
+            id: 'get-enrich-col-ambiguous',
+            employeeId: 'collision-user',
+            jobId: 'job-1',
+            type: 'work',
+            hours: 4,
+            billingType: 'hourly',
+            cost: 200
+        });
+
+        store.set('get-enrich-col-sub', {
+            id: 'get-enrich-col-sub',
+            employeeId: 'collision-user',
+            jobId: 'job-1',
+            type: 'subcontractor',
+            hours: 4,
+            billingType: 'hourly',
+            cost: 200
+        });
+
+        store.set('get-enrich-col-emp', {
+            id: 'get-enrich-col-emp',
+            employeeId: 'collision-user',
+            jobId: 'job-1',
+            type: 'employee',
+            hours: 4,
+            billingType: 'hourly',
+            cost: 200
         });
 
         // 1. GET /api/time-entries (list)
@@ -1148,6 +1306,39 @@ test('Shared Contracts: TimeEntry JSON Schema, Statuses and Payload Conformity',
         assert.strictEqual(resSingleUnknown.status, 200);
         assert.strictEqual(resSingleUnknown.body.workerType, undefined, 'GET single must NOT fabricate employee');
         assert.strictEqual(resSingleUnknown.body.activityType, 'work');
+
+        // Assert GET list collision handling
+        const colAmbItem = listItems.find(it => it.id === 'get-enrich-col-ambiguous');
+        assert.ok(colAmbItem);
+        assert.strictEqual(colAmbItem.workerType, undefined, 'GET list must not resolve ambiguous collision');
+        assert.strictEqual(colAmbItem.activityType, 'work');
+
+        const colSubItem = listItems.find(it => it.id === 'get-enrich-col-sub');
+        assert.ok(colSubItem);
+        assert.strictEqual(colSubItem.workerType, 'subcontractor', 'GET list resolves collision with explicit subcontractor type');
+
+        const colEmpItem = listItems.find(it => it.id === 'get-enrich-col-emp');
+        assert.ok(colEmpItem);
+        assert.strictEqual(colEmpItem.workerType, 'employee', 'GET list resolves collision with explicit employee type');
+
+        // Assert GET single collision handling
+        const resSingleColAmb = await request(app)
+            .get('/api/time-entries/get-enrich-col-ambiguous')
+            .set('Authorization', 'Bearer ' + adminToken);
+        assert.strictEqual(resSingleColAmb.status, 200);
+        assert.strictEqual(resSingleColAmb.body.workerType, undefined, 'GET single must not resolve ambiguous collision');
+
+        const resSingleColSub = await request(app)
+            .get('/api/time-entries/get-enrich-col-sub')
+            .set('Authorization', 'Bearer ' + adminToken);
+        assert.strictEqual(resSingleColSub.status, 200);
+        assert.strictEqual(resSingleColSub.body.workerType, 'subcontractor', 'GET single resolves collision with explicit sub type');
+
+        const resSingleColEmp = await request(app)
+            .get('/api/time-entries/get-enrich-col-emp')
+            .set('Authorization', 'Bearer ' + adminToken);
+        assert.strictEqual(resSingleColEmp.status, 200);
+        assert.strictEqual(resSingleColEmp.body.workerType, 'employee', 'GET single resolves collision with explicit emp type');
     });
 
     await t.test('automated generation guard: verifies timeEntry.generated.ts is strictly up to date with timeEntry.schema.json', async () => {
