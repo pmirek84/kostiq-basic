@@ -1,5 +1,5 @@
 import { applyLaborAggregatesToJobs } from '../services/domain/laborAggregatesService';
-import { createContext, useContext, useState, useEffect, type ReactNode } from 'react';
+import { createContext, useContext, useState, useEffect, useCallback, type ReactNode } from 'react';
 import type { Job, JobStage, JobStageItem, Offer, Construction } from '../models/types';
 import { v4 as uuidv4 } from 'uuid';
 import { jobStorage } from '../services/storage/jobStorage';
@@ -303,15 +303,14 @@ export function JobsProvider({ children }: { children: ReactNode }) {
     };
 
     // --- Site Log Management ---
-    const updateJobsLaborAggregates = async (
-        _jobAggregates: Map<string, { hours: number; cost: number; settledCost: number }>,
-        _stageAggregates: Map<string, { hours: number; cost: number }>
+    const updateJobsLaborAggregates = useCallback(async (
+        _jobAggregates?: Map<string, { hours: number; cost: number; settledCost: number }>,
+        _stageAggregates?: Map<string, { hours: number; cost: number }>
     ) => {
         // Backend is the single authoritative source of truth for labor aggregates.
         // Frontend does not write actualLabor* fields via PATCH to prevent stale browser tabs
         // or client-side fabrication from overwriting authoritative triggers.
-        await refreshJobs();
-    };
+    }, []);
 
     // --- Job Stage Items (BOM) ---
     const getJobStageItems = async (jobId: string) => {

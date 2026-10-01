@@ -810,6 +810,119 @@ test('Shared Contracts: Job JSON Schema, Statuses, Lifecycle and Financial Prote
         assert.strictEqual(resRecalc.body.job.aggregationError, null);
     });
 
+
+    await t.test('[P1] fail-closed snapshot aborts PATCH, DELETE, and batch-import on database error (no untracked mutations)', async () => {
+        jobsStore.set('job-fail-test', {
+            id: 'job-fail-test',
+            status: 'in_progress',
+            isActive: true
+        });
+
+        timeEntriesStore.set('te-fail-snap', {
+            id: 'te-fail-snap',
+            jobId: 'job-fail-test',
+            hours: 5,
+            cost: 250,
+            status: 'approved',
+            isActive: true
+        });
+
+        // 1. Fail-closed on PATCH
+        let throwFindOne = true;
+        const origFindOne = mockTimeEntriesColl.findOne;
+        mockTimeEntriesColl.findOne = async (f) => {
+            if (throwFindOne) {
+                const id = f.$or ? f.$or[0].id : f.id;
+                if (id === 'te-fail-snap') {
+                    throw new Error('Database connection reset during PATCH snapshot');
+                }
+            }
+            return origFindOne(f);
+        };
+
+        const resPatch = await request(app)
+            .patch('/api/time-entries/te-fail-snap')
+            .set('Authorization', 'Bearer ' + adminToken)
+            .send({ hours: 8 });
+
+        assert.strictEqual(resPatch.status >= 500, true, 'PATCH must fail-closed with 5xx error on snapshot DB failure');
+        assert.strictEqual(timeEntriesStore.get('te-fail-snap').hours, 5, 'Record must not be modified if snapshot failed');
+
+        // 2. Fail-closed on DELETE
+        const resDelete = await request(app)
+            .delete('/api/time-entries/te-fail-snap')
+            .set('Authorization', 'Bearer ' + adminToken);
+
+        assert.strictEqual(resDelete.status >= 500, true, 'DELETE must fail-closed with 5xx error on snapshot DB failure');
+        assert.strictEqual(timeEntriesStore.has('te-fail-snap'), true, 'Record must not be deleted if snapshot failed');
+
+        // Restore findOne
+        throwFindOne = false;
+        mockTimeEntriesColl.findOne = origFindOne;
+
+        // 3. Fail-closed on batch-import pre-fetch
+        let throwBatchFind = true;
+        const origFind = mockTimeEntriesColl.find;
+        mockTimeEntriesColl.find = (filter) => {
+            if (throwBatchFind && filter?.$or?.some(c => c.id?.$in?.includes('te-fail-batch'))) {
+                throw new Error('Database failure during batch pre-fetch');
+            }
+            return origFind(filter);
+        };
+
+        const resBatch = await request(app)
+            .post('/api/time-entries/batch-import')
+            .set('Authorization', 'Bearer ' + adminToken)
+            .send({
+                items: [
+                    {
+                        id: 'te-fail-batch',
+                        jobId: 'job-fail-test',
+                        employeeId: 'admin-1',
+                        date: '2026-10-01',
+                        hours: 4,
+                        billingType: 'hourly',
+                        status: 'approved'
+                    }
+                ]
+            });
+
+        assert.strictEqual(resBatch.status, 500, 'Batch import must abort with 500 when pre-fetch fails');
+        assert.strictEqual(timeEntriesStore.has('te-fail-batch'), false, 'Items must not be inserted when pre-fetch fails');
+
+        throwBatchFind = false;
+        mockTimeEntriesColl.find = origFind;
+    });
+
+    await t.test('[P2] auto-reconciliation: reconcilePendingJobAggregates scans and recovers pending jobs', async () => {
+        const recJobId = 'job-auto-reconcile-test';
+        jobsStore.set(recJobId, {
+            id: recJobId,
+            name: 'Zlecenie z zaległą agregacją',
+            clientId: 'client-1',
+            aggregationPending: true,
+            aggregationError: 'Previous crash before recalculation',
+            stages: []
+        });
+
+        timeEntriesStore.set('te-auto-rec-1', {
+            id: 'te-auto-rec-1',
+            jobId: recJobId,
+            hours: 7,
+            cost: 350,
+            status: 'approved',
+            isActive: true
+        });
+
+        const recResult = await reconcilePendingJobAggregates();
+        assert.ok(recResult.reconciledCount >= 1, 'Must reconcile at least 1 pending job');
+
+        const recoveredJob = jobsStore.get(recJobId);
+        assert.strictEqual(recoveredJob.aggregationPending, false, 'Pending flag must be cleared');
+        assert.strictEqual(recoveredJob.actualLaborHours, 7, 'Labor hours recalculated accurately');
+        assert.strictEqual(recoveredJob.actualLaborCost, 350, 'Labor cost recalculated accurately');
+    });
+
     await t.test('automated generation guard: verifies job.generated.ts is strictly up to date with job.schema.json', () => {
         const rootDir = path.resolve(__dirname, '../..');
         const output = execSync('node scripts/generate-contracts.cjs --check', {

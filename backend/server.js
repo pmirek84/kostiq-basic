@@ -972,8 +972,18 @@ async function connectDB() {
         await reconcileDuplicatesAndEnsureIndexes(db);
         await seedInitialDataIfEmpty(db);
         await backfillTimeEntriesWorkerType(db);
+        await reconcilePendingJobAggregates();
         dbReady = true;
-        console.log('Successfully reconciled duplicates and verified all unique indexes.');
+        console.log('Successfully reconciled duplicates, verified all unique indexes, and reconciled pending job aggregates.');
+
+        if (process.env.NODE_ENV !== 'test') {
+            const autoReconcileTimer = setInterval(() => {
+                reconcilePendingJobAggregates().catch(rErr => {
+                    console.error('[AUTO-RECONCILE] Periodic reconciliation error:', rErr.message);
+                });
+            }, 15 * 60 * 1000);
+            autoReconcileTimer.unref();
+        }
     } catch (err) {
         dbReady = false;
         indexInitError = err.message;
@@ -1428,7 +1438,7 @@ const createRouter = (collectionName, options = {}) => {
                     };
                 });
 
-                // [P1 FIX] Pre-fetch existing documents to track old state for mutations
+                // [P1 FIX] Fail-closed pre-fetch of existing documents to track old state for mutations
                 const itemIds = items.map(i => i.id).filter(Boolean);
                 const oldDocsMap = new Map();
                 if (itemIds.length > 0) {
@@ -1441,7 +1451,13 @@ const createRouter = (collectionName, options = {}) => {
                             if (d._id) oldDocsMap.set(d._id.toString(), d);
                         });
                     } catch (fetchErr) {
-                        console.warn(`[batch-import pre-fetch ${collectionName}]`, fetchErr.message);
+                        console.error(`[batch-import pre-fetch ${collectionName} ERROR]`, fetchErr.message);
+                        if (typeof options.afterMutation === 'function') {
+                            return res.status(500).json({
+                                status: 'failed',
+                                error: `Błąd pobierania istniejących dokumentów przed importem wsadowym: ${fetchErr.message}`
+                            });
+                        }
                     }
                 }
 
@@ -1569,13 +1585,28 @@ const createRouter = (collectionName, options = {}) => {
                 }
             }
 
-            // [P1 FIX] Snapshot document before update to detect job transfers and state changes
+            // [P1 FIX] Fail-closed snapshot document before update to detect job transfers and state changes
             let beforeDoc = null;
-            try {
-                const rawBefore = await db.collection(collectionName).findOne(filter);
-                if (rawBefore) beforeDoc = { ...rawBefore };
-            } catch (snapErr) {
-                console.warn(`[PATCH snapshot ${collectionName}]`, snapErr.message);
+            if (typeof options.afterMutation === 'function') {
+                try {
+                    const rawBefore = await db.collection(collectionName).findOne(filter);
+                    if (!rawBefore) {
+                        return res.status(404).json({ error: 'Item not found' });
+                    }
+                    beforeDoc = { ...rawBefore };
+                } catch (snapErr) {
+                    console.error(`[PATCH snapshot ${collectionName} ERROR]`, snapErr.message);
+                    return res.status(500).json({
+                        error: `Błąd pobierania stanu początkowego rekordu przed aktualizacją: ${snapErr.message}`
+                    });
+                }
+            } else {
+                try {
+                    const rawBefore = await db.collection(collectionName).findOne(filter);
+                    if (rawBefore) beforeDoc = { ...rawBefore };
+                } catch (snapErr) {
+                    console.warn(`[PATCH snapshot ${collectionName}]`, snapErr.message);
+                }
             }
 
             // Always stamp updatedAt on every PATCH
@@ -1610,13 +1641,28 @@ const createRouter = (collectionName, options = {}) => {
             const { id } = req.params;
             const filter = { id: id };
 
-            // [P1 FIX] Fetch document before delete so afterMutation knows affected jobId/project_id
+            // [P1 FIX] Fail-closed fetch document before delete so afterMutation knows affected jobId/project_id
             let beforeDoc = null;
-            try {
-                const rawDeleteBefore = await db.collection(collectionName).findOne(filter);
-                if (rawDeleteBefore) beforeDoc = { ...rawDeleteBefore };
-            } catch (snapErr) {
-                console.warn(`[DELETE snapshot ${collectionName}]`, snapErr.message);
+            if (typeof options.afterMutation === 'function') {
+                try {
+                    const rawDeleteBefore = await db.collection(collectionName).findOne(filter);
+                    if (!rawDeleteBefore) {
+                        return res.status(404).json({ error: 'Item not found' });
+                    }
+                    beforeDoc = { ...rawDeleteBefore };
+                } catch (snapErr) {
+                    console.error(`[DELETE snapshot ${collectionName} ERROR]`, snapErr.message);
+                    return res.status(500).json({
+                        error: `Błąd pobierania rekordu przed usunięciem: ${snapErr.message}`
+                    });
+                }
+            } else {
+                try {
+                    const rawDeleteBefore = await db.collection(collectionName).findOne(filter);
+                    if (rawDeleteBefore) beforeDoc = { ...rawDeleteBefore };
+                } catch (snapErr) {
+                    console.warn(`[DELETE snapshot ${collectionName}]`, snapErr.message);
+                }
             }
 
             // Critical collections use soft delete
