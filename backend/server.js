@@ -1848,6 +1848,13 @@ async function recalculateJobLaborCosts(jobId, { throwOnError = false } = {}) {
             updatedAt: new Date().toISOString()
         };
 
+        // [P2 FIX] Unified lifecycle auto-status transition: planned → in_progress if job contains approved time entries
+        if (job && (job.status === 'planned' || job.status === 'planowane') && entries.length > 0) {
+            updateDoc.status = 'in_progress';
+            updateDoc.actualStartDate = job.actualStartDate || new Date().toISOString();
+            console.log(`[AUTO-STATUS] Job ${jobId} transitioned: planned → in_progress`);
+        }
+
         // Stages update with proper zeroing of stages without entries
         if (job && job.stages && Array.isArray(job.stages)) {
             updateDoc.stages = job.stages.map(stage => {
@@ -1898,7 +1905,13 @@ async function recalculateJobLaborCosts(jobId, { throwOnError = false } = {}) {
 // [P1 FIX] Periodic or on-demand reconciliation of failed / pending job aggregations
 async function reconcilePendingJobAggregates() {
     if (!db || typeof db.collection !== 'function') return { reconciledCount: 0, failedCount: 0, totalPending: 0 };
-    const pendingJobs = await db.collection('jobs').find({ aggregationPending: true }).toArray();
+    // [P2 FIX] Reconcile any job with aggregationPending OR jobs left in planned state despite approved hours
+    const pendingJobs = await db.collection('jobs').find({
+        $or: [
+            { aggregationPending: true },
+            { status: { $in: ['planned', 'planowane'] }, actualLaborHours: { $gt: 0 } }
+        ]
+    }).toArray();
     let reconciledCount = 0;
     let failedCount = 0;
     for (const j of pendingJobs) {
@@ -3134,11 +3147,16 @@ app.post('/api/time-entries/batch-update', verifyToken, requireRole('admin', 'ma
             return res.status(400).json({ error: `Błąd walidacji schematu aktualizacji wsadowej: ${errorDetails}.` });
         }
 
+        const uniqueRequestedIds = Array.from(new Set(ids.map(id => String(id).trim()).filter(Boolean)));
+        if (uniqueRequestedIds.length === 0) {
+            return res.status(400).json({ error: 'Brak prawidłowych identyfikatorów w tablicy ids.' });
+        }
+
         // 1. [P1 FIX] Fail-closed snapshot: pre-fetch affected entries before mutation to identify all source jobs
         let beforeEntries = [];
         try {
             beforeEntries = await db.collection('time-entries').find({
-                $or: [{ id: { $in: ids } }, { _id: { $in: ids } }]
+                $or: [{ id: { $in: uniqueRequestedIds } }, { _id: { $in: uniqueRequestedIds } }]
             }).toArray();
         } catch (fetchErr) {
             console.error('[batch-update snapshot time-entries ERROR]', fetchErr.message);
@@ -3147,8 +3165,23 @@ app.post('/api/time-entries/batch-update', verifyToken, requireRole('admin', 'ma
             });
         }
 
-        if (beforeEntries.length === 0) {
-            return res.status(404).json({ error: 'Nie znaleziono wskazanych wpisów czasu.' });
+        // [P2 FIX] Fail-closed validation of requested vs found IDs:
+        // Reject entire operation if any requested ID is missing (no partial silent successes)
+        const foundIdSet = new Set();
+        beforeEntries.forEach(e => {
+            if (e.id) foundIdSet.add(String(e.id));
+            if (e._id) foundIdSet.add(String(e._id));
+        });
+
+        const missingIds = uniqueRequestedIds.filter(id => !foundIdSet.has(id));
+        if (missingIds.length > 0) {
+            return res.status(404).json({
+                error: `Nie znaleziono wszystkich wskazanych wpisów czasu. Brakujące identyfikatory: ${missingIds.join(', ')}.`,
+                missingIds,
+                requestedCount: uniqueRequestedIds.length,
+                foundCount: beforeEntries.length,
+                matchedCount: 0
+            });
         }
 
         // [P1 FIX] Validate and normalize every resulting document against the authoritative TimeEntry rules
@@ -3178,7 +3211,9 @@ app.post('/api/time-entries/batch-update', verifyToken, requireRole('admin', 'ma
         });
         if (safeUpdates.jobId) jobIds.add(safeUpdates.jobId);
 
-        // 2. [P1 FIX] Perform the update: $unset legacy project_id / employee_id so transfers don't match old jobs
+        // 2. [P1 FIX] Always persist the authoritative, normalized validatedCandidates via bulkWrite!
+        // Recalculated costs (e.g. from changing employeeId, rate, quantity, or unitPrice) and normalized
+        // workerType/activityType are NEVER lost or bypassed.
         const unsetDoc = {};
         if (isJobUpdated) {
             unsetDoc.project_id = "";
@@ -3188,85 +3223,44 @@ app.post('/api/time-entries/batch-update', verifyToken, requireRole('admin', 'ma
         }
 
         const nowIso = new Date().toISOString();
-        const hasPerItemCostRecalc = safeUpdates.hours !== undefined || safeUpdates.cost !== undefined || safeUpdates.billingType !== undefined;
+        const bulkOps = validatedCandidates.map(c => {
+            const setDoc = {
+                ...c,
+                updatedAt: nowIso
+            };
+            delete setDoc._id;
+            delete setDoc.id;
+            if (isJobUpdated) delete setDoc.project_id;
+            if (isEmpUpdated) delete setDoc.employee_id;
 
-        if (hasPerItemCostRecalc) {
-            const bulkOps = validatedCandidates.map(c => {
-                const setDoc = {
-                    ...safeUpdates,
-                    cost: c.cost,
-                    hourlyRate: c.hourlyRate,
-                    workerType: c.workerType,
-                    activityType: c.activityType,
-                    updatedAt: nowIso
-                };
-                delete setDoc._id;
-                delete setDoc.id;
-                if (isJobUpdated) delete setDoc.project_id;
-                if (isEmpUpdated) delete setDoc.employee_id;
-
-                const op = {
-                    updateOne: {
-                        filter: { $or: [{ id: c.id }, { _id: c.id }] },
-                        update: { $set: setDoc }
-                    }
-                };
-                if (Object.keys(unsetDoc).length > 0) {
-                    op.updateOne.update.$unset = unsetDoc;
-                }
-                return op;
-            });
-            await db.collection('time-entries').bulkWrite(bulkOps);
-        } else {
-            const updateDoc = {
-                $set: {
-                    ...safeUpdates,
-                    updatedAt: nowIso
+            const op = {
+                updateOne: {
+                    filter: { $or: [{ id: c.id }, { _id: c.id }] },
+                    update: { $set: setDoc }
                 }
             };
             if (Object.keys(unsetDoc).length > 0) {
-                updateDoc.$unset = unsetDoc;
+                op.updateOne.update.$unset = unsetDoc;
             }
+            return op;
+        });
 
-            await db.collection('time-entries').updateMany(
-                { $or: [{ id: { $in: ids } }, { _id: { $in: ids } }] },
-                updateDoc
-            );
-        }
+        await db.collection('time-entries').bulkWrite(bulkOps);
 
-        // 3. [P1 FIX] Authoritative recalculation of all affected jobs regardless of status transition
-        // (handles additions, deductions, transfers, and rejections)
+        // 3. [P1 & P2 FIX] Authoritative recalculation of all affected jobs regardless of status transition
+        // (recalculateJobLaborCosts atomically handles financial aggregates, stage actuals, and lifecycle auto-status)
         for (const jobId of jobIds) {
             await recalculateJobLaborCosts(jobId);
-
-            // [P2 FIX] AUTO-STATUS: planned → in_progress on approval (approved or admin_approved)
-            // Target-only guard: only transition if the job ACTUALLY contains at least one approved entry post-mutation!
-            if (safeUpdates.status === 'approved' || safeUpdates.status === 'admin_approved') {
-                try {
-                    const job = await db.collection('jobs').findOne({
-                        $or: [{ id: jobId }, { _id: jobId }]
-                    });
-                    if (job && (job.status === 'planned' || job.status === 'planowane')) {
-                        const hasApprovedEntry = await db.collection('time-entries').findOne({
-                            $or: [{ jobId: jobId }, { project_id: jobId }],
-                            status: { $in: ['approved', 'admin_approved'] },
-                            isActive: { $ne: false }
-                        });
-                        if (hasApprovedEntry) {
-                            await db.collection('jobs').updateOne(
-                                { $or: [{ id: jobId }, { _id: jobId }] },
-                                { $set: { status: 'in_progress', actualStartDate: new Date().toISOString(), updatedAt: new Date().toISOString() } }
-                            );
-                            console.log(`[AUTO-STATUS] Job ${jobId} transitioned: planned → in_progress`);
-                        }
-                    }
-                } catch (autoStatusErr) {
-                    console.warn(`[AUTO-STATUS ERROR] Job ${jobId}:`, autoStatusErr.message);
-                }
-            }
         }
 
-        res.status(200).json({ success: true, count: ids.length, affectedJobs: Array.from(jobIds) });
+        const updatedIds = beforeEntries.map(e => e.id || (e._id ? e._id.toString() : null)).filter(Boolean);
+        res.status(200).json({
+            success: true,
+            count: updatedIds.length,
+            matchedCount: updatedIds.length,
+            updatedIds,
+            affectedJobs: Array.from(jobIds)
+        });
     } catch (err) {
         console.error('[BATCH-UPDATE ERROR]', err);
         res.status(500).json({ error: err.message });

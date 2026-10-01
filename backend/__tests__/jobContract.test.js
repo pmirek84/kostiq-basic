@@ -58,10 +58,31 @@ test('Shared Contracts: Job JSON Schema, Statuses, Lifecycle and Financial Prote
             return jobsStore.get(id) || null;
         },
         find: (filter) => {
+            let list = Array.from(jobsStore.values());
+            if (filter?.$or) {
+                list = list.filter(j => {
+                    return filter.$or.some(c => {
+                        if (c.id) {
+                            if (c.id.$in) return c.id.$in.includes(j.id);
+                            return c.id === j.id;
+                        }
+                        const jid = j._id || j.id;
+                        if (c._id) {
+                            if (c._id.$in) return c._id.$in.includes(jid);
+                            return c._id === jid;
+                        }
+                        if (c.aggregationPending && j.aggregationPending) return true;
+                        if (c.status?.$in && c.status.$in.includes(j.status) && c.actualLaborHours?.$gt !== undefined && j.actualLaborHours > c.actualLaborHours.$gt) return true;
+                        return false;
+                    });
+                });
+            } else if (filter?.aggregationPending) {
+                list = list.filter(j => j.aggregationPending);
+            }
             const cursor = {
                 skip: () => cursor,
                 limit: () => cursor,
-                toArray: async () => Array.from(jobsStore.values())
+                toArray: async () => list
             };
             return cursor;
         },
@@ -1168,6 +1189,71 @@ test('Shared Contracts: Job JSON Schema, Statuses, Lifecycle and Financial Prote
         assert.strictEqual(resIdImm.status, 200, 'Batch-update succeeds by stripping id');
         assert.strictEqual(timeEntriesStore.has('te-val-guard'), true, 'Original ID must remain intact');
         assert.strictEqual(timeEntriesStore.has('forged-new-id'), false, 'Forged ID must not be created');
+
+        // 8. [P2 FIX] Partially missing IDs fail-closed: reject entire operation if any ID is missing
+        const resPartMissing = await request(app)
+            .post('/api/time-entries/batch-update')
+            .set('Authorization', 'Bearer ' + adminToken)
+            .send({
+                ids: ['te-val-guard', 'non-existent-missing-id'],
+                updates: { status: 'admin_approved' }
+            });
+        assert.strictEqual(resPartMissing.status, 404, 'Must fail-closed with 404 when any ID is missing');
+        assert.strictEqual(resPartMissing.body.matchedCount, 0);
+        assert.deepStrictEqual(resPartMissing.body.missingIds, ['non-existent-missing-id']);
+        assert.strictEqual(timeEntriesStore.get('te-val-guard').status, 'approved', 'Existing entry must NOT be modified on partial failure');
+
+        // 9. [P1 FIX] Normalization preservation on employeeId change: bulkWrite preserves recalculated cost & rates
+        employeesStore.set('emp-senior', {
+            id: 'emp-senior',
+            hourlyRate: 100,
+            defaultHourlyRate: 100,
+            isActive: true
+        });
+
+        const resReassignEmp = await request(app)
+            .post('/api/time-entries/batch-update')
+            .set('Authorization', 'Bearer ' + adminToken)
+            .send({
+                ids: ['te-val-guard'],
+                updates: { employeeId: 'emp-senior' }
+            });
+        assert.strictEqual(resReassignEmp.status, 200);
+        const updatedEntry = timeEntriesStore.get('te-val-guard');
+        assert.strictEqual(updatedEntry.employeeId, 'emp-senior');
+        assert.strictEqual(updatedEntry.hourlyRate, 100, 'Authoritative rate updated to new employee rate');
+        assert.strictEqual(updatedEntry.cost, 400, 'Authoritative cost recalculated (4h * 100 = 400) and persisted via bulkWrite');
+        assert.strictEqual(updatedEntry.workerType, 'employee', 'workerType preserved');
+        const updatedJob = jobsStore.get('job-val-guard');
+        assert.strictEqual(updatedJob.actualLaborCost, 400, 'Job labor cost recalculated to reflect new employee cost');
+
+        // 10. [P2 FIX] Auto-status reconciliation: planned job with approved entries recovered by reconcilePendingJobAggregates
+        const strandedJobId = 'job-stranded-planned';
+        jobsStore.set(strandedJobId, {
+            id: strandedJobId,
+            name: 'Zlecenie z zaległym statusem',
+            clientId: 'client-1',
+            status: 'planned',
+            actualLaborHours: 5,
+            actualLaborCost: 250,
+            aggregationPending: true,
+            stages: []
+        });
+        timeEntriesStore.set('te-stranded-1', {
+            id: 'te-stranded-1',
+            jobId: strandedJobId,
+            employeeId: 'admin-1',
+            hours: 5,
+            cost: 250,
+            status: 'admin_approved',
+            isActive: true
+        });
+
+        const recStatusResult = await reconcilePendingJobAggregates();
+        assert.ok(recStatusResult.reconciledCount >= 1, 'Reconciled stranded job');
+        const recoveredStrandedJob = jobsStore.get(strandedJobId);
+        assert.strictEqual(recoveredStrandedJob.status, 'in_progress', 'Auto-status planned → in_progress recovered during reconciliation');
+        assert.strictEqual(recoveredStrandedJob.aggregationPending, false, 'aggregationPending cleared on recovery');
     });
 
     await t.test('[P1] batch-update recalculates job labor aggregates on real approval and rejection statuses', async () => {
@@ -1187,6 +1273,7 @@ test('Shared Contracts: Job JSON Schema, Statuses, Lifecycle and Financial Prote
         timeEntriesStore.set('te-batch-1', {
             id: 'te-batch-1',
             jobId: batchJobId,
+            employeeId: 'admin-1',
             hours: 6,
             cost: 300,
             status: 'submitted',
@@ -1195,6 +1282,7 @@ test('Shared Contracts: Job JSON Schema, Statuses, Lifecycle and Financial Prote
         timeEntriesStore.set('te-batch-2', {
             id: 'te-batch-2',
             jobId: batchJobId,
+            employeeId: 'admin-1',
             hours: 4,
             cost: 200,
             status: 'submitted',
