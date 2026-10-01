@@ -1,4 +1,5 @@
 const timeEntrySchema = require('./timeEntry.schema.json');
+const jobSchema = require('./job.schema.json');
 
 const TIME_ENTRY_STATUSES = Object.freeze([...timeEntrySchema.definitions.TimeEntryStatus.enum]);
 const WORKER_ALLOWED_TIME_ENTRY_STATUSES = Object.freeze([...timeEntrySchema.definitions.WorkerAllowedStatus.enum]);
@@ -8,6 +9,13 @@ const TIME_ENTRY_TYPES = Object.freeze([...timeEntrySchema.definitions.TimeEntry
 const ACTIVITY_TYPES = Object.freeze([...timeEntrySchema.definitions.ActivityType.enum]);
 const WORKER_TYPES = Object.freeze([...timeEntrySchema.definitions.WorkerType.enum]);
 
+const JOB_STATUSES = Object.freeze([...jobSchema.definitions.JobStatus.enum]);
+const JOB_STAGE_STATUSES = Object.freeze([...jobSchema.definitions.JobStageStatus.enum]);
+const JOB_STAGE_TYPES = Object.freeze([...jobSchema.definitions.JobStageType.enum]);
+const JOB_BILLING_TYPES = Object.freeze([...jobSchema.definitions.JobBillingType.enum]);
+const JOB_RISK_FLAGS = Object.freeze([...jobSchema.definitions.JobRiskFlag.enum]);
+const JOB_PRIORITIES = Object.freeze([...jobSchema.definitions.JobPriority.enum]);
+
 module.exports = {
   timeEntrySchema,
   TIME_ENTRY_STATUSES,
@@ -16,5 +24,13 @@ module.exports = {
   BILLING_TYPES,
   TIME_ENTRY_TYPES,
   ACTIVITY_TYPES,
-  WORKER_TYPES
+  WORKER_TYPES,
+
+  jobSchema,
+  JOB_STATUSES,
+  JOB_STAGE_STATUSES,
+  JOB_STAGE_TYPES,
+  JOB_BILLING_TYPES,
+  JOB_RISK_FLAGS,
+  JOB_PRIORITIES
 };

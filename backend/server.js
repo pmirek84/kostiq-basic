@@ -152,7 +152,8 @@ const ALLOWED_BATCH_IMPORT_COLLECTIONS = new Set([
     'time-entries',
     'clients',
     'catalog-materials',
-    'materials'
+    'materials',
+    'jobs'
 ]);
 
 const ALLOWED_MIGRATION_COLLECTIONS = new Set([
@@ -2126,13 +2127,26 @@ const {
     TIME_ENTRY_TYPES,
     ACTIVITY_TYPES,
     WORKER_TYPES,
+    jobSchema,
+    JOB_STATUSES,
+    JOB_STAGE_STATUSES,
+    JOB_STAGE_TYPES,
+    JOB_BILLING_TYPES,
+    JOB_RISK_FLAGS,
+    JOB_PRIORITIES
 } = require('../shared/contracts/index.cjs');
 
 const ajv = new Ajv({ allErrors: true, coerceTypes: false });
 ajv.addSchema(timeEntrySchema, 'timeEntry');
+ajv.addSchema(jobSchema, 'job');
 const validateTimeEntryPostSchema = ajv.getSchema('timeEntry#/definitions/TimeEntryPostPayload');
 const validateTimeEntryPatchSchema = ajv.getSchema('timeEntry#/definitions/TimeEntryPatchPayload');
 const validateTimeEntryBatchSchema = ajv.getSchema('timeEntry#/definitions/TimeEntryBatchImportPayload');
+
+const validateJobPostSchema = ajv.getSchema('job#/definitions/JobPostPayload');
+const validateJobPatchSchema = ajv.getSchema('job#/definitions/JobPatchPayload');
+const validateJobBatchSchema = ajv.getSchema('job#/definitions/JobBatchImportPayload');
+const validateJobPaginatedSchema = ajv.getSchema('job#/definitions/JobPaginatedResponse');
 
 // Shared validation & normalization for time entries (used by single POST/PATCH and batch-import)
 async function validateAndNormalizeTimeEntryDoc(doc, { db, user, isBatch = false, isPatch = false, existingEntry = null }) {
@@ -2985,7 +2999,271 @@ app.use('/api/checklist-templates', verifyToken, requireRole('admin', 'manager')
 // FIX #1b: offers now also go through financial validation
 app.use('/api/offers', verifyToken, requireRoleOrSafeGet, validateFinancialAmount, createRouter('offers'));
 app.use('/api/constructions', verifyToken, requireRoleOrSafeGet, createRouter('constructions'));
-app.use('/api/jobs', verifyToken, requireRoleOrSafeGet, createRouter('jobs'));
+// ==========================================
+// Job domain contracts & validation middleware
+// ==========================================
+const JOB_STATUS_ALIASES = {
+    'planowane': 'planned',
+    'planowany': 'planned',
+    'w_toku': 'in_progress',
+    'w_realizacji': 'in_progress',
+    'zakończone': 'done',
+    'zakończony': 'done',
+    'anulowane': 'cancelled',
+    'anulowany': 'cancelled',
+    'wstrzymane': 'paused',
+    'szkic': 'draft'
+};
+
+const STAGE_STATUS_ALIASES = {
+    'planned': 'planowany',
+    'planowane': 'planowany',
+    'in_progress': 'w_toku',
+    'completed': 'zakończony',
+    'done': 'zakończony',
+    'cancelled': 'anulowany',
+    'anulowane': 'anulowany'
+};
+
+async function validateAndNormalizeJobDoc(doc, { db, user, isBatch = false, isPatch = false, existingJob = null }) {
+    if (!doc || typeof doc !== 'object' || Array.isArray(doc)) {
+        return { error: 'Nieprawidłowy obiekt zlecenia.' };
+    }
+
+    if (Object.keys(doc).length === 0) {
+        return { error: 'Obiekt zlecenia nie może być pusty.' };
+    }
+
+    // Pre-trim and validate non-empty string for name and clientId if explicitly provided
+    if (doc.name !== undefined) {
+        if (typeof doc.name === 'string') doc.name = doc.name.trim();
+        if (!doc.name) {
+            return { error: 'Pole name nie może być puste.' };
+        }
+    } else if (!isPatch) {
+        return { error: 'Pole name jest wymagane.' };
+    }
+
+    if (doc.clientId !== undefined) {
+        if (typeof doc.clientId === 'string') doc.clientId = doc.clientId.trim();
+        if (!doc.clientId) {
+            return { error: 'Pole clientId nie może być puste.' };
+        }
+    } else if (!isPatch) {
+        return { error: 'Pole clientId jest wymagane.' };
+    }
+
+    const effectiveClientId = doc.clientId || existingJob?.clientId;
+
+    // Fail-closed client verification
+    if (effectiveClientId && db && typeof db.collection === 'function') {
+        try {
+            const client = await db.collection('clients').findOne({
+                $or: [{ id: effectiveClientId }, { _id: effectiveClientId }]
+            });
+            if (!client) {
+                return { error: `Klient o identyfikatorze '${effectiveClientId}' nie istnieje.`, status: 404 };
+            }
+            if (!doc.clientName && !isPatch) {
+                doc.clientName = client.type === 'company' ? client.company : `${client.name || ''} ${client.lastName || ''}`.trim();
+            }
+        } catch (dbErr) {
+            return { error: 'Błąd weryfikacji klienta w bazie danych: ' + dbErr.message, status: 500 };
+        }
+    }
+
+    // Status normalization
+    if (doc.status !== undefined) {
+        const lower = String(doc.status).toLowerCase();
+        if (JOB_STATUS_ALIASES[lower]) {
+            doc.status = JOB_STATUS_ALIASES[lower];
+        }
+        if (!JOB_STATUSES.includes(doc.status)) {
+            return { error: `Nieprawidłowy status zlecenia '${doc.status}'. Dozwolone: ${JOB_STATUSES.join(', ')}.` };
+        }
+    } else if (!isPatch) {
+        doc.status = 'planned';
+    }
+
+    // Stages normalization & stripping forged actuals
+    if (doc.stages !== undefined) {
+        if (!Array.isArray(doc.stages)) {
+            return { error: 'Pole stages musi być tablicą.' };
+        }
+        for (let i = 0; i < doc.stages.length; i++) {
+            const stage = doc.stages[i];
+            if (!stage || typeof stage !== 'object') {
+                return { error: `Etap #${i} jest nieprawidłowy.` };
+            }
+            if (stage.name !== undefined && typeof stage.name === 'string') {
+                stage.name = stage.name.trim();
+            }
+            if (!stage.name) {
+                return { error: `Etap #${i} musi posiadać nazwę.` };
+            }
+            if (stage.status !== undefined) {
+                const sLower = String(stage.status).toLowerCase();
+                if (STAGE_STATUS_ALIASES[sLower]) {
+                    stage.status = STAGE_STATUS_ALIASES[sLower];
+                }
+                if (!JOB_STAGE_STATUSES.includes(stage.status)) {
+                    return { error: `Nieprawidłowy status etapu '${stage.status}'. Dozwolone: ${JOB_STAGE_STATUSES.join(', ')}.` };
+                }
+            } else {
+                stage.status = 'planowany';
+            }
+            if (stage.type === undefined) {
+                stage.type = 'podstawowy';
+            } else if (!JOB_STAGE_TYPES.includes(stage.type)) {
+                return { error: `Nieprawidłowy typ etapu '${stage.type}'. Dozwolone: ${JOB_STAGE_TYPES.join(', ')}.` };
+            }
+            if (stage.plannedRevenueNet === undefined) {
+                stage.plannedRevenueNet = 0;
+            }
+
+            // Stripping client-forged stage actuals
+            if (!isPatch || !existingJob) {
+                stage.actualLaborHours = 0;
+                stage.actualLaborCost = 0;
+                stage.actualRevenueNet = 0;
+                stage.actualCostNet = 0;
+            } else {
+                const existingStage = (existingJob.stages || []).find(s => s.id === stage.id);
+                stage.actualLaborHours = existingStage ? (existingStage.actualLaborHours || 0) : 0;
+                stage.actualLaborCost = existingStage ? (existingStage.actualLaborCost || 0) : 0;
+                stage.actualRevenueNet = existingStage ? (existingStage.actualRevenueNet || 0) : 0;
+                stage.actualCostNet = existingStage ? (existingStage.actualCostNet || 0) : 0;
+            }
+        }
+    }
+
+    // SERVER-AUTHORITATIVE PROTECTION FOR FINANCIAL ACTUALS & AGGREGATES
+    if (isPatch) {
+        // PATCH: Client is strictly forbidden from directly updating or fabricating actual financial aggregates
+        delete doc.actualLaborHours;
+        delete doc.actualLaborCost;
+        delete doc.settledLaborCost;
+        delete doc.timeEntriesCount;
+        delete doc.timeEntriesHours;
+        delete doc.materialsActualNet;
+        delete doc.logisticsActualNet;
+        delete doc.equipmentActualNet;
+        delete doc.otherCostsActualNet;
+        delete doc.revenueActualNet;
+        delete doc.actualRevenue;
+        delete doc.actualTotalCost;
+        delete doc.marginActualPercent;
+    } else {
+        // POST: Initialize actuals to 0
+        doc.actualLaborHours = 0;
+        doc.actualLaborCost = 0;
+        doc.settledLaborCost = 0;
+        doc.timeEntriesCount = 0;
+        doc.timeEntriesHours = 0;
+        doc.materialsActualNet = 0;
+        doc.logisticsActualNet = 0;
+        doc.equipmentActualNet = 0;
+        doc.otherCostsActualNet = 0;
+        doc.revenueActualNet = 0;
+        doc.actualRevenue = 0;
+        doc.actualTotalCost = 0;
+        doc.marginActualPercent = 0;
+    }
+
+    // Validate against JSON schema
+    const schemaValidator = isPatch ? validateJobPatchSchema : validateJobPostSchema;
+    const isValid = schemaValidator(doc);
+    if (!isValid) {
+        const errorMessages = (schemaValidator.errors || []).map(err => {
+            const field = err.instancePath ? err.instancePath.replace(/^\//, '') : (err.params?.missingProperty || 'obiekt');
+            return `${field}: ${err.message}`;
+        });
+        return {
+            error: `Błąd walidacji schematu zlecenia: ${errorMessages.join('; ')}`,
+            status: 400
+        };
+    }
+
+    return { data: doc };
+}
+
+async function validateJobBatch(req, res, next) {
+    if (!req.body || typeof req.body !== 'object' || !Array.isArray(req.body.items)) {
+        return res.status(400).json({ error: 'Payload importu wsadowego musi zawierać tablicę items.' });
+    }
+
+    const isValidBatch = validateJobBatchSchema(req.body);
+    if (!isValidBatch) {
+        const errorMessages = (validateJobBatchSchema.errors || []).map(err => {
+            const field = err.instancePath ? err.instancePath.replace(/^\//, '') : (err.params?.missingProperty || 'items');
+            return `${field}: ${err.message}`;
+        });
+        return res.status(400).json({
+            error: `Błąd walidacji schematu paczki zleceń: ${errorMessages.join('; ')}`
+        });
+    }
+
+    const validatedItems = [];
+    for (let i = 0; i < req.body.items.length; i++) {
+        const item = req.body.items[i];
+        const resNorm = await validateAndNormalizeJobDoc(item, { db, user: req.user, isBatch: true });
+        if (resNorm.error) {
+            return res.status(resNorm.status || 400).json({
+                error: `Błąd w pozycji #${i}: ${resNorm.error}`
+            });
+        }
+        validatedItems.push(resNorm.data);
+    }
+    req.body.items = validatedItems;
+    next();
+}
+
+async function validateJob(req, res, next) {
+    if (req.method !== 'POST' && req.method !== 'PATCH') return next();
+
+    if (req.path === '/batch-import' || req.url === '/batch-import' || req.originalUrl?.endsWith('/batch-import')) {
+        return validateJobBatch(req, res, next);
+    }
+
+    const pathId = req.path ? req.path.replace(/^\//, '').split('/')[0] : null;
+    const targetId = req.params?.id || (pathId && pathId !== 'batch-import' ? pathId : null) || req.body?.id;
+
+    if (req.method === 'POST') {
+        const validation = await validateAndNormalizeJobDoc(req.body, { db, user: req.user });
+        if (validation.error) {
+            return res.status(validation.status || 400).json({ error: validation.error });
+        }
+        req.body = validation.data;
+        return next();
+    }
+
+    if (req.method === 'PATCH') {
+        let existingJob = null;
+        if (targetId && db && typeof db.collection === 'function') {
+            try {
+                existingJob = await db.collection('jobs').findOne({ id: targetId });
+                if (!existingJob) {
+                    existingJob = await db.collection('jobs').findOne({ _id: targetId });
+                }
+                if (!existingJob) {
+                    return res.status(404).json({ error: `Zlecenie o identyfikatorze '${targetId}' nie istnieje.` });
+                }
+            } catch (err) {
+                return res.status(500).json({ error: 'Błąd bazy danych podczas pobierania zlecenia: ' + err.message });
+            }
+        }
+        const validation = await validateAndNormalizeJobDoc(req.body, { db, user: req.user, isPatch: true, existingJob });
+        if (validation.error) {
+            return res.status(validation.status || 400).json({ error: validation.error });
+        }
+        req.body = validation.data;
+        return next();
+    }
+
+    next();
+}
+
+app.use('/api/jobs', verifyToken, requireRoleOrSafeGet, validateJob, createRouter('jobs'));
 app.use('/api/materials', verifyToken, requireRole('admin', 'manager'), createRouter('materials'));
 app.use('/api/standards', verifyToken, requireRole('admin', 'manager'), createRouter('standards'));
 app.use('/api/settings', verifyToken, requireRole('admin', 'manager'), createRouter('settings'));
@@ -3531,5 +3809,15 @@ module.exports = {
     ALLOWED_MIGRATION_COLLECTIONS,
     VALID_TIME_ENTRY_STATUSES,
     WORKER_ALLOWED_TIME_ENTRY_STATUSES,
-    FOREMAN_ALLOWED_TIME_ENTRY_STATUSES
+    FOREMAN_ALLOWED_TIME_ENTRY_STATUSES,
+    JOB_STATUSES,
+    JOB_STAGE_STATUSES,
+    JOB_STAGE_TYPES,
+    JOB_BILLING_TYPES,
+    JOB_RISK_FLAGS,
+    JOB_PRIORITIES,
+    validateJobPostSchema,
+    validateJobPatchSchema,
+    validateJobBatchSchema,
+    validateJobPaginatedSchema
 };

@@ -4,16 +4,40 @@ import {
     type TimeEntryType,
     type ActivityType,
     type WorkerType,
+    type JobStatus,
+    type JobStageStatus,
+    type JobStageType,
+    type JobBillingType,
+    type JobRiskFlag,
+    type JobPriority,
     TIME_ENTRY_STATUSES,
     WORKER_ALLOWED_TIME_ENTRY_STATUSES,
     FOREMAN_ALLOWED_TIME_ENTRY_STATUSES,
     BILLING_TYPES,
     TIME_ENTRY_TYPES,
     ACTIVITY_TYPES,
-    WORKER_TYPES
+    WORKER_TYPES,
+    JOB_STATUSES,
+    JOB_STAGE_STATUSES,
+    JOB_STAGE_TYPES,
+    JOB_BILLING_TYPES,
+    JOB_RISK_FLAGS,
+    JOB_PRIORITIES
 } from '../../shared/contracts';
 
-export type { TimeEntryStatus, BillingType, TimeEntryType, ActivityType, WorkerType };
+export type {
+    TimeEntryStatus,
+    BillingType,
+    TimeEntryType,
+    ActivityType,
+    WorkerType,
+    JobStatus,
+    JobStageStatus,
+    JobStageType,
+    JobBillingType,
+    JobRiskFlag,
+    JobPriority
+};
 export {
     TIME_ENTRY_STATUSES,
     WORKER_ALLOWED_TIME_ENTRY_STATUSES,
@@ -21,7 +45,13 @@ export {
     BILLING_TYPES,
     TIME_ENTRY_TYPES,
     ACTIVITY_TYPES,
-    WORKER_TYPES
+    WORKER_TYPES,
+    JOB_STATUSES,
+    JOB_STAGE_STATUSES,
+    JOB_STAGE_TYPES,
+    JOB_BILLING_TYPES,
+    JOB_RISK_FLAGS,
+    JOB_PRIORITIES
 };
 
 export type ConstructionType =
@@ -510,15 +540,7 @@ export interface EmployeePerformanceSummary {
     difficultyBreakdown: DifficultyBreakdownItem[];
 }
 
-export type JobStatus =
-    | 'draft'
-    | 'planned'
-    | 'in_progress'
-    | 'paused'
-    | 'done'
-    | 'cancelled';
-
-export type JobRiskFlag = 'none' | 'delay' | 'overbudget' | 'scope_change';
+// JobStatus and JobRiskFlag are imported directly from shared/contracts
 
 export interface JobChecklistItem {
     id: string;
@@ -687,8 +709,8 @@ export interface JobStage {
     id: string;
     jobId: string;
     name: string;
-    type: 'podstawowy' | 'dodatkowy';
-    status: 'planowany' | 'w_toku' | 'zakończony' | 'anulowany';
+    type: JobStageType;
+    status: JobStageStatus;
 
     plannedRevenueNet: number;
     plannedCostNet?: number;

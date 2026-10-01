@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo, useCallback } from 'react';
+import { Fragment, useState, useEffect, useMemo, useCallback } from 'react';
 import { AlertCircle, Edit2, Save, X, FileText, Receipt } from 'lucide-react';
 import type { Job, JobExpenseCategory } from '../../models/types';
 import { useJobs } from '../../context/JobsContext';
@@ -380,8 +380,8 @@ export const JobFinancialTab = ({ job }: JobFinancialTabProps) => {
                                     const variancePercent = bucket.planned > 0 ? ((bucket.actual - bucket.planned) / bucket.planned) * 100 : (bucket.actual > 0 ? 100 : 0);
                                     const hasData = bucket.planned > 0 || bucket.actual > 0;
                                     return (
-                                        <>
-                                            <tr key={bucket.label}>
+                                        <Fragment key={bucket.label}>
+                                            <tr>
                                                 <td className={`py-3 font-medium ${bucket.color}`}>{bucket.label}</td>
                                                 <td className="py-3 text-right">
                                                     {isEditing ? (
@@ -419,7 +419,7 @@ export const JobFinancialTab = ({ job }: JobFinancialTabProps) => {
                                                     <td className="text-right py-1">-</td>
                                                 </tr>
                                             ))}
-                                        </>
+                                        </Fragment>
                                     );
                                 })}
 
