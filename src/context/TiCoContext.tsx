@@ -44,6 +44,7 @@ interface TiCoContextType {
     requests: Request[];
     isLoading: boolean;
     loadStatus: LoadStatus;
+    mutationRevision: number;
 
     // Crew Actions
     createCrew: (input: { name: string; foremanId: string; memberIds: string[] }) => Promise<void>;
@@ -110,6 +111,7 @@ export const TiCoProvider = ({ children }: { children: ReactNode }) => {
     const [crews, setCrews] = useState<Crew[]>([]);
     const [messages, setMessages] = useState<Message[]>([]);
     const [requests, setRequests] = useState<Request[]>([]);
+    const [mutationRevision, setMutationRevision] = useState(0);
 
     const { token } = useAuth();
 
@@ -315,6 +317,7 @@ export const TiCoProvider = ({ children }: { children: ReactNode }) => {
             : candidateEntry;
 
         setTimeEntries(prev => [...prev, finalEntry]);
+        setMutationRevision(prev => prev + 1);
     };
 
     const updateTimeEntry = async (id: string, updates: Partial<TimeEntry>) => {
@@ -338,11 +341,13 @@ export const TiCoProvider = ({ children }: { children: ReactNode }) => {
             : { ...current, ...finalUpdates };
 
         setTimeEntries(prev => prev.map(t => t.id === id ? merged : t));
+        setMutationRevision(prev => prev + 1);
     };
 
     const deleteTimeEntry = async (id: string) => {
         await repository.deleteTimeEntry(id);
         setTimeEntries(prev => prev.filter(t => t.id !== id));
+        setMutationRevision(prev => prev + 1);
     };
 
     const updateTimeEntryStatus = async (id: string, status: TimeEntry['status']) => {
@@ -352,6 +357,7 @@ export const TiCoProvider = ({ children }: { children: ReactNode }) => {
     const batchUpdate = async (ids: string[], updates: Partial<TimeEntry>) => {
         await repository.batchUpdateTimeEntries(ids, updates);
         setTimeEntries(prev => prev.map(t => ids.includes(t.id) ? { ...t, ...updates, updatedAt: new Date().toISOString() } : t));
+        setMutationRevision(prev => prev + 1);
     };
 
     // --- Settlement Handlers ---
@@ -446,6 +452,7 @@ export const TiCoProvider = ({ children }: { children: ReactNode }) => {
         setRequests(prev => prev.map(r =>
             advanceIds.includes(r.id) ? { ...r, settlementId: newSettlement.id } : r
         ));
+        setMutationRevision(prev => prev + 1);
 
         return newSettlement;
     };
@@ -481,6 +488,7 @@ export const TiCoProvider = ({ children }: { children: ReactNode }) => {
 
         await repository.createSettlement(newSettlement);
         setSettlements(prev => [...prev, newSettlement]);
+        setMutationRevision(prev => prev + 1);
 
         return newSettlement;
     };
@@ -488,6 +496,7 @@ export const TiCoProvider = ({ children }: { children: ReactNode }) => {
     const updateSettlement = async (id: string, patch: Partial<Pick<Settlement, 'notes' | 'status'>>) => {
         await repository.updateSettlement(id, patch);
         setSettlements(prev => prev.map(s => s.id === id ? { ...s, ...patch, updatedAt: new Date().toISOString() } : s));
+        setMutationRevision(prev => prev + 1);
     };
 
     const recalculateSettlement = async (id: string) => {
@@ -530,6 +539,7 @@ export const TiCoProvider = ({ children }: { children: ReactNode }) => {
         };
         await repository.updateSettlement(id, updates);
         setSettlements(prev => prev.map(s => s.id === id ? { ...s, ...updates } : s));
+        setMutationRevision(prev => prev + 1);
     };
 
     const markSettlementExported = async (id: string) => {
@@ -595,6 +605,7 @@ export const TiCoProvider = ({ children }: { children: ReactNode }) => {
                 }
                 return Array.from(map.values());
             });
+            setMutationRevision(prev => prev + 1);
         }
         return result;
     };
@@ -603,6 +614,7 @@ export const TiCoProvider = ({ children }: { children: ReactNode }) => {
         const { result, deletedIds } = await executeClearTimeEntries(timeEntries, repository);
         if (deletedIds.size > 0) {
             setTimeEntries(prev => prev.filter(e => !deletedIds.has(e.id)));
+            setMutationRevision(prev => prev + 1);
         }
         return result;
     };
@@ -618,6 +630,7 @@ export const TiCoProvider = ({ children }: { children: ReactNode }) => {
             requests,
             isLoading,
             loadStatus,
+            mutationRevision,
 
             
 

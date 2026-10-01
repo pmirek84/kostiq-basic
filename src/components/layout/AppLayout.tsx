@@ -2,10 +2,14 @@ import { Suspense } from 'react';
 import { Outlet } from 'react-router-dom';
 import Sidebar from './Sidebar';
 import { Navbar } from './Navbar';
+import { useTiCoJobsSync } from '../../hooks/useTiCoJobsSync';
 
 const LoadingFallback = () => <div className="p-8 text-center text-gray-400">Ładowanie...</div>;
 
 export const AppLayout = () => {
+    // Invalidate and refresh jobs on TiCo mutations
+    useTiCoJobsSync();
+
     // NOTE: seedDemoData() was removed — it was running on EVERY page load
     // and could overwrite production data. Demo seeding is now only available
     // via the Settings page button (DEV mode only).

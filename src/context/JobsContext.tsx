@@ -1,4 +1,3 @@
-import { applyLaborAggregatesToJobs } from '../services/domain/laborAggregatesService';
 import { createContext, useContext, useState, useEffect, useCallback, type ReactNode } from 'react';
 import type { Job, JobStage, JobStageItem, Offer, Construction } from '../models/types';
 import { v4 as uuidv4 } from 'uuid';
@@ -20,10 +19,6 @@ interface JobsContextType {
     addJobStage: (jobId: string, stageData: any) => Promise<void>;
     updateJobStage: (jobId: string, stageId: string, updates: any) => Promise<void>;
     deleteJobStage: (jobId: string, stageId: string) => Promise<void>;
-    updateJobsLaborAggregates: (
-        jobAggregates: Map<string, { hours: number; cost: number; settledCost: number }>,
-        stageAggregates: Map<string, { hours: number; cost: number }>
-    ) => Promise<void>;
 
     // Stage Items (BOM)
     getJobStageItems: (jobId: string) => Promise<JobStageItem[]>;
@@ -40,7 +35,7 @@ export function JobsProvider({ children }: { children: ReactNode }) {
     const [jobs, setJobs] = useState<Job[]>([]);
     const { clients } = useClients();
 
-    const refreshJobs = async () => {
+    const refreshJobs = useCallback(async () => {
         try {
             const data = await jobStorage.getAllJobs();
 
@@ -86,7 +81,7 @@ export function JobsProvider({ children }: { children: ReactNode }) {
             console.error('Failed to load jobs:', error);
             toast.error('Błąd podczas odświeżania zleceń');
         }
-    };
+    }, [clients]);
 
     useEffect(() => {
         refreshJobs();
@@ -302,16 +297,6 @@ export function JobsProvider({ children }: { children: ReactNode }) {
         }
     };
 
-    // --- Site Log Management ---
-    const updateJobsLaborAggregates = useCallback(async (
-        _jobAggregates?: Map<string, { hours: number; cost: number; settledCost: number }>,
-        _stageAggregates?: Map<string, { hours: number; cost: number }>
-    ) => {
-        // Backend is the single authoritative source of truth for labor aggregates.
-        // Frontend does not write actualLabor* fields via PATCH to prevent stale browser tabs
-        // or client-side fabrication from overwriting authoritative triggers.
-    }, []);
-
     // --- Job Stage Items (BOM) ---
     const getJobStageItems = async (jobId: string) => {
         return await jobStageItemStorage.getByJob(jobId);
@@ -369,7 +354,6 @@ export function JobsProvider({ children }: { children: ReactNode }) {
             addJobStage,
             updateJobStage,
             deleteJobStage,
-            updateJobsLaborAggregates,
             getJobStageItems,
             addJobStageItem,
             updateJobStageItem,

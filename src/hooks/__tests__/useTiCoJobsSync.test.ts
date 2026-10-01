@@ -1,5 +1,5 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { renderHook, act } from '@testing-library/react';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { renderHook } from '@testing-library/react';
 import { useTiCoJobsSync } from '../useTiCoJobsSync';
 import { useTiCo } from '../../context/TiCoContext';
 import { useJobs } from '../../context/JobsContext';
@@ -7,72 +7,48 @@ import { useJobs } from '../../context/JobsContext';
 vi.mock('../../context/TiCoContext');
 vi.mock('../../context/JobsContext');
 
-describe('useTiCoJobsSync - Production Hook Guard Tests', () => {
-    const mockUpdateJobsLaborAggregates = vi.fn();
+describe('useTiCoJobsSync - UI Invalidation Guard Tests', () => {
+    const mockRefreshJobs = vi.fn();
 
     beforeEach(() => {
         vi.clearAllMocks();
-        vi.useFakeTimers();
         (useJobs as any).mockReturnValue({
-            updateJobsLaborAggregates: mockUpdateJobsLaborAggregates
+            refreshJobs: mockRefreshJobs
         });
     });
 
-    afterEach(() => {
-        vi.useRealTimers();
-    });
-
-    it('blocks synchronization when loadStatus is loading', () => {
+    it('does not call refreshJobs on initial mount (prevents startup double-fetch)', () => {
         (useTiCo as any).mockReturnValue({
-            timeEntries: [],
-            settlements: [],
-            employees: [],
-            loadStatus: 'loading'
+            mutationRevision: 0
         });
 
         renderHook(() => useTiCoJobsSync());
 
-        act(() => {
-            vi.advanceTimersByTime(2000);
-        });
-
-        expect(mockUpdateJobsLaborAggregates).not.toHaveBeenCalled();
+        expect(mockRefreshJobs).not.toHaveBeenCalled();
     });
 
-    it('blocks synchronization when loadStatus is failed', () => {
-        (useTiCo as any).mockReturnValue({
-            timeEntries: [],
-            settlements: [],
-            employees: [],
-            loadStatus: 'failed'
-        });
+    it('triggers exactly one refreshJobs call when mutationRevision increases', () => {
+        let currentRevision = 0;
+        (useTiCo as any).mockImplementation(() => ({
+            mutationRevision: currentRevision
+        }));
 
-        renderHook(() => useTiCoJobsSync());
+        const { rerender } = renderHook(() => useTiCoJobsSync());
+        expect(mockRefreshJobs).not.toHaveBeenCalled();
 
-        act(() => {
-            vi.advanceTimersByTime(2000);
-        });
+        // Simulate TiCo mutation: mutationRevision increments
+        currentRevision = 1;
+        rerender();
 
-        expect(mockUpdateJobsLaborAggregates).not.toHaveBeenCalled();
-    });
+        expect(mockRefreshJobs).toHaveBeenCalledTimes(1);
 
-    it('executes synchronization when loadStatus is complete, passing empty maps if timeEntries is empty', () => {
-        (useTiCo as any).mockReturnValue({
-            timeEntries: [],
-            settlements: [],
-            employees: [],
-            loadStatus: 'complete'
-        });
+        // Re-render with unchanged mutationRevision
+        rerender();
+        expect(mockRefreshJobs).toHaveBeenCalledTimes(1);
 
-        renderHook(() => useTiCoJobsSync());
-
-        act(() => {
-            vi.advanceTimersByTime(1500); // Exceed 1s debounce
-        });
-
-        expect(mockUpdateJobsLaborAggregates).toHaveBeenCalledTimes(1);
-        const [jobAggs, stageAggs] = mockUpdateJobsLaborAggregates.mock.calls[0];
-        expect(jobAggs.size).toBe(0);
-        expect(stageAggs.size).toBe(0);
+        // Next mutation
+        currentRevision = 2;
+        rerender();
+        expect(mockRefreshJobs).toHaveBeenCalledTimes(2);
     });
 });

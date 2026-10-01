@@ -1,37 +1,23 @@
 import { useEffect, useRef } from 'react';
 import { useTiCo } from '../context/TiCoContext';
 import { useJobs } from '../context/JobsContext';
-import { calculateLaborAggregates } from '../services/domain/laborAggregatesService';
 
+/**
+ * Observes TiCoContext mutationRevision and invalidates/refreshes jobs state in UI.
+ * Does not calculate or post aggregates from browser.
+ * Ensures exactly one fetch per mutation with no re-render loops.
+ */
 export const useTiCoJobsSync = () => {
-    const { timeEntries, settlements, employees, loadStatus } = useTiCo();
-    const { updateJobsLaborAggregates } = useJobs();
-
-    const timeoutRef = useRef<any>(null);
+    const { mutationRevision } = useTiCo();
+    const { refreshJobs } = useJobs();
+    const refreshJobsRef = useRef(refreshJobs);
+    refreshJobsRef.current = refreshJobs;
+    const prevRevisionRef = useRef(mutationRevision);
 
     useEffect(() => {
-        // CRITICAL GUARD: Only calculate and sync aggregates when data loading is completely and successfully finished.
-        // Blocks on 'loading' or 'failed' to prevent wiping or corrupting jobs data.
-        // Legitimate empty lists (complete + 0 entries) will properly recalculate/zero out costs.
-        if (loadStatus !== 'complete') {
-            return;
+        if (mutationRevision > prevRevisionRef.current) {
+            prevRevisionRef.current = mutationRevision;
+            refreshJobsRef.current();
         }
-
-        if (timeoutRef.current) {
-            clearTimeout(timeoutRef.current);
-        }
-
-        timeoutRef.current = setTimeout(() => {
-            const { jobAggregates, stageAggregates } = calculateLaborAggregates(timeEntries, settlements, employees);
-
-            if (import.meta.env?.DEV) {
-                console.log('TiCo client diagnostics:', { jobAggregates, stageAggregates });
-            }
-            updateJobsLaborAggregates(jobAggregates, stageAggregates);
-        }, 1000); // Debounce 1s
-
-        return () => {
-            if (timeoutRef.current) clearTimeout(timeoutRef.current);
-        };
-    }, [timeEntries, settlements, employees, loadStatus, updateJobsLaborAggregates]);
+    }, [mutationRevision]);
 };
