@@ -2075,48 +2075,74 @@ app.post('/api/time-entries/batch-update', verifyToken, requireRole('admin', 'ma
         if (!db) return res.status(503).json({ error: 'Database not connected' });
         const { ids, updates } = req.body;
         if (!ids || !Array.isArray(ids)) {
-            return res.status(400).json({ error: 'Invalid IDs' });
+            return res.status(400).json({ error: 'Brak lub nieprawidłowa tablica identyfikatorów (ids).' });
+        }
+        if (ids.length === 0) {
+            return res.status(200).json({ success: true, count: 0, affectedJobs: [] });
+        }
+        if (!updates || typeof updates !== 'object') {
+            return res.status(400).json({ error: 'Brak obiektu aktualizacji (updates).' });
         }
 
+        // 1. [P1 FIX] Fail-closed snapshot: pre-fetch affected entries before updateMany to identify all source jobs
+        let beforeEntries = [];
+        try {
+            beforeEntries = await db.collection('time-entries').find({
+                $or: [{ id: { $in: ids } }, { _id: { $in: ids } }]
+            }).toArray();
+        } catch (fetchErr) {
+            console.error('[batch-update snapshot time-entries ERROR]', fetchErr.message);
+            return res.status(500).json({
+                error: `Błąd pobierania wpisów czasu przed aktualizacją wsadową: ${fetchErr.message}`
+            });
+        }
+
+        // Collect all affected job IDs (both before and after mutation, supporting transfers & rejections)
+        const jobIds = new Set();
+        beforeEntries.forEach(e => {
+            if (e.jobId) jobIds.add(e.jobId);
+            if (e.project_id) jobIds.add(e.project_id);
+        });
+        if (updates.jobId) jobIds.add(updates.jobId);
+        if (updates.project_id) jobIds.add(updates.project_id);
+
+        // 2. Perform the update
+        const safeUpdates = { ...updates };
+        delete safeUpdates._id;
+        safeUpdates.updatedAt = safeUpdates.updatedAt || new Date().toISOString();
+
         await db.collection('time-entries').updateMany(
-            { id: { $in: ids } },
-            { $set: updates }
+            { $or: [{ id: { $in: ids } }, { _id: { $in: ids } }] },
+            { $set: safeUpdates }
         );
 
-        // BLOKER #2 TRIGGER: If this batch approval sets status to 'approved',
-        // recalculate labor costs for all affected jobs.
-        if (updates.status === 'approved') {
-            const affectedEntries = await db.collection('time-entries').find({
-                id: { $in: ids }
-            }).toArray();
+        // 3. [P1 FIX] Authoritative recalculation of all affected jobs regardless of status transition
+        // (handles submitted → admin_approved/approved, and approved/admin_approved → rejected/admin_rejected)
+        for (const jobId of jobIds) {
+            await recalculateJobLaborCosts(jobId);
 
-            // Collect unique jobIds from affected entries
-            const jobIds = new Set();
-            affectedEntries.forEach(e => {
-                if (e.jobId) jobIds.add(e.jobId);
-                if (e.project_id) jobIds.add(e.project_id);
-            });
-
-            // Recalculate each affected job
-            for (const jobId of jobIds) {
-                await recalculateJobLaborCosts(jobId);
-
-                // AUTO-STATUS: planned → in_progress on first approval
-                const job = await db.collection('jobs').findOne({
-                    $or: [{ id: jobId }, { _id: jobId }]
-                });
-                if (job && (job.status === 'planned' || job.status === 'planowane')) {
-                    await db.collection('jobs').updateOne(
-                        { $or: [{ id: jobId }, { _id: jobId }] },
-                        { $set: { status: 'in_progress', actualStartDate: new Date().toISOString(), updatedAt: new Date().toISOString() } }
-                    );
-                    console.log(`[AUTO-STATUS] Job ${jobId} transitioned: planned → in_progress`);
+            // AUTO-STATUS: planned → in_progress on approval (approved or admin_approved)
+            if (updates.status === 'approved' || updates.status === 'admin_approved') {
+                try {
+                    const job = await db.collection('jobs').findOne({
+                        $or: [{ id: jobId }, { _id: jobId }]
+                    });
+                    if (job && (job.status === 'planned' || job.status === 'planowane')) {
+                        await db.collection('jobs').updateOne(
+                            { $or: [{ id: jobId }, { _id: jobId }] },
+                            { $set: { status: 'in_progress', actualStartDate: new Date().toISOString(), updatedAt: new Date().toISOString() } }
+                        );
+                        console.log(`[AUTO-STATUS] Job ${jobId} transitioned: planned → in_progress`);
+                    }
+                } catch (autoStatusErr) {
+                    console.warn(`[AUTO-STATUS ERROR] Job ${jobId}:`, autoStatusErr.message);
                 }
             }
         }
 
-        res.status(200).json({ success: true });
+        res.status(200).json({ success: true, count: ids.length, affectedJobs: Array.from(jobIds) });
     } catch (err) {
+        console.error('[BATCH-UPDATE ERROR]', err);
         res.status(500).json({ error: err.message });
     }
 });

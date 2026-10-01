@@ -104,9 +104,23 @@ test('Shared Contracts: Job JSON Schema, Statuses, Lifecycle and Financial Prote
         find: (filter = {}) => {
             const list = Array.from(timeEntriesStore.values()).filter(e => {
                 if (filter.$or) {
-                    const match = filter.$or.some(c => (c.jobId && e.jobId === c.jobId) || (c.project_id && e.project_id === c.project_id));
+                    const match = filter.$or.some(c => {
+                        if (c.jobId && e.jobId === c.jobId) return true;
+                        if (c.project_id && e.project_id === c.project_id) return true;
+                        if (c.id) {
+                            if (c.id.$in) return c.id.$in.includes(e.id);
+                            return c.id === e.id;
+                        }
+                        const eid = e._id || e.id;
+                        if (c._id) {
+                            if (c._id.$in) return c._id.$in.includes(eid);
+                            return c._id === eid;
+                        }
+                        return false;
+                    });
                     if (!match) return false;
                 }
+                if (filter.id?.$in && !filter.id.$in.includes(e.id)) return false;
                 if (filter.jobId && e.jobId !== filter.jobId) return false;
                 if (filter.settlementId && e.settlementId !== filter.settlementId) return false;
                 if (filter.status?.$in && !filter.status.$in.includes(e.status)) return false;
@@ -144,6 +158,37 @@ test('Shared Contracts: Job JSON Schema, Statuses, Lifecycle and Financial Prote
             if (!existing) return { matchedCount: 0, modifiedCount: 0 };
             if (update.$set) Object.assign(existing, update.$set);
             return { matchedCount: 1, modifiedCount: 1 };
+        },
+        updateMany: async (filter, update) => {
+            let matchedCount = 0;
+            let modifiedCount = 0;
+            for (const [id, doc] of timeEntriesStore.entries()) {
+                let matches = true;
+                if (filter.$or) {
+                    matches = filter.$or.some(c => {
+                        if (c.id) {
+                            if (c.id.$in) return c.id.$in.includes(doc.id);
+                            return c.id === doc.id;
+                        }
+                        const eid = doc._id || doc.id;
+                        if (c._id) {
+                            if (c._id.$in) return c._id.$in.includes(eid);
+                            return c._id === eid;
+                        }
+                        return false;
+                    });
+                } else if (filter.id?.$in) {
+                    matches = filter.id.$in.includes(doc.id);
+                }
+                if (matches) {
+                    matchedCount++;
+                    if (update.$set) {
+                        Object.assign(doc, update.$set);
+                        modifiedCount++;
+                    }
+                }
+            }
+            return { matchedCount, modifiedCount };
         },
         deleteOne: async (filter) => {
             const id = filter.id || (filter.$or ? filter.$or[0].id : null);
@@ -921,6 +966,140 @@ test('Shared Contracts: Job JSON Schema, Statuses, Lifecycle and Financial Prote
         assert.strictEqual(recoveredJob.aggregationPending, false, 'Pending flag must be cleared');
         assert.strictEqual(recoveredJob.actualLaborHours, 7, 'Labor hours recalculated accurately');
         assert.strictEqual(recoveredJob.actualLaborCost, 350, 'Labor cost recalculated accurately');
+    });
+
+    await t.test('[P1] batch-update recalculates job labor aggregates on real approval and rejection statuses', async () => {
+        const batchJobId = 'job-batch-approval-test';
+        jobsStore.set(batchJobId, {
+            id: batchJobId,
+            name: 'Zlecenie Batch Approval',
+            clientId: 'client-1',
+            status: 'planned',
+            actualLaborHours: 0,
+            actualLaborCost: 0,
+            settledLaborCost: 0,
+            stages: []
+        });
+
+        // 1. Two submitted entries
+        timeEntriesStore.set('te-batch-1', {
+            id: 'te-batch-1',
+            jobId: batchJobId,
+            hours: 6,
+            cost: 300,
+            status: 'submitted',
+            isActive: true
+        });
+        timeEntriesStore.set('te-batch-2', {
+            id: 'te-batch-2',
+            jobId: batchJobId,
+            hours: 4,
+            cost: 200,
+            status: 'submitted',
+            isActive: true
+        });
+
+        // Test transition: submitted → admin_approved
+        const resAdminApprove = await request(app)
+            .post('/api/time-entries/batch-update')
+            .set('Authorization', 'Bearer ' + adminToken)
+            .send({
+                ids: ['te-batch-1', 'te-batch-2'],
+                updates: {
+                    status: 'admin_approved',
+                    adminId: 'admin-1',
+                    adminApprovedAt: new Date().toISOString()
+                }
+            });
+
+        assert.strictEqual(resAdminApprove.status, 200, 'batch-update returns 200 on admin approval');
+        assert.strictEqual(resAdminApprove.body.success, true);
+        assert.strictEqual(timeEntriesStore.get('te-batch-1').status, 'admin_approved');
+        assert.strictEqual(timeEntriesStore.get('te-batch-2').status, 'admin_approved');
+
+        const jobAfterApprove = jobsStore.get(batchJobId);
+        assert.strictEqual(jobAfterApprove.actualLaborHours, 10, 'admin_approved adds hours to Job');
+        assert.strictEqual(jobAfterApprove.actualLaborCost, 500, 'admin_approved adds cost to Job');
+        assert.strictEqual(jobAfterApprove.status, 'in_progress', 'Job auto-transitions from planned to in_progress on admin_approved');
+
+        // Test transition: admin_approved → admin_rejected (deducts hours & costs)
+        const resAdminReject = await request(app)
+            .post('/api/time-entries/batch-update')
+            .set('Authorization', 'Bearer ' + adminToken)
+            .send({
+                ids: ['te-batch-1'],
+                updates: {
+                    status: 'admin_rejected',
+                    adminId: 'admin-1',
+                    adminApprovedAt: new Date().toISOString()
+                }
+            });
+
+        assert.strictEqual(resAdminReject.status, 200, 'batch-update returns 200 on admin rejection');
+        assert.strictEqual(timeEntriesStore.get('te-batch-1').status, 'admin_rejected');
+
+        const jobAfterReject1 = jobsStore.get(batchJobId);
+        assert.strictEqual(jobAfterReject1.actualLaborHours, 4, 'admin_rejected deducts rejected hours from Job');
+        assert.strictEqual(jobAfterReject1.actualLaborCost, 200, 'admin_rejected deducts rejected cost from Job');
+
+        // Test transition: approved → rejected (deducts remaining hours & costs)
+        // First set te-batch-2 to standard 'approved'
+        await request(app)
+            .post('/api/time-entries/batch-update')
+            .set('Authorization', 'Bearer ' + adminToken)
+            .send({
+                ids: ['te-batch-2'],
+                updates: { status: 'approved' }
+            });
+
+        // Then reject it
+        const resReject2 = await request(app)
+            .post('/api/time-entries/batch-update')
+            .set('Authorization', 'Bearer ' + adminToken)
+            .send({
+                ids: ['te-batch-2'],
+                updates: { status: 'rejected' }
+            });
+
+        assert.strictEqual(resReject2.status, 200, 'batch-update returns 200 on rejection');
+        assert.strictEqual(timeEntriesStore.get('te-batch-2').status, 'rejected');
+
+        const jobAfterReject2 = jobsStore.get(batchJobId);
+        assert.strictEqual(jobAfterReject2.actualLaborHours, 0, 'rejected deducts all remaining hours');
+        assert.strictEqual(jobAfterReject2.actualLaborCost, 0, 'rejected deducts all remaining costs');
+
+        // Fail-closed snapshot on batch-update: if pre-fetch fails, abort with 500 without updating records
+        let throwBatchUpdateFind = true;
+        const origFind = mockTimeEntriesColl.find;
+        mockTimeEntriesColl.find = (filter) => {
+            if (throwBatchUpdateFind && filter?.$or?.some(c => c.id?.$in?.includes('te-fail-batch-upd'))) {
+                throw new Error('Database failure during batch-update pre-fetch snapshot');
+            }
+            return origFind(filter);
+        };
+
+        timeEntriesStore.set('te-fail-batch-upd', {
+            id: 'te-fail-batch-upd',
+            jobId: batchJobId,
+            hours: 5,
+            cost: 250,
+            status: 'submitted',
+            isActive: true
+        });
+
+        const resFailSnapshot = await request(app)
+            .post('/api/time-entries/batch-update')
+            .set('Authorization', 'Bearer ' + adminToken)
+            .send({
+                ids: ['te-fail-batch-upd'],
+                updates: { status: 'admin_approved' }
+            });
+
+        assert.strictEqual(resFailSnapshot.status, 500, 'Batch-update must fail-closed with 500 if snapshot query fails');
+        assert.strictEqual(timeEntriesStore.get('te-fail-batch-upd').status, 'submitted', 'Record must not be modified if snapshot failed');
+
+        throwBatchUpdateFind = false;
+        mockTimeEntriesColl.find = origFind;
     });
 
     await t.test('automated generation guard: verifies job.generated.ts is strictly up to date with job.schema.json', () => {
