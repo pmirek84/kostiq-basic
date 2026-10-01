@@ -2636,11 +2636,13 @@ async function validateAndNormalizeTimeEntryDoc(doc, { db, user, isBatch = false
         doc.activityType = doc.type;
     } else if (doc.activityType && !doc.type) {
         doc.type = doc.activityType;
-    } else if (!doc.activityType) {
-        doc.activityType = existingEntry?.activityType || 'work';
-    }
-    if (!doc.type) {
-        doc.type = doc.workerType || doc.activityType || 'work';
+    } else if (!isPatch) {
+        if (!doc.activityType) {
+            doc.activityType = existingEntry?.activityType || 'work';
+        }
+        if (!doc.type) {
+            doc.type = doc.workerType || doc.activityType || 'work';
+        }
     }
 
     // Subcontractor settlementType mapping & mismatch validation
@@ -3184,11 +3186,16 @@ app.post('/api/time-entries/batch-update', verifyToken, requireRole('admin', 'ma
             });
         }
 
-        // [P1 FIX] Validate and normalize every resulting document against the authoritative TimeEntry rules
+        const nowIso = new Date().toISOString();
+
+        // [P1 FIX] Validate and normalize every resulting document against authoritative TimeEntry rules.
+        // We pass candidatePatch = { ...safeUpdates } (NOT the full merged document) with isPatch: true.
+        // This ensures status-only updates (or non-cost fields) do NOT trigger cost recalculation
+        // based on the current employee rate, preserving historical entry cost/rate (identical to single PATCH).
         const validatedCandidates = [];
         for (const entry of beforeEntries) {
-            const candidate = { ...entry, ...safeUpdates };
-            const valError = await validateAndNormalizeTimeEntryDoc(candidate, {
+            const candidatePatch = { ...safeUpdates };
+            const valError = await validateAndNormalizeTimeEntryDoc(candidatePatch, {
                 db,
                 user: req.user,
                 isBatch: true,
@@ -3200,7 +3207,19 @@ app.post('/api/time-entries/batch-update', verifyToken, requireRole('admin', 'ma
                     error: valError.error || 'Błąd walidacji wpisu czasu w operacji wsadowej.'
                 });
             }
-            validatedCandidates.push(candidate);
+
+            const candidateId = entry.id || (entry._id ? entry._id.toString() : null);
+            const finalDoc = {
+                ...entry,
+                ...candidatePatch,
+                id: candidateId,
+                updatedAt: nowIso
+            };
+            delete finalDoc._id;
+            if (isJobUpdated) delete finalDoc.project_id;
+            if (isEmpUpdated) delete finalDoc.employee_id;
+
+            validatedCandidates.push(finalDoc);
         }
 
         // Collect all affected job IDs (both before and after mutation, supporting transfers & rejections)
@@ -3210,6 +3229,27 @@ app.post('/api/time-entries/batch-update', verifyToken, requireRole('admin', 'ma
             if (e.project_id) jobIds.add(e.project_id);
         });
         if (safeUpdates.jobId) jobIds.add(safeUpdates.jobId);
+
+        // [P1 FIX] Pre-mark all affected jobs as aggregationPending: true BEFORE writing to MongoDB.
+        // If bulkWrite encounters an unexpected failure or partial write mid-way, the jobs
+        // remain flagged for background reconciliation, ensuring consistency and preventing silent drift.
+        if (jobIds.size > 0 && db && typeof db.collection === 'function') {
+            const affectedJobIdsArray = Array.from(jobIds);
+            const jobsColl = db.collection('jobs');
+            if (typeof jobsColl.updateMany === 'function') {
+                await jobsColl.updateMany(
+                    { $or: [{ id: { $in: affectedJobIdsArray } }, { _id: { $in: affectedJobIdsArray } }] },
+                    { $set: { aggregationPending: true, updatedAt: nowIso } }
+                );
+            } else if (typeof jobsColl.updateOne === 'function') {
+                for (const jId of affectedJobIdsArray) {
+                    await jobsColl.updateOne(
+                        { $or: [{ id: jId }, { _id: jId }] },
+                        { $set: { aggregationPending: true, updatedAt: nowIso } }
+                    );
+                }
+            }
+        }
 
         // 2. [P1 FIX] Always persist the authoritative, normalized validatedCandidates via bulkWrite!
         // Recalculated costs (e.g. from changing employeeId, rate, quantity, or unitPrice) and normalized
@@ -3222,16 +3262,9 @@ app.post('/api/time-entries/batch-update', verifyToken, requireRole('admin', 'ma
             unsetDoc.employee_id = "";
         }
 
-        const nowIso = new Date().toISOString();
         const bulkOps = validatedCandidates.map(c => {
-            const setDoc = {
-                ...c,
-                updatedAt: nowIso
-            };
-            delete setDoc._id;
+            const setDoc = { ...c };
             delete setDoc.id;
-            if (isJobUpdated) delete setDoc.project_id;
-            if (isEmpUpdated) delete setDoc.employee_id;
 
             const op = {
                 updateOne: {
@@ -3245,21 +3278,71 @@ app.post('/api/time-entries/batch-update', verifyToken, requireRole('admin', 'ma
             return op;
         });
 
-        await db.collection('time-entries').bulkWrite(bulkOps);
+        try {
+            await db.collection('time-entries').bulkWrite(bulkOps);
+        } catch (bulkErr) {
+            console.error('[BATCH-UPDATE bulkWrite ERROR]', bulkErr);
+            // Best-effort immediate recalculation for all affected jobs in case some writes committed
+            for (const jobId of jobIds) {
+                try {
+                    await recalculateJobLaborCosts(jobId);
+                } catch (recalcErr) {
+                    console.warn(`[BATCH-UPDATE error recovery] Failed recalculating job ${jobId}:`, recalcErr.message);
+                }
+            }
+
+            // Inspect bulkErr for partial execution details
+            if (bulkErr.name === 'MongoBulkWriteError' || bulkErr.result || bulkErr.writeErrors) {
+                const writeResult = bulkErr.result || {};
+                const modifiedCount = writeResult.modifiedCount || (writeResult.nModified || 0);
+                const matchedCount = writeResult.matchedCount || (writeResult.nMatched || 0);
+                const writeErrors = bulkErr.writeErrors || [];
+                const failedIndices = new Set(writeErrors.map(e => e.index));
+                const failedIds = [];
+                const succeededIds = [];
+
+                for (let i = 0; i < validatedCandidates.length; i++) {
+                    const cId = validatedCandidates[i].id;
+                    if (failedIndices.has(i)) {
+                        failedIds.push(cId);
+                    } else {
+                        succeededIds.push(cId);
+                    }
+                }
+
+                return res.status(500).json({
+                    error: `Operacja wsadowa zakończyła się częściowym błędem: ${bulkErr.message}`,
+                    partialSuccess: succeededIds.length > 0,
+                    succeededIds,
+                    failedIds,
+                    matchedCount,
+                    modifiedCount,
+                    affectedJobs: Array.from(jobIds),
+                    aggregationPending: true
+                });
+            }
+
+            return res.status(500).json({
+                error: `Błąd zapisu wsadowego wpisów czasu: ${bulkErr.message}`,
+                affectedJobs: Array.from(jobIds),
+                aggregationPending: true
+            });
+        }
 
         // 3. [P1 & P2 FIX] Authoritative recalculation of all affected jobs regardless of status transition
-        // (recalculateJobLaborCosts atomically handles financial aggregates, stage actuals, and lifecycle auto-status)
+        // (recalculateJobLaborCosts atomically clears aggregationPending: false on success)
         for (const jobId of jobIds) {
             await recalculateJobLaborCosts(jobId);
         }
 
-        const updatedIds = beforeEntries.map(e => e.id || (e._id ? e._id.toString() : null)).filter(Boolean);
+        const updatedIds = validatedCandidates.map(c => c.id).filter(Boolean);
         res.status(200).json({
             success: true,
             count: updatedIds.length,
             matchedCount: updatedIds.length,
             updatedIds,
-            affectedJobs: Array.from(jobIds)
+            affectedJobs: Array.from(jobIds),
+            items: validatedCandidates
         });
     } catch (err) {
         console.error('[BATCH-UPDATE ERROR]', err);

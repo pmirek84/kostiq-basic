@@ -355,8 +355,13 @@ export const TiCoProvider = ({ children }: { children: ReactNode }) => {
     };
 
     const batchUpdate = async (ids: string[], updates: Partial<TimeEntry>) => {
-        await repository.batchUpdateTimeEntries(ids, updates);
-        setTimeEntries(prev => prev.map(t => ids.includes(t.id) ? { ...t, ...updates, updatedAt: new Date().toISOString() } : t));
+        const updated = await repository.batchUpdateTimeEntries(ids, updates);
+        if (Array.isArray(updated) && updated.length > 0) {
+            const map = new Map(updated.map(t => [t.id, t]));
+            setTimeEntries(prev => prev.map(t => map.get(t.id) || t));
+        } else {
+            setTimeEntries(prev => prev.map(t => ids.includes(t.id) ? { ...t, ...updates, updatedAt: new Date().toISOString() } : t));
+        }
         setMutationRevision(prev => prev + 1);
     };
 

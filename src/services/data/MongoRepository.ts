@@ -214,11 +214,12 @@ export class MongoRepository implements TiCoRepository {
         });
     }
 
-    async batchUpdateTimeEntries(ids: string[], updates: Partial<TimeEntry>): Promise<void> {
-        await this.fetchJson<void>('/time-entries/batch-update', {
+    async batchUpdateTimeEntries(ids: string[], updates: Partial<TimeEntry>): Promise<TimeEntry[]> {
+        const res = await this.fetchJson<{ items?: TimeEntry[]; success?: boolean }>('/time-entries/batch-update', {
             method: 'POST',
             body: JSON.stringify({ ids, updates }),
         });
+        return res?.items || [];
     }
 
     async batchImportTimeEntries(entries: TimeEntry[]): Promise<{

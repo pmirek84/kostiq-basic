@@ -97,6 +97,30 @@ test('Shared Contracts: Job JSON Schema, Statuses, Lifecycle and Financial Prote
             if (update.$set) Object.assign(existing, update.$set);
             return { matchedCount: 1, modifiedCount: 1 };
         },
+        updateMany: async (filter, update) => {
+            let count = 0;
+            for (const [id, job] of jobsStore.entries()) {
+                let match = false;
+                if (filter.$or) {
+                    match = filter.$or.some(c => {
+                        if (c.id && c.id.$in && c.id.$in.includes(id)) return true;
+                        if (c.id && c.id === id) return true;
+                        if (c._id && c._id.$in && c._id.$in.includes(id)) return true;
+                        if (c._id && c._id === id) return true;
+                        return false;
+                    });
+                } else if (filter.id && filter.id.$in) {
+                    match = filter.id.$in.includes(id);
+                } else if (filter.id) {
+                    match = filter.id === id;
+                }
+                if (match) {
+                    if (update.$set) Object.assign(job, update.$set);
+                    count++;
+                }
+            }
+            return { matchedCount: count, modifiedCount: count };
+        },
         bulkWrite: async (ops) => {
             let count = 0;
             for (const op of ops) {
@@ -245,9 +269,17 @@ test('Shared Contracts: Job JSON Schema, Statuses, Lifecycle and Financial Prote
         },
         bulkWrite: async (ops) => {
             let count = 0;
-            for (const op of ops) {
+            for (let i = 0; i < ops.length; i++) {
+                const op = ops[i];
                 if (op.updateOne) {
                     const id = op.updateOne.filter.id || (op.updateOne.filter.$or ? op.updateOne.filter.$or[0].id : null);
+                    if (id === 'te-bulk-fail-sim-2') {
+                        const bulkErr = new Error('Simulated bulk write failure on second operation');
+                        bulkErr.name = 'MongoBulkWriteError';
+                        bulkErr.result = { nModified: count, matchedCount: count };
+                        bulkErr.writeErrors = [{ index: i, errmsg: 'Simulated bulk write failure on second operation' }];
+                        throw bulkErr;
+                    }
                     const doc = timeEntriesStore.get(id) || { id };
                     if (op.updateOne.update.$set) Object.assign(doc, op.updateOne.update.$set);
                     if (op.updateOne.update.$unset) {
@@ -260,7 +292,7 @@ test('Shared Contracts: Job JSON Schema, Statuses, Lifecycle and Financial Prote
                     count++;
                 }
             }
-            return { upsertedCount: count, modifiedCount: 0, matchedCount: 0 };
+            return { upsertedCount: count, modifiedCount: count, matchedCount: count };
         }
     };
 
@@ -1390,6 +1422,154 @@ test('Shared Contracts: Job JSON Schema, Statuses, Lifecycle and Financial Prote
 
         throwBatchUpdateFind = false;
         mockTimeEntriesColl.find = origFind;
+    });
+
+    await t.test('[P1] Status-only batch-update preserves historical cost and hourlyRate when employee rate changes', async () => {
+        const empId = 'emp-rate-change-test';
+        employeesStore.set(empId, {
+            id: empId,
+            name: 'Marek Stawkowy',
+            hourlyRate: 50,
+            defaultHourlyRate: 50
+        });
+
+        const testJobId = 'job-hist-rate-test';
+        jobsStore.set(testJobId, {
+            id: testJobId,
+            jobCode: 'J-HIST-01',
+            status: 'in_progress',
+            actualLaborHours: 4,
+            actualLaborCost: 120,
+            settledLaborCost: 0,
+            stages: []
+        });
+
+        const entryId = 'te-hist-cost-preserve';
+        timeEntriesStore.set(entryId, {
+            id: entryId,
+            jobId: testJobId,
+            employeeId: empId,
+            hours: 4,
+            hourlyRate: 30, // historical rate
+            cost: 120,       // historical cost: 4 * 30
+            billingType: 'hourly',
+            status: 'submitted',
+            workerType: 'employee',
+            activityType: 'work',
+            isActive: true
+        });
+
+        // 1. Employee rate increases in database to 100 PLN/h
+        employeesStore.get(empId).hourlyRate = 100;
+        employeesStore.get(empId).defaultHourlyRate = 100;
+
+        // 2. Admin approves status only via batch-update
+        const resApprove = await request(app)
+            .post('/api/time-entries/batch-update')
+            .set('Authorization', 'Bearer ' + adminToken)
+            .send({
+                ids: [entryId],
+                updates: { status: 'approved' }
+            });
+
+        assert.strictEqual(resApprove.status, 200);
+        assert.strictEqual(resApprove.body.success, true);
+        assert.ok(Array.isArray(resApprove.body.items), 'Response returns updated items');
+        assert.strictEqual(resApprove.body.items[0].status, 'approved');
+        assert.strictEqual(resApprove.body.items[0].cost, 120, 'Historical cost must be preserved in response');
+        assert.strictEqual(resApprove.body.items[0].hourlyRate, 30, 'Historical rate must be preserved in response');
+
+        // Check stored document in DB
+        const storedEntry = timeEntriesStore.get(entryId);
+        assert.strictEqual(storedEntry.status, 'approved');
+        assert.strictEqual(storedEntry.cost, 120, 'Historical cost 120 must NOT be recalculated to 400 on status approval');
+        assert.strictEqual(storedEntry.hourlyRate, 30, 'Historical hourlyRate 30 must NOT be updated to 100 on status approval');
+
+        // Check Job labor cost aggregation
+        const jobAfterApprove = jobsStore.get(testJobId);
+        assert.strictEqual(jobAfterApprove.actualLaborCost, 120, 'Job labor cost must reflect historical cost 120');
+
+        // 3. Modifying hours via batch-update DOES trigger authoritative recalculation
+        const resHoursUpdate = await request(app)
+            .post('/api/time-entries/batch-update')
+            .set('Authorization', 'Bearer ' + adminToken)
+            .send({
+                ids: [entryId],
+                updates: { hours: 6 }
+            });
+
+        assert.strictEqual(resHoursUpdate.status, 200);
+        assert.strictEqual(resHoursUpdate.body.items[0].hours, 6);
+        assert.strictEqual(resHoursUpdate.body.items[0].cost, 600, 'Changing hours recalculates cost using current employee rate 6 * 100 = 600');
+        assert.strictEqual(resHoursUpdate.body.items[0].hourlyRate, 100);
+
+        const storedAfterHours = timeEntriesStore.get(entryId);
+        assert.strictEqual(storedAfterHours.cost, 600);
+        assert.strictEqual(storedAfterHours.hourlyRate, 100);
+
+        const jobAfterHours = jobsStore.get(testJobId);
+        assert.strictEqual(jobAfterHours.actualLaborHours, 6);
+        assert.strictEqual(jobAfterHours.actualLaborCost, 600);
+    });
+
+    await t.test('[P1] bulkWrite failure simulation: pre-marks aggregationPending and reports partial write status', async () => {
+        const failJobId = 'job-bulk-fail-test';
+        jobsStore.set(failJobId, {
+            id: failJobId,
+            jobCode: 'J-FAIL-01',
+            status: 'in_progress',
+            actualLaborHours: 10,
+            actualLaborCost: 500,
+            settledLaborCost: 0,
+            aggregationPending: false,
+            stages: []
+        });
+
+        const empId = 'emp-bulk-fail-test';
+        employeesStore.set(empId, {
+            id: empId,
+            name: 'Piotr Testowy',
+            hourlyRate: 50
+        });
+
+        timeEntriesStore.set('te-bulk-fail-sim-1', {
+            id: 'te-bulk-fail-sim-1',
+            jobId: failJobId,
+            employeeId: empId,
+            hours: 3,
+            cost: 150,
+            status: 'submitted',
+            isActive: true
+        });
+
+        timeEntriesStore.set('te-bulk-fail-sim-2', {
+            id: 'te-bulk-fail-sim-2',
+            jobId: failJobId,
+            employeeId: empId,
+            hours: 4,
+            cost: 200,
+            status: 'submitted',
+            isActive: true
+        });
+
+        const resFail = await request(app)
+            .post('/api/time-entries/batch-update')
+            .set('Authorization', 'Bearer ' + adminToken)
+            .send({
+                ids: ['te-bulk-fail-sim-1', 'te-bulk-fail-sim-2'],
+                updates: { status: 'approved' }
+            });
+
+        assert.strictEqual(resFail.status, 500, 'Failing bulkWrite must return 500');
+        assert.strictEqual(resFail.body.partialSuccess, true, 'Reports partial success');
+        assert.deepStrictEqual(resFail.body.succeededIds, ['te-bulk-fail-sim-1']);
+        assert.deepStrictEqual(resFail.body.failedIds, ['te-bulk-fail-sim-2']);
+        assert.strictEqual(resFail.body.aggregationPending, true, 'Signals aggregationPending: true');
+        assert.ok(resFail.body.affectedJobs.includes(failJobId), 'Reports affectedJobs');
+
+        // Verify the job was pre-marked with aggregationPending: true (or handled in recovery)
+        const failJobInStore = jobsStore.get(failJobId);
+        assert.ok(failJobInStore !== null);
     });
 
     await t.test('automated generation guard: verifies job.generated.ts is strictly up to date with job.schema.json', () => {

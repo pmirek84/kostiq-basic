@@ -23,7 +23,7 @@ export interface TiCoRepository {
     createTimeEntry(entry: TimeEntry): Promise<TimeEntry>;
     updateTimeEntry(id: string, updates: Partial<TimeEntry>): Promise<TimeEntry>;
     deleteTimeEntry(id: string): Promise<void>;
-    batchUpdateTimeEntries(ids: string[], updates: Partial<TimeEntry>): Promise<void>;
+    batchUpdateTimeEntries(ids: string[], updates: Partial<TimeEntry>): Promise<TimeEntry[]>;
     batchImportTimeEntries?(entries: TimeEntry[]): Promise<{
         succeeded: number;
         failed: number;
