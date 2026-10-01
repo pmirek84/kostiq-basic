@@ -20,7 +20,8 @@ const {
     validateJobPostSchema,
     validateJobPatchSchema,
     validateJobBatchSchema,
-    validateJobPaginatedSchema
+    validateJobPaginatedSchema,
+    recalculateJobLaborCosts
 } = require('../server');
 
 const { jobSchema } = require('../../shared/contracts/index.cjs');
@@ -42,6 +43,11 @@ test('Shared Contracts: Job JSON Schema, Statuses, Lifecycle and Financial Prote
     const clientsStore = new Map([
         ['client-1', { id: 'client-1', company: 'Firma Budowlana S.A.', type: 'company', isActive: true }],
         ['client-2', { id: 'client-2', name: 'Anna', lastName: 'Kowalska', type: 'individual', isActive: true }]
+    ]);
+    const timeEntriesStore = new Map();
+    const settlementsStore = new Map();
+    const employeesStore = new Map([
+        ['admin-1', { id: 'admin-1', hourlyRate: 50, dailyRate: 400, projectRate: 1500, isActive: true }]
     ]);
 
     const mockJobsColl = {
@@ -93,10 +99,102 @@ test('Shared Contracts: Job JSON Schema, Statuses, Lifecycle and Financial Prote
         }
     };
 
+    const mockTimeEntriesColl = {
+        find: (filter = {}) => {
+            const list = Array.from(timeEntriesStore.values()).filter(e => {
+                if (filter.$or) {
+                    const match = filter.$or.some(c => (c.jobId && e.jobId === c.jobId) || (c.project_id && e.project_id === c.project_id));
+                    if (!match) return false;
+                }
+                if (filter.jobId && e.jobId !== filter.jobId) return false;
+                if (filter.settlementId && e.settlementId !== filter.settlementId) return false;
+                if (filter.status?.$in && !filter.status.$in.includes(e.status)) return false;
+                if (filter.isActive?.$ne !== undefined && e.isActive === filter.isActive.$ne) return false;
+                return true;
+            });
+            return {
+                skip: () => ({ limit: () => ({ toArray: async () => list }) }),
+                limit: () => ({ toArray: async () => list }),
+                toArray: async () => list
+            };
+        },
+        countDocuments: async (filter = {}) => {
+            const list = Array.from(timeEntriesStore.values()).filter(e => {
+                if (filter.$or) {
+                    const match = filter.$or.some(c => (c.jobId && e.jobId === c.jobId) || (c.project_id && e.project_id === c.project_id));
+                    if (!match) return false;
+                }
+                if (filter.isActive?.$ne !== undefined && e.isActive === filter.isActive.$ne) return false;
+                return true;
+            });
+            return list.length;
+        },
+        findOne: async (filter) => {
+            const id = filter.$or ? filter.$or[0].id : filter.id;
+            return timeEntriesStore.get(id) || null;
+        },
+        insertOne: async (doc) => {
+            timeEntriesStore.set(doc.id, { ...doc });
+            return { insertedId: doc.id };
+        },
+        updateOne: async (filter, update) => {
+            const id = filter.id || (filter.$or ? filter.$or[0].id : null);
+            const existing = timeEntriesStore.get(id);
+            if (!existing) return { matchedCount: 0, modifiedCount: 0 };
+            if (update.$set) Object.assign(existing, update.$set);
+            return { matchedCount: 1, modifiedCount: 1 };
+        }
+    };
+
+    const mockSettlementsColl = {
+        find: (filter = {}) => {
+            const list = Array.from(settlementsStore.values()).filter(s => {
+                if (filter.id?.$in && !filter.id.$in.includes(s.id)) return false;
+                if (filter.jobId && s.jobId !== filter.jobId) return false;
+                if (filter.type && s.type !== filter.type) return false;
+                if (filter.isActive?.$ne !== undefined && s.isActive === filter.isActive.$ne) return false;
+                return true;
+            });
+            return {
+                skip: () => ({ limit: () => ({ toArray: async () => list }) }),
+                limit: () => ({ toArray: async () => list }),
+                toArray: async () => list
+            };
+        },
+        findOne: async (filter) => {
+            const id = filter.$or ? filter.$or[0].id : filter.id;
+            return settlementsStore.get(id) || null;
+        },
+        insertOne: async (doc) => {
+            settlementsStore.set(doc.id, { ...doc });
+            return { insertedId: doc.id };
+        },
+        updateOne: async (filter, update) => {
+            const id = filter.id || (filter.$or ? filter.$or[0].id : null);
+            const existing = settlementsStore.get(id);
+            if (!existing) return { matchedCount: 0, modifiedCount: 0 };
+            if (update.$set) Object.assign(existing, update.$set);
+            return { matchedCount: 1, modifiedCount: 1 };
+        }
+    };
+
+    const mockEmployeesColl = {
+        findOne: async (filter) => {
+            const id = filter.$or ? filter.$or[0].id : filter.id;
+            return employeesStore.get(id) || null;
+        },
+        find: () => ({
+            toArray: async () => Array.from(employeesStore.values())
+        })
+    };
+
     const mockDb = {
         collection: (name) => {
             if (name === 'jobs') return mockJobsColl;
             if (name === 'clients') return mockClientsColl;
+            if (name === 'time-entries') return mockTimeEntriesColl;
+            if (name === 'settlements') return mockSettlementsColl;
+            if (name === 'employees') return mockEmployeesColl;
             return {
                 findOne: async () => null,
                 find: () => ({ toArray: async () => [] })
@@ -253,21 +351,24 @@ test('Shared Contracts: Job JSON Schema, Statuses, Lifecycle and Financial Prote
         assert.strictEqual(resPost.body.actualTotalCost, 0, 'actualTotalCost must be 0 on creation');
         assert.strictEqual(resPost.body.stages[0].actualLaborCost, 0, 'Stage actualLaborCost must be 0 on creation');
 
-        // Now attempt to forge actuals on PATCH
+        // Now test PATCH: frontend labor aggregates sync is accepted, but fabricated revenue/materials are stripped
         const resPatch = await request(app)
             .patch('/api/jobs/job-forged-actuals')
             .set('Authorization', 'Bearer ' + adminToken)
             .send({
                 actualLaborCost: 456789,
                 settledLaborCost: 123456,
+                revenueActualNet: 999999, // Should be stripped
+                materialsActualNet: 111111, // Should be stripped
                 priority: 'high'
             });
 
         assert.strictEqual(resPatch.status, 200);
         assert.strictEqual(resPatch.body.priority, 'high');
-        // Authoritative 0 must remain; client patch value deleted before MongoDB persistence
-        assert.strictEqual(resPatch.body.actualLaborCost, 0, 'PATCH must discard client fabricated actualLaborCost');
-        assert.strictEqual(resPatch.body.settledLaborCost, 0, 'PATCH must discard client fabricated settledLaborCost');
+        assert.strictEqual(resPatch.body.actualLaborCost, 456789, 'PATCH allows frontend labor sync to persist actualLaborCost');
+        assert.strictEqual(resPatch.body.settledLaborCost, 123456, 'PATCH allows frontend labor sync to persist settledLaborCost');
+        assert.strictEqual(resPatch.body.revenueActualNet, 0, 'PATCH must discard client fabricated revenueActualNet');
+        assert.strictEqual(resPatch.body.materialsActualNet, 0, 'PATCH must discard client fabricated materialsActualNet');
     });
 
     await t.test('PATCH validation: guards against empty strings and non-existent jobs', async () => {
@@ -367,6 +468,194 @@ test('Shared Contracts: Job JSON Schema, Statuses, Lifecycle and Financial Prote
         assert.ok(workerJob);
         assert.strictEqual(workerJob.actualLaborCost, undefined, 'Sensitive actualLaborCost must be stripped for worker');
         assert.strictEqual(workerJob.totalPlannedRevenueNet, undefined, 'Sensitive revenue must be stripped for worker');
+    });
+
+
+    await t.test('[P1] batch upsert of existing job unconditionally preserves its actual costs and stage actuals', async () => {
+        // Seed existing job with accumulated labor and stage actuals
+        jobsStore.set('job-batch-preserve', {
+            id: 'job-batch-preserve',
+            name: 'Stare Zlecenie',
+            clientId: 'client-1',
+            status: 'in_progress',
+            actualLaborHours: 120,
+            actualLaborCost: 7500,
+            settledLaborCost: 5000,
+            timeEntriesCount: 15,
+            timeEntriesHours: 120,
+            materialsActualNet: 3200,
+            stages: [
+                {
+                    id: 'stage-existing',
+                    name: 'Etap 1',
+                    type: 'podstawowy',
+                    status: 'planowany',
+                    actualLaborHours: 120,
+                    actualLaborCost: 7500
+                }
+            ]
+        });
+
+        // Client imports batch update containing existing job with zero/missing actuals
+        const resBatch = await request(app)
+            .post('/api/jobs/batch-import')
+            .set('Authorization', 'Bearer ' + adminToken)
+            .send({
+                items: [
+                    {
+                        id: 'job-batch-preserve',
+                        name: 'Zaktualizowane Zlecenie Batch',
+                        clientId: 'client-1',
+                        priority: 'high',
+                        actualLaborCost: 0, // Client tries to send 0
+                        stages: [
+                            {
+                                id: 'stage-existing',
+                                name: 'Etap 1 Zaktualizowany',
+                                type: 'podstawowy',
+                                status: 'w_toku',
+                                plannedRevenueNet: 50000
+                            }
+                        ]
+                    }
+                ]
+            });
+
+        assert.strictEqual(resBatch.status, 200);
+        assert.strictEqual(resBatch.body.succeeded, 1);
+
+        const persisted = jobsStore.get('job-batch-preserve');
+        assert.strictEqual(persisted.name, 'Zaktualizowane Zlecenie Batch');
+        assert.strictEqual(persisted.priority, 'high');
+        assert.strictEqual(persisted.actualLaborHours, 120, 'Batch upsert must preserve existing actualLaborHours');
+        assert.strictEqual(persisted.actualLaborCost, 7500, 'Batch upsert must preserve existing actualLaborCost');
+        assert.strictEqual(persisted.settledLaborCost, 5000, 'Batch upsert must preserve existing settledLaborCost');
+        assert.strictEqual(persisted.materialsActualNet, 3200, 'Batch upsert must preserve existing materialsActualNet');
+        assert.strictEqual(persisted.stages[0].actualLaborCost, 7500, 'Batch upsert must preserve stage actualLaborCost');
+        assert.strictEqual(persisted.stages[0].actualLaborHours, 120, 'Batch upsert must preserve stage actualLaborHours');
+    });
+
+    await t.test('[P2] clientName is authoritatively derived from DB and cannot be desynchronized by client on POST or PATCH', async () => {
+        // 1. POST with client provided clientName
+        const resPostClient = await request(app)
+            .post('/api/jobs')
+            .set('Authorization', 'Bearer ' + adminToken)
+            .send({
+                id: 'job-client-sync',
+                name: 'Zlecenie z fałszywym klientem',
+                clientId: 'client-1',
+                clientName: 'Sfałszowana Nazwa Sp. z o.o.'
+            });
+        assert.strictEqual(resPostClient.status, 201);
+        assert.strictEqual(resPostClient.body.clientName, 'Firma Budowlana S.A.', 'Backend ignores clientName input on POST');
+        assert.strictEqual(jobsStore.get('job-client-sync').clientName, 'Firma Budowlana S.A.');
+
+        // 2. PATCH with standalone clientName and priority (no clientId)
+        const resPatchName = await request(app)
+            .patch('/api/jobs/job-client-sync')
+            .set('Authorization', 'Bearer ' + adminToken)
+            .send({
+                clientName: 'Próba Nadpisania Nazwy Klienta',
+                priority: 'high'
+            });
+        assert.strictEqual(resPatchName.status, 200);
+        assert.strictEqual(resPatchName.body.clientName, 'Firma Budowlana S.A.', 'Standalone clientName is stripped from PATCH');
+        assert.strictEqual(jobsStore.get('job-client-sync').clientName, 'Firma Budowlana S.A.');
+
+        // 3. PATCH with clientId changed to client-2 (individual)
+        const resPatchClient = await request(app)
+            .patch('/api/jobs/job-client-sync')
+            .set('Authorization', 'Bearer ' + adminToken)
+            .send({
+                clientId: 'client-2'
+            });
+        assert.strictEqual(resPatchClient.status, 200);
+        assert.strictEqual(resPatchClient.body.clientName, 'Anna Kowalska', 'Changing clientId refreshes clientName from DB');
+        assert.strictEqual(jobsStore.get('job-client-sync').clientName, 'Anna Kowalska');
+    });
+
+    await t.test('[P1] backend recalculateJobLaborCosts achieves full rule parity and triggers on time-entries/settlements mutations', async () => {
+        const jobId = 'job-parity-test';
+        jobsStore.set(jobId, {
+            id: jobId,
+            name: 'Zlecenie Test Parzystości',
+            clientId: 'client-1',
+            stages: [
+                { id: 'p-stage-1', name: 'Etap 1', actualLaborHours: 0, actualLaborCost: 0 },
+                { id: 'p-stage-2', name: 'Etap 2', actualLaborHours: 0, actualLaborCost: 0 },
+                { id: 'p-stage-empty', name: 'Etap Pusty', actualLaborHours: 50, actualLaborCost: 2500 }
+            ]
+        });
+
+        // Settlements setup: closed, exported, draft, and contract
+        settlementsStore.set('s-closed', { id: 's-closed', status: 'closed', isActive: true });
+        settlementsStore.set('s-exported', { id: 's-exported', status: 'exported', isActive: true });
+        settlementsStore.set('s-draft', { id: 's-draft', status: 'draft', isActive: true });
+        settlementsStore.set('s-contract', {
+            id: 's-contract',
+            type: 'contract',
+            jobId: jobId,
+            stageId: 'p-stage-2',
+            totalAmount: 1800,
+            status: 'exported',
+            isActive: true
+        });
+
+        // Time entries setup:
+        // 1. submitted -> ignored
+        timeEntriesStore.set('te-p1', { id: 'te-p1', jobId: jobId, stageId: 'p-stage-1', hours: 5, cost: 250, status: 'submitted', isActive: true });
+        // 2. approved -> counted, but not settled
+        timeEntriesStore.set('te-p2', { id: 'te-p2', jobId: jobId, stageId: 'p-stage-1', hours: 8, cost: 400, status: 'approved', isActive: true });
+        // 3. admin_approved + closed settlement -> counted & settled
+        timeEntriesStore.set('te-p3', { id: 'te-p3', jobId: jobId, stageId: 'p-stage-1', hours: 10, cost: 500, status: 'admin_approved', settlementId: 's-closed', isActive: true });
+        // 4. approved + draft settlement -> counted, NOT settled
+        timeEntriesStore.set('te-p4', { id: 'te-p4', jobId: jobId, stageId: 'p-stage-1', hours: 6, cost: 300, status: 'approved', settlementId: 's-draft', isActive: true });
+
+        // Trigger full recalculation
+        await recalculateJobLaborCosts(jobId);
+
+        const calculated = jobsStore.get(jobId);
+        // Total hours: 8 + 10 + 6 = 24
+        assert.strictEqual(calculated.actualLaborHours, 24, 'recalculateJobLaborCosts calculates correct total hours');
+        // Total cost: 400 + 500 + 300 + 1800 (contract) = 3000
+        assert.strictEqual(calculated.actualLaborCost, 3000, 'recalculateJobLaborCosts calculates correct total cost including contract');
+        // Settled cost: 500 (s-closed) + 1800 (s-contract exported) = 2300
+        assert.strictEqual(calculated.settledLaborCost, 2300, 'recalculateJobLaborCosts calculates correct settled cost');
+        // Time entries count: 4
+        assert.strictEqual(calculated.timeEntriesCount, 4);
+
+        // Stages verification:
+        const stage1 = calculated.stages.find(s => s.id === 'p-stage-1');
+        assert.strictEqual(stage1.actualLaborHours, 24);
+        assert.strictEqual(stage1.actualLaborCost, 1200);
+
+        const stage2 = calculated.stages.find(s => s.id === 'p-stage-2');
+        assert.strictEqual(stage2.actualLaborHours, 0);
+        assert.strictEqual(stage2.actualLaborCost, 1800, 'Contract settlement allocated to stage');
+
+        const stageEmpty = calculated.stages.find(s => s.id === 'p-stage-empty');
+        assert.strictEqual(stageEmpty.actualLaborHours, 0, 'Stage without entries is zeroed out');
+        assert.strictEqual(stageEmpty.actualLaborCost, 0, 'Stage without entries is zeroed out');
+
+        // Test mutation trigger via POST /api/time-entries
+        const resMutation = await request(app)
+            .post('/api/time-entries')
+            .set('Authorization', 'Bearer ' + adminToken)
+            .send({
+                id: 'te-mutation-hook',
+                jobId: jobId,
+                stageId: 'p-stage-1',
+                employeeId: 'admin-1',
+                date: '2026-10-01',
+                hours: 5,
+                billingType: 'hourly',
+                status: 'approved'
+            });
+
+        assert.strictEqual(resMutation.status, 201);
+        const jobAfterTrigger = jobsStore.get(jobId);
+        assert.strictEqual(jobAfterTrigger.actualLaborHours, 29, 'Mutation hook recalculates labor hours');
+        assert.strictEqual(jobAfterTrigger.actualLaborCost, 3250, 'Mutation hook recalculates labor cost');
     });
 
     await t.test('automated generation guard: verifies job.generated.ts is strictly up to date with job.schema.json', () => {

@@ -1345,6 +1345,13 @@ const createRouter = (collectionName, options = {}) => {
                 newItem.id = new ObjectId().toString();
             }
             const result = await db.collection(collectionName).insertOne(newItem);
+            if (typeof options.afterMutation === 'function') {
+                try {
+                    await options.afterMutation('create', { doc: newItem, req });
+                } catch (mErr) {
+                    console.warn(`[afterMutation ${collectionName} create]`, mErr.message);
+                }
+            }
             res.status(201).json({ ...newItem, _id: result.insertedId });
         } catch (err) {
             // MongoDB duplicate key error code 11000 or duplicate key pattern
@@ -1428,6 +1435,13 @@ const createRouter = (collectionName, options = {}) => {
                     const matchedCount = result.matchedCount || 0;
                     const succeeded = upsertedCount + matchedCount;
 
+                    if (typeof options.afterMutation === 'function') {
+                        try {
+                            await options.afterMutation('batch-import', { items, req });
+                        } catch (mErr) {
+                            console.warn(`[afterMutation ${collectionName} batch-import]`, mErr.message);
+                        }
+                    }
                     return res.status(200).json({
                         status: 'success',
                         succeeded,
@@ -1537,6 +1551,13 @@ const createRouter = (collectionName, options = {}) => {
             }
 
             const updated = await db.collection(collectionName).findOne(filter);
+            if (typeof options.afterMutation === 'function') {
+                try {
+                    await options.afterMutation('update', { id, updates, doc: updated, req });
+                } catch (mErr) {
+                    console.warn(`[afterMutation ${collectionName} update]`, mErr.message);
+                }
+            }
             const { _id, ...rest } = updated;
             res.json({ ...rest, id: rest.id || _id.toString() });
         } catch (err) {
@@ -1561,6 +1582,13 @@ const createRouter = (collectionName, options = {}) => {
 
                 if (result.matchedCount === 0) {
                     return res.status(404).json({ error: 'Item not found' });
+                }
+                if (typeof options.afterMutation === 'function') {
+                    try {
+                        await options.afterMutation('delete', { id, req });
+                    } catch (mErr) {
+                        console.warn(`[afterMutation ${collectionName} delete]`, mErr.message);
+                    }
                 }
                 res.status(200).json({ success: true, message: 'Item archived' });
             } else {
@@ -1607,70 +1635,124 @@ async function recalculateJobLaborCosts(jobId) {
     if (!db || !jobId) return;
 
     try {
-        // Aggregate all approved time entries for this job
+        // 1. Fetch all approved time entries for this job (approved + admin_approved)
         const entries = await db.collection('time-entries').find({
             $or: [{ jobId: jobId }, { project_id: jobId }],
-            status: 'approved'
+            status: { $in: ['approved', 'admin_approved'] },
+            isActive: { $ne: false }
         }).toArray();
 
-        const totalHours = entries.reduce((sum, e) => sum + (e.hours || 0), 0);
-        const totalCost = entries.reduce((sum, e) => sum + (e.cost || 0), 0);
-
-        // Also compute settled cost (entries that have a settlementId)
-        const settledEntries = entries.filter(e => e.settlementId);
-        const settledCost = settledEntries.reduce((sum, e) => sum + (e.cost || 0), 0);
-
-        // Update the job document directly in MongoDB
-        const result = await db.collection('jobs').updateOne(
-            { id: jobId },
-            {
-                $set: {
-                    actualLaborHours: totalHours,
-                    actualLaborCost: totalCost,
-                    settledLaborCost: settledCost,
-                    updatedAt: new Date().toISOString()
-                }
-            }
-        );
-
-        if (result.matchedCount > 0) {
-            console.log(`[TRIGGER] Updated job ${jobId}: actualLaborHours=${totalHours}, actualLaborCost=${totalCost}, settledLaborCost=${settledCost}`);
+        // 2. Fetch referenced settlements to check closed/exported status
+        const settlementIds = Array.from(new Set(entries.map(e => e.settlementId).filter(Boolean)));
+        let settlementStatusMap = new Map();
+        if (settlementIds.length > 0) {
+            const settlementDocs = await db.collection('settlements').find({
+                id: { $in: settlementIds },
+                isActive: { $ne: false }
+            }).toArray();
+            settlementStatusMap = new Map(settlementDocs.map(s => [s.id, s.status]));
         }
 
-        // Also aggregate per-stage if entries have stageId
+        // 3. Fetch contract settlements linked directly to this job
+        const contractSettlements = await db.collection('settlements').find({
+            jobId: jobId,
+            type: 'contract',
+            isActive: { $ne: false }
+        }).toArray();
+
+        let totalHours = 0;
+        let totalCost = 0;
+        let settledCost = 0;
         const stageMap = new Map();
+
+        // Time entries aggregation
         entries.forEach(e => {
+            const h = Number(e.hours) || 0;
+            const c = (e.cost !== undefined && e.cost !== null) ? Number(e.cost) : 0;
+            totalHours += h;
+            totalCost += c;
+
+            let isSettled = false;
+            if (e.settlementId) {
+                const sStatus = settlementStatusMap.get(e.settlementId);
+                if (sStatus === 'closed' || sStatus === 'exported') {
+                    isSettled = true;
+                }
+            }
+            if (isSettled) {
+                settledCost += c;
+            }
+
             if (e.stageId) {
-                const existing = stageMap.get(e.stageId) || { hours: 0, cost: 0 };
-                existing.hours += (e.hours || 0);
-                existing.cost += (e.cost || 0);
-                stageMap.set(e.stageId, existing);
+                const currentStage = stageMap.get(e.stageId) || { hours: 0, cost: 0 };
+                stageMap.set(e.stageId, {
+                    hours: currentStage.hours + h,
+                    cost: currentStage.cost + c
+                });
             }
         });
 
-        if (stageMap.size > 0) {
-            const job = await db.collection('jobs').findOne({ id: jobId });
-            if (job && job.stages && Array.isArray(job.stages)) {
-                let stageChanges = false;
-                const updatedStages = job.stages.map(stage => {
-                    const agg = stageMap.get(stage.id);
-                    if (agg) {
-                        stageChanges = true;
-                        return { ...stage, actualLaborHours: agg.hours, actualLaborCost: agg.cost };
-                    }
-                    return stage;
-                });
-                if (stageChanges) {
-                    await db.collection('jobs').updateOne(
-                        { id: jobId },
-                        { $set: { stages: updatedStages } }
-                    );
-                    console.log(`[TRIGGER] Updated stages for job ${jobId}`);
-                }
+        // Contract settlements aggregation
+        contractSettlements.forEach(cs => {
+            const amount = Number(cs.totalAmount) || 0;
+            totalCost += amount;
+            const isSettled = cs.status === 'closed' || cs.status === 'exported';
+            if (isSettled) {
+                settledCost += amount;
             }
+            if (cs.stageId) {
+                const currentStage = stageMap.get(cs.stageId) || { hours: 0, cost: 0 };
+                stageMap.set(cs.stageId, {
+                    hours: currentStage.hours,
+                    cost: currentStage.cost + amount
+                });
+            }
+        });
+
+        // Time entries count
+        let totalEntriesCount = entries.length;
+        if (typeof db.collection('time-entries').countDocuments === 'function') {
+            totalEntriesCount = await db.collection('time-entries').countDocuments({
+                $or: [{ jobId: jobId }, { project_id: jobId }],
+                isActive: { $ne: false }
+            });
         }
+
+        const job = await db.collection('jobs').findOne({
+            $or: [{ id: jobId }, { _id: jobId }]
+        });
+
+        const updateDoc = {
+            actualLaborHours: totalHours,
+            actualLaborCost: totalCost,
+            settledLaborCost: settledCost,
+            timeEntriesCount: totalEntriesCount,
+            updatedAt: new Date().toISOString()
+        };
+
+        // Stages update with proper zeroing of stages without entries
+        if (job && job.stages && Array.isArray(job.stages)) {
+            updateDoc.stages = job.stages.map(stage => {
+                const agg = stageMap.get(stage.id) || { hours: 0, cost: 0 };
+                return {
+                    ...stage,
+                    actualLaborHours: agg.hours,
+                    actualLaborCost: agg.cost
+                };
+            });
+        }
+
+        const jobsColl = db.collection('jobs');
+        if (jobsColl && typeof jobsColl.updateOne === 'function') {
+            await jobsColl.updateOne(
+                { $or: [{ id: jobId }, { _id: jobId }] },
+                { $set: updateDoc }
+            );
+        }
+
+        console.log(`[TRIGGER] Recalculated job ${jobId}: actualLaborHours=${totalHours}, actualLaborCost=${totalCost}, settledLaborCost=${settledCost}`);
     } catch (err) {
-        console.error(`[TRIGGER] Failed to recalculate labor costs for job ${jobId}:`, err.message);
+        console.error(`[TRIGGER ERROR] Failed to recalculate labor costs for job ${jobId}:`, err.message);
     }
 }
 
@@ -2850,8 +2932,58 @@ app.use('/api/logistics-rates', verifyToken, requireRoleOrSafeGet, createRouter(
 app.use('/api/rental-rates', verifyToken, requireRoleOrSafeGet, createRouter('rental-rates'));
 app.use('/api/sheet-metal', verifyToken, requireRoleOrSafeGet, createRouter('sheet-metal'));
 app.use('/api/crews', verifyToken, requireRoleOrSafeGet, createRouter('crews'));
-app.use('/api/time-entries', verifyToken, validateTimeEntry, createRouter('time-entries'));
-app.use('/api/settlements', verifyToken, validateSettlement, createRouter('settlements'));
+app.use('/api/time-entries', verifyToken, validateTimeEntry, createRouter('time-entries', {
+    allowBatchImport: true,
+    afterMutation: async (action, ctx) => {
+        try {
+            const jobIds = new Set();
+            if (ctx.doc?.jobId) jobIds.add(ctx.doc.jobId);
+            if (ctx.doc?.project_id) jobIds.add(ctx.doc.project_id);
+            if (ctx.updates?.jobId) jobIds.add(ctx.updates.jobId);
+            if (ctx.updates?.project_id) jobIds.add(ctx.updates.project_id);
+            if (ctx.items && Array.isArray(ctx.items)) {
+                ctx.items.forEach(i => {
+                    if (i.jobId) jobIds.add(i.jobId);
+                    if (i.project_id) jobIds.add(i.project_id);
+                });
+            }
+            if (ctx.id && db && typeof db.collection === 'function' && jobIds.size === 0) {
+                const entry = await db.collection('time-entries').findOne({ id: ctx.id });
+                if (entry?.jobId) jobIds.add(entry.jobId);
+                if (entry?.project_id) jobIds.add(entry.project_id);
+            }
+            for (const jId of jobIds) {
+                await recalculateJobLaborCosts(jId);
+            }
+        } catch (err) {
+            console.warn('[afterMutation time-entries] Labor recalculation error:', err.message);
+        }
+    }
+}));
+
+app.use('/api/settlements', verifyToken, validateSettlement, createRouter('settlements', {
+    afterMutation: async (action, ctx) => {
+        try {
+            const jobIds = new Set();
+            if (ctx.doc?.jobId) jobIds.add(ctx.doc.jobId);
+            if (ctx.updates?.jobId) jobIds.add(ctx.updates.jobId);
+            if (ctx.id && db && typeof db.collection === 'function') {
+                const linkedEntries = await db.collection('time-entries').find({ settlementId: ctx.id }).toArray();
+                linkedEntries.forEach(e => {
+                    if (e.jobId) jobIds.add(e.jobId);
+                    if (e.project_id) jobIds.add(e.project_id);
+                });
+                const sDoc = await db.collection('settlements').findOne({ id: ctx.id });
+                if (sDoc?.jobId) jobIds.add(sDoc.jobId);
+            }
+            for (const jId of jobIds) {
+                await recalculateJobLaborCosts(jId);
+            }
+        } catch (err) {
+            console.warn('[afterMutation settlements] Labor recalculation error:', err.message);
+        }
+    }
+}));
 app.use('/api/messages', verifyToken, (req, res, next) => {
     if (req.method === 'POST') {
         const oldJson = res.json;
@@ -3053,23 +3185,27 @@ async function validateAndNormalizeJobDoc(doc, { db, user, isBatch = false, isPa
         return { error: 'Pole clientId jest wymagane.' };
     }
 
-    const effectiveClientId = doc.clientId || existingJob?.clientId;
-
-    // Fail-closed client verification
-    if (effectiveClientId && db && typeof db.collection === 'function') {
-        try {
-            const client = await db.collection('clients').findOne({
-                $or: [{ id: effectiveClientId }, { _id: effectiveClientId }]
-            });
-            if (!client) {
-                return { error: `Klient o identyfikatorze '${effectiveClientId}' nie istnieje.`, status: 404 };
+    // [P2 FIX] Authoritative client verification & clientName synchronization
+    if (doc.clientId !== undefined) {
+        if (db && typeof db.collection === 'function') {
+            try {
+                const client = await db.collection('clients').findOne({
+                    $or: [{ id: doc.clientId }, { _id: doc.clientId }]
+                });
+                if (!client) {
+                    return { error: `Klient o identyfikatorze '${doc.clientId}' nie istnieje.`, status: 404 };
+                }
+                // ALWAYS compute authoritative clientName from client document
+                doc.clientName = client.type === 'company'
+                    ? client.company
+                    : `${client.name || ''} ${client.lastName || ''}`.trim();
+            } catch (dbErr) {
+                return { error: 'Błąd weryfikacji klienta w bazie danych: ' + dbErr.message, status: 500 };
             }
-            if (!doc.clientName && !isPatch) {
-                doc.clientName = client.type === 'company' ? client.company : `${client.name || ''} ${client.lastName || ''}`.trim();
-            }
-        } catch (dbErr) {
-            return { error: 'Błąd weryfikacji klienta w bazie danych: ' + dbErr.message, status: 500 };
         }
+    } else if (isPatch) {
+        // On PATCH without clientId: standalone clientName update is deleted from payload
+        delete doc.clientName;
     }
 
     // Status normalization
@@ -3085,7 +3221,7 @@ async function validateAndNormalizeJobDoc(doc, { db, user, isBatch = false, isPa
         doc.status = 'planned';
     }
 
-    // Stages normalization & stripping forged actuals
+    // Stages normalization & preserving stage actuals
     if (doc.stages !== undefined) {
         if (!Array.isArray(doc.stages)) {
             return { error: 'Pole stages musi być tablicą.' };
@@ -3121,40 +3257,47 @@ async function validateAndNormalizeJobDoc(doc, { db, user, isBatch = false, isPa
                 stage.plannedRevenueNet = 0;
             }
 
-            // Stripping client-forged stage actuals
-            if (!isPatch || !existingJob) {
+            // [P1 FIX] In batch import for existing job, preserve stage actuals from existing stage
+            if (isBatch && existingJob && existingJob.stages && Array.isArray(existingJob.stages)) {
+                const prevStage = existingJob.stages.find(s => s.id === stage.id);
+                if (prevStage) {
+                    stage.actualLaborHours = prevStage.actualLaborHours || 0;
+                    stage.actualLaborCost = prevStage.actualLaborCost || 0;
+                    stage.actualRevenueNet = prevStage.actualRevenueNet || 0;
+                    stage.actualCostNet = prevStage.actualCostNet || 0;
+                } else {
+                    stage.actualLaborHours = 0;
+                    stage.actualLaborCost = 0;
+                    stage.actualRevenueNet = 0;
+                    stage.actualCostNet = 0;
+                }
+            } else if (!isPatch) {
                 stage.actualLaborHours = 0;
                 stage.actualLaborCost = 0;
                 stage.actualRevenueNet = 0;
                 stage.actualCostNet = 0;
-            } else {
-                const existingStage = (existingJob.stages || []).find(s => s.id === stage.id);
-                stage.actualLaborHours = existingStage ? (existingStage.actualLaborHours || 0) : 0;
-                stage.actualLaborCost = existingStage ? (existingStage.actualLaborCost || 0) : 0;
-                stage.actualRevenueNet = existingStage ? (existingStage.actualRevenueNet || 0) : 0;
-                stage.actualCostNet = existingStage ? (existingStage.actualCostNet || 0) : 0;
             }
         }
     }
 
-    // SERVER-AUTHORITATIVE PROTECTION FOR FINANCIAL ACTUALS & AGGREGATES
-    if (isPatch) {
-        // PATCH: Client is strictly forbidden from directly updating or fabricating actual financial aggregates
-        delete doc.actualLaborHours;
-        delete doc.actualLaborCost;
-        delete doc.settledLaborCost;
-        delete doc.timeEntriesCount;
-        delete doc.timeEntriesHours;
-        delete doc.materialsActualNet;
-        delete doc.logisticsActualNet;
-        delete doc.equipmentActualNet;
-        delete doc.otherCostsActualNet;
-        delete doc.revenueActualNet;
-        delete doc.actualRevenue;
-        delete doc.actualTotalCost;
-        delete doc.marginActualPercent;
-    } else {
-        // POST: Initialize actuals to 0
+    // [P1 FIX] Preserving Actuals & Aggregates on Job level during BATCH UPSERT
+    if (isBatch && existingJob) {
+        // If an existing job is updated via batch upsert: preserve existing server actuals unconditionally
+        doc.actualLaborHours = existingJob.actualLaborHours || 0;
+        doc.actualLaborCost = existingJob.actualLaborCost || 0;
+        doc.settledLaborCost = existingJob.settledLaborCost || 0;
+        doc.timeEntriesCount = existingJob.timeEntriesCount || 0;
+        doc.timeEntriesHours = existingJob.timeEntriesHours || 0;
+        doc.materialsActualNet = existingJob.materialsActualNet || 0;
+        doc.logisticsActualNet = existingJob.logisticsActualNet || 0;
+        doc.equipmentActualNet = existingJob.equipmentActualNet || 0;
+        doc.otherCostsActualNet = existingJob.otherCostsActualNet || 0;
+        doc.revenueActualNet = existingJob.revenueActualNet || 0;
+        doc.actualRevenue = existingJob.actualRevenue || 0;
+        doc.actualTotalCost = existingJob.actualTotalCost || 0;
+        doc.marginActualPercent = existingJob.marginActualPercent || 0;
+    } else if (!isPatch) {
+        // Truly new job POST: initialize actuals to 0
         doc.actualLaborHours = 0;
         doc.actualLaborCost = 0;
         doc.settledLaborCost = 0;
@@ -3168,6 +3311,17 @@ async function validateAndNormalizeJobDoc(doc, { db, user, isBatch = false, isPa
         doc.actualRevenue = 0;
         doc.actualTotalCost = 0;
         doc.marginActualPercent = 0;
+    } else {
+        // On PATCH: allow frontend sync aggregates (actualLaborHours, actualLaborCost, settledLaborCost, timeEntriesCount)
+        // while stripping fabricated financial revenues/materials if not authenticated
+        delete doc.materialsActualNet;
+        delete doc.logisticsActualNet;
+        delete doc.equipmentActualNet;
+        delete doc.otherCostsActualNet;
+        delete doc.revenueActualNet;
+        delete doc.actualRevenue;
+        delete doc.actualTotalCost;
+        delete doc.marginActualPercent;
     }
 
     // Validate against JSON schema
@@ -3203,10 +3357,28 @@ async function validateJobBatch(req, res, next) {
         });
     }
 
+    // [P1 FIX] Pre-fetch existing jobs so batch upsert does NOT zero out accumulated actuals
+    const itemIds = req.body.items.map(i => i.id).filter(Boolean);
+    const existingMap = new Map();
+    if (itemIds.length > 0 && db && typeof db.collection === 'function') {
+        try {
+            const existingDocs = await db.collection('jobs').find({
+                $or: [{ id: { $in: itemIds } }, { _id: { $in: itemIds } }]
+            }).toArray();
+            existingDocs.forEach(d => {
+                if (d.id) existingMap.set(d.id, d);
+                if (d._id) existingMap.set(d._id.toString(), d);
+            });
+        } catch (dbErr) {
+            return res.status(500).json({ error: 'Błąd pobierania istniejących zleceń przed importem: ' + dbErr.message });
+        }
+    }
+
     const validatedItems = [];
     for (let i = 0; i < req.body.items.length; i++) {
         const item = req.body.items[i];
-        const resNorm = await validateAndNormalizeJobDoc(item, { db, user: req.user, isBatch: true });
+        const existingJob = item.id ? existingMap.get(item.id) : null;
+        const resNorm = await validateAndNormalizeJobDoc(item, { db, user: req.user, isBatch: true, existingJob });
         if (resNorm.error) {
             return res.status(resNorm.status || 400).json({
                 error: `Błąd w pozycji #${i}: ${resNorm.error}`
@@ -3819,5 +3991,6 @@ module.exports = {
     validateJobPostSchema,
     validateJobPatchSchema,
     validateJobBatchSchema,
-    validateJobPaginatedSchema
+    validateJobPaginatedSchema,
+    recalculateJobLaborCosts
 };

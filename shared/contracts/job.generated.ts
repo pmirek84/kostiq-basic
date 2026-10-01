@@ -76,6 +76,10 @@ export interface JobStagePostPayload {
   billingType?: JobBillingType;
   billingRate?: number;
   plannedLaborCost?: number;
+  actualLaborHours?: number;
+  actualLaborCost?: number;
+  actualRevenueNet?: number;
+  actualCostNet?: number;
   [k: string]: unknown;
 }
 export interface JobPostPayload {
@@ -156,6 +160,11 @@ export interface JobPatchPayload {
   riskFlag?: JobRiskFlag;
   riskComment?: string;
   stages?: JobStagePostPayload[];
+  actualLaborHours?: number;
+  actualLaborCost?: number;
+  settledLaborCost?: number;
+  timeEntriesCount?: number;
+  timeEntriesHours?: number;
   [k: string]: unknown;
 }
 export interface JobBatchImportPayload {

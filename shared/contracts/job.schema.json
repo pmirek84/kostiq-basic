@@ -229,6 +229,22 @@
         "plannedLaborCost": {
           "type": "number",
           "minimum": 0
+        },
+        "actualLaborHours": {
+          "type": "number",
+          "minimum": 0
+        },
+        "actualLaborCost": {
+          "type": "number",
+          "minimum": 0
+        },
+        "actualRevenueNet": {
+          "type": "number",
+          "minimum": 0
+        },
+        "actualCostNet": {
+          "type": "number",
+          "minimum": 0
         }
       },
       "additionalProperties": true
@@ -514,6 +530,26 @@
           "items": {
             "$ref": "#/definitions/JobStagePostPayload"
           }
+        },
+        "actualLaborHours": {
+          "type": "number",
+          "minimum": 0
+        },
+        "actualLaborCost": {
+          "type": "number",
+          "minimum": 0
+        },
+        "settledLaborCost": {
+          "type": "number",
+          "minimum": 0
+        },
+        "timeEntriesCount": {
+          "type": "number",
+          "minimum": 0
+        },
+        "timeEntriesHours": {
+          "type": "number",
+          "minimum": 0
         }
       },
       "additionalProperties": true
