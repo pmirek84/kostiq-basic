@@ -289,6 +289,49 @@ test('Shared Contracts: TimeEntry JSON Schema, Statuses and Payload Conformity',
             .send({ employeeId: 'admin-1', jobId: 'job-1', date: '2026-02-31' });
         assert.strictEqual(resBadCal.status, 400);
         assert.match(resBadCal.body.error, /Nieprawidłowa data kalendarzowa/);
+
+        // Today's calendar date and full ISO timestamp (e.g. today at 14:30:00Z) are valid and must NOT be rejected as future date
+        const todayUtcStr = new Date().toISOString().slice(0, 10);
+        const resTodayCal = await request(app)
+            .post('/api/time-entries')
+            .set('Authorization', `Bearer ${adminToken}`)
+            .send({ employeeId: 'admin-1', jobId: 'job-1', date: todayUtcStr, hours: 4 });
+        assert.strictEqual(resTodayCal.status, 201);
+        assert.strictEqual(resTodayCal.body.hours, 4);
+
+        const todayIsoTimestamp = `${todayUtcStr}T14:30:00.000Z`;
+        const resTodayIso = await request(app)
+            .post('/api/time-entries')
+            .set('Authorization', `Bearer ${adminToken}`)
+            .send({ employeeId: 'admin-1', jobId: 'job-1', date: todayIsoTimestamp, hours: 4 });
+        assert.strictEqual(resTodayIso.status, 201);
+        assert.strictEqual(resTodayIso.body.hours, 4);
+    });
+
+
+    await t.test('[P2] Direct Ajv validateTimeEntryPostSchema: validates kostiq-date-string calendar validity and pattern', () => {
+        // Valid calendar date is accepted by Ajv
+        const validCal = validateTimeEntryPostSchema({ employeeId: 'e1', jobId: 'j1', date: '2026-10-03' });
+        assert.strictEqual(validCal, true, 'Valid date 2026-10-03 must pass Ajv validation');
+
+        // Valid ISO timestamp is accepted by Ajv
+        const validIso = validateTimeEntryPostSchema({ employeeId: 'e1', jobId: 'j1', date: '2026-10-03T12:00:00Z' });
+        assert.strictEqual(validIso, true, 'Valid ISO timestamp must pass Ajv validation');
+
+        // Non-existent calendar date (2026-02-31) is REJECTED directly by Ajv via format "kostiq-date-string"
+        const invalidCal = validateTimeEntryPostSchema({ employeeId: 'e1', jobId: 'j1', date: '2026-02-31' });
+        assert.strictEqual(invalidCal, false, 'Invalid calendar date 2026-02-31 must be rejected by Ajv');
+        const formatErr = validateTimeEntryPostSchema.errors?.find(e => e.instancePath === '/date');
+        assert.ok(formatErr, 'Ajv must emit error on /date for 2026-02-31');
+        assert.strictEqual(formatErr.keyword, 'format');
+        assert.strictEqual(formatErr.params?.format, 'kostiq-date-string');
+
+        // Malformed date with trailing junk is REJECTED directly by Ajv via pattern
+        const invalidJunk = validateTimeEntryPostSchema({ employeeId: 'e1', jobId: 'j1', date: '2026-10-03XYZ' });
+        assert.strictEqual(invalidJunk, false, 'Date with trailing characters must be rejected by Ajv');
+        const patternErr = validateTimeEntryPostSchema.errors?.find(e => e.instancePath === '/date');
+        assert.ok(patternErr, 'Ajv must emit error on /date for trailing junk');
+        assert.strictEqual(patternErr.keyword, 'pattern');
     });
 
     await t.test('PATCH payload variant: updates fields without requiring employeeId and jobId', async () => {

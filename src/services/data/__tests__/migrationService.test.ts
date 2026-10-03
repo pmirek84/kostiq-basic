@@ -88,7 +88,7 @@ describe('migrationService - Conflict Detection and Per-Record Audited Migration
 
             // 1. Generate preview at remoteVersion 'v1'
             const preview = await migrationService.previewMigration();
-            expect(preview.totalLocal).toBe(11); // 1 per store in mock
+            expect(preview.totalLocal).toBe(10); // 1 per store in mock (10 stores, settlements excluded)
 
             // 2. Simulate concurrent modification in MongoDB
             remoteVersion = 'v2_concurrent_change';

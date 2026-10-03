@@ -1,3 +1,4 @@
+import { v4 as uuidv4 } from 'uuid';
 import { useState, useMemo } from 'react';
 import { useTiCo } from '../../../context/TiCoContext';
 import { X, Save, Check, AlertCircle, CheckCircle2 } from 'lucide-react';
@@ -20,6 +21,9 @@ export function SettlementWizard({ onClose, onSuccess }: SettlementWizardProps) 
 
     // Step 2: Entries Selection
     const [selectedEntryIds, setSelectedEntryIds] = useState<Set<string>>(new Set());
+    const [idempotencyKey] = useState<string>(() => uuidv4());
+    const [isSubmitting, setIsSubmitting] = useState(false);
+    const [submitError, setSubmitError] = useState<string | null>(null);
 
     // Show both approved and pending time entries
     const candidates = useMemo(() => {
@@ -41,44 +45,56 @@ export function SettlementWizard({ onClose, onSuccess }: SettlementWizardProps) 
     const totalSelectedHours = selectedEntries.reduce((sum, e) => sum + e.hours, 0);
     const baseAmount = selectedEntries.reduce((sum, e) => sum + e.cost, 0);
 
-    // Calc Overtime Preview
+    // Calc Overtime Preview (aligned with authoritative backend calculation)
     const overtimeData = useMemo(() => {
         const hourlyEntries = selectedEntries.filter(e => !e.billingType || e.billingType === 'hourly');
-        const dailyMap = new Map<string, number>();
+        const dailyMap = new Map<string, { hours: number; cost: number; rate: number }>();
         hourlyEntries.forEach(e => {
-            dailyMap.set(e.date, (dailyMap.get(e.date) || 0) + e.hours);
+            const dateStr = typeof e.date === 'string' ? e.date.slice(0, 10) : '';
+            const cur = dailyMap.get(dateStr) || { hours: 0, cost: 0, rate: 0 };
+            const h = Number(e.hours) || 0;
+            const rate = Number(e.hourlyRate) > 0 ? Number(e.hourlyRate) : (h > 0 ? (Number(e.cost) || 0) / h : 0);
+            dailyMap.set(dateStr, {
+                hours: cur.hours + h,
+                cost: cur.cost + (h * rate),
+                rate: rate || cur.rate
+            });
         });
+
         let hours = 0;
         let pay = 0;
-        const rate = hourlyEntries.find(e => e.hourlyRate)?.hourlyRate || 0;
-        dailyMap.forEach((h) => {
-            if (h > 8) {
-                const ot = h - 8;
+        dailyMap.forEach(({ hours: dayHours, cost: dayCost, rate: dayRate }) => {
+            if (dayHours > 8) {
+                const ot = dayHours - 8;
+                const effectiveRate = dayHours > 0 ? (dayCost / dayHours) : dayRate;
                 hours += ot;
-                pay += ot * rate * 0.5;
+                pay += ot * effectiveRate * 0.5;
             }
         });
         return { hours, pay };
     }, [selectedEntries]);
 
-    // Advances Preview
+    // Advances Preview (advances only apply to employees)
     const advances = useMemo(() => {
-        if (!workerId) return [];
+        if (!workerId || workerType !== 'employee') return [];
         return requests.filter(r =>
             r.employeeId === workerId &&
             r.type === 'zaliczka' &&
             r.status === 'zaakceptowany' &&
             !r.settlementId
         );
-    }, [workerId, requests]);
+    }, [workerId, workerType, requests]);
 
     const totalAdvances = advances.reduce((sum, r) => sum + (r.amount || 0), 0);
     const grossAmount = baseAmount + overtimeData.pay;
     const finalAmount = grossAmount - totalAdvances;
 
-    const handleCreate = () => {
+    const handleCreate = async () => {
+        if (isSubmitting) return;
+        setIsSubmitting(true);
+        setSubmitError(null);
         try {
-            createSettlement({
+            await createSettlement({
                 workerId,
                 workerType,
                 periodFrom,
@@ -87,11 +103,14 @@ export function SettlementWizard({ onClose, onSuccess }: SettlementWizardProps) 
                     const entry = candidates.find(c => c.id === id);
                     return entry && (entry.status === 'approved' || entry.status === 'admin_approved');
                 }),
-                notes: ''
+                notes: '',
+                idempotencyKey
             });
             onSuccess();
         } catch (e) {
-            alert((e as Error).message);
+            setSubmitError((e as Error).message || 'Wystąpił błąd podczas tworzenia rozliczenia.');
+        } finally {
+            setIsSubmitting(false);
         }
     };
 
@@ -137,6 +156,15 @@ export function SettlementWizard({ onClose, onSuccess }: SettlementWizardProps) 
                 </div>
 
                 <div className="p-6 overflow-y-auto flex-1 space-y-8">
+                    {submitError && (
+                        <div className="p-4 bg-red-50 border border-red-200 rounded-2xl flex items-start gap-3 text-red-800 text-sm">
+                            <AlertCircle className="w-5 h-5 text-red-600 shrink-0 mt-0.5" />
+                            <div>
+                                <p className="font-bold">Błąd zapisu rozliczenia</p>
+                                <p className="text-red-700 mt-0.5">{submitError}</p>
+                            </div>
+                        </div>
+                    )}
                     {/* Step 1: Configuration */}
                     <div className="grid grid-cols-1 md:grid-cols-4 gap-4 bg-zinc-50/50 p-5 rounded-2xl border border-zinc-200/50">
                         <div>
@@ -296,11 +324,11 @@ export function SettlementWizard({ onClose, onSuccess }: SettlementWizardProps) 
                     </button>
                     <button
                         onClick={handleCreate}
-                        disabled={selectedEntryIds.size === 0 || candidates.filter(c => selectedEntryIds.has(c.id) && (c.status === 'approved' || c.status === 'admin_approved')).length === 0}
+                        disabled={isSubmitting || selectedEntryIds.size === 0 || candidates.filter(c => selectedEntryIds.has(c.id) && (c.status === 'approved' || c.status === 'admin_approved')).length === 0}
                         className="px-5 py-2.5 text-sm text-white bg-zinc-950 rounded-xl hover:bg-zinc-850 font-bold disabled:opacity-40 disabled:cursor-not-allowed flex items-center gap-2 transition-colors"
                     >
                         <Save className="w-4 h-4" />
-                        Utwórz rozliczenie
+                        {isSubmitting ? 'Zapisywanie...' : 'Utwórz rozliczenie'}
                     </button>
                 </div>
             </div>

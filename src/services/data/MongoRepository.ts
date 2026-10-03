@@ -262,10 +262,54 @@ export class MongoRepository implements TiCoRepository {
         });
     }
 
+    async createSettlementAtomic(input: {
+        workerId: string;
+        workerType: 'employee' | 'subcontractor';
+        periodFrom: string;
+        periodTo: string;
+        timeEntryIds?: string[];
+        advanceIds?: string[];
+        notes?: string;
+        type?: 'hourly' | 'contract';
+        contractId?: string;
+        jobId?: string;
+        stageId?: string;
+        amount?: number;
+        exchangeRate?: number;
+        idempotencyKey: string;
+    }): Promise<{
+        success: boolean;
+        settlement: Settlement;
+        updatedTimeEntryIds: string[];
+        updatedAdvanceIds: string[];
+        affectedJobs: string[];
+    }> {
+        if (!input.idempotencyKey || typeof input.idempotencyKey !== 'string' || input.idempotencyKey.trim() === '') {
+            throw new Error('idempotencyKey jest wymagany dla createSettlementAtomic i musi być niepustym stringiem.');
+        }
+        return this.fetchJson<{
+            success: boolean;
+            settlement: Settlement;
+            updatedTimeEntryIds: string[];
+            updatedAdvanceIds: string[];
+            affectedJobs: string[];
+        }>('/settlements/create-atomic', {
+            method: 'POST',
+            headers: { 'Idempotency-Key': input.idempotencyKey.trim() },
+            body: JSON.stringify({ ...input, idempotencyKey: input.idempotencyKey.trim() }),
+        });
+    }
+
     async updateSettlement(id: string, updates: Partial<Settlement>): Promise<Settlement> {
         return this.fetchJson<Settlement>(`/settlements/${id}`, {
             method: 'PATCH',
             body: JSON.stringify(updates),
+        });
+    }
+
+    async recalculateSettlement(id: string): Promise<Settlement> {
+        return this.fetchJson<Settlement>(`/settlements/${id}/recalculate`, {
+            method: 'POST'
         });
     }
 

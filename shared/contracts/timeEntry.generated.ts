@@ -18,6 +18,10 @@ export type WorkerAllowedStatus = 'draft' | 'pending' | 'submitted';
 export type ForemanAllowedStatus = 'draft' | 'pending' | 'submitted' | 'foreman_approved' | 'foreman_rejected';
 export type BillingType = 'hourly' | 'daily' | 'project' | 'fixed' | 'm2' | 'mb';
 export type TimeEntryType = 'drive' | 'work' | 'other' | 'employee' | 'subcontractor';
+/**
+ * Calendar date (YYYY-MM-DD) or ISO 8601 timestamp (YYYY-MM-DDTHH:mm:ss.sssZ).
+ */
+export type DateString = string;
 export type ActivityType = 'drive' | 'work' | 'other';
 export type WorkerType = 'employee' | 'subcontractor';
 export type CanonicalTimeEntryPostPayload = TimeEntryPostBase & {
@@ -65,6 +69,7 @@ export interface TimeEntryRoot {
   TimeEntryBatchImportResult?: TimeEntryBatchImportResult;
   ActivityType?: ActivityType;
   WorkerType?: WorkerType;
+  DateString?: DateString;
   [k: string]: unknown;
 }
 export interface TimeEntry {
@@ -76,7 +81,7 @@ export interface TimeEntry {
   jobName: string;
   stageId: string;
   stageName: string;
-  date: string;
+  date: DateString;
   hours: number;
   billingType: BillingType;
   hourlyRate?: number;
@@ -106,7 +111,7 @@ export interface TimeEntryPostBase {
   jobName?: string;
   stageId?: string;
   stageName?: string;
-  date?: string;
+  date?: DateString;
   hours?: number;
   billingType?: BillingType;
   hourlyRate?: number;
@@ -137,7 +142,7 @@ export interface TimeEntryPatchPayload {
   jobName?: string;
   stageId?: string;
   stageName?: string;
-  date?: string;
+  date?: DateString;
   hours?: number;
   billingType?: BillingType;
   hourlyRate?: number;

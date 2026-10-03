@@ -13,6 +13,7 @@ export type CreateSettlementInput = {
     periodTo: string;
     timeEntryIds: string[]; // only approved + no settlementId
     notes?: string;
+    idempotencyKey?: string;
 };
 
 export type CreateContractSettlementInput = {
@@ -21,9 +22,11 @@ export type CreateContractSettlementInput = {
     jobId: string;
     stageId?: string;
     amount: number;
+    exchangeRate?: number;
     periodFrom: string;
     periodTo: string;
     notes?: string;
+    idempotencyKey: string;
 };
 
 export type BatchOperationResult = {
@@ -367,131 +370,66 @@ export const TiCoProvider = ({ children }: { children: ReactNode }) => {
 
     // --- Settlement Handlers ---
     const createSettlement = async (input: CreateSettlementInput): Promise<Settlement> => {
-        const candidates = timeEntries.filter(t =>
-            input.timeEntryIds.includes(t.id) &&
-            t.status === 'approved' &&
-            !t.settlementId
-        );
-
-        // OVERTIME LOGIC: Group entries by date
-        const dailyHoursMap = new Map<string, number>();
-        candidates.forEach(t => {
-            const current = dailyHoursMap.get(t.date) || 0;
-            dailyHoursMap.set(t.date, current + t.hours);
-        });
-
-        let overtimeHours = 0;
-        let overtimePay = 0;
-        let baseAmount = candidates.reduce((sum, t) => sum + t.cost, 0);
-
-        const firstHourlyRate = candidates.find(c => c.hourlyRate)?.hourlyRate || 0;
-
-        dailyHoursMap.forEach((hours) => {
-            if (hours > 8) {
-                const dailyOvertime = hours - 8;
-                overtimeHours += dailyOvertime;
-                overtimePay += dailyOvertime * firstHourlyRate * 0.5; // Additional 50%
-            }
-        });
-
-        const grossAmount = baseAmount + overtimePay;
-
-        // ADVANCE DEDUCTIONS: Approved zaliczka requests for this worker in this period
-        const relevantAdvances = requests.filter(r =>
-            r.employeeId === input.workerId &&
-            r.type === 'zaliczka' &&
-            r.status === 'zaakceptowany' &&
-            !r.settlementId
-        );
-        const advanceDeductions = relevantAdvances.reduce((sum, r) => sum + (r.amount || 0), 0);
-        const totalAmount = grossAmount - advanceDeductions;
-
-        let workerName = 'Nieznany';
-        if (input.workerType === 'employee') {
-            const emp = employees.find(e => e.id === input.workerId);
-            if (emp) workerName = `${emp.firstName} ${emp.lastName}`;
-        } else {
-            const sub = subcontractors.find(s => s.id === input.workerId);
-            if (sub) workerName = sub.name;
+        if (typeof repository.createSettlementAtomic !== 'function') {
+            throw new Error('Konfiguracja repozytorium nie wspiera transakcyjnego zapisu rozliczeń (createSettlementAtomic).');
         }
 
-        const newSettlement: Settlement = {
-            id: uuidv4(),
+        const relevantAdvances = input.workerType === 'employee'
+            ? requests.filter(r =>
+                r.employeeId === input.workerId &&
+                r.type === 'zaliczka' &&
+                r.status === 'zaakceptowany' &&
+                !r.settlementId
+            )
+            : [];
+
+        const idempotencyKey = input.idempotencyKey || uuidv4();
+        const result = await repository.createSettlementAtomic({
             workerId: input.workerId,
             workerType: input.workerType,
-            workerName,
             periodFrom: input.periodFrom,
             periodTo: input.periodTo,
-            createdAt: new Date().toISOString(),
-            updatedAt: new Date().toISOString(),
-            timeEntryIds: candidates.map(c => c.id),
-            totalHours: candidates.reduce((sum, t) => sum + t.hours, 0),
-            totalAmount,
-            grossAmount,
-            overtimeHours,
-            overtimePay,
-            advanceDeductions,
-            currency: 'PLN',
-            status: 'open',
+            timeEntryIds: input.timeEntryIds,
+            advanceIds: relevantAdvances.map(r => r.id),
             notes: input.notes,
-            type: 'hourly'
-        };
+            idempotencyKey
+        });
 
-        const settledIds = new Set(candidates.map(c => c.id));
-        const advanceIds = relevantAdvances.map(a => a.id);
+        const newSettlement = result.settlement;
+        const settledIds = new Set(result.updatedTimeEntryIds || input.timeEntryIds);
+        const settledAdvanceIds = new Set(result.updatedAdvanceIds || relevantAdvances.map(r => r.id));
 
-        // 1. Create Settlement
-        await repository.createSettlement(newSettlement);
-        // 2. Batch Update Time Entries
-        await repository.batchUpdateTimeEntries(input.timeEntryIds, { settlementId: newSettlement.id });
-        // 3. Link Advances
-        for (const advId of advanceIds) {
-            await repository.updateRequest(advId, { settlementId: newSettlement.id });
-        }
-
-        // Update Local State
         setSettlements(prev => [...prev, newSettlement]);
-        setTimeEntries(prev => prev.map(t =>
-            settledIds.has(t.id) ? { ...t, settlementId: newSettlement.id } : t
-        ));
-        setRequests(prev => prev.map(r =>
-            advanceIds.includes(r.id) ? { ...r, settlementId: newSettlement.id } : r
-        ));
+        setTimeEntries(prev => prev.map(t => settledIds.has(t.id) ? { ...t, settlementId: newSettlement.id } : t));
+        setRequests(prev => prev.map(r => settledAdvanceIds.has(r.id) ? { ...r, settlementId: newSettlement.id } : r));
         setMutationRevision(prev => prev + 1);
 
         return newSettlement;
     };
 
     const createContractSettlement = async (input: CreateContractSettlementInput): Promise<Settlement> => {
-        const sub = subcontractors.find(s => s.id === input.subcontractorId);
-        const workerName = sub ? sub.name : 'Unknown';
-
-        const newSettlement: Settlement = {
-            id: uuidv4(),
+        // [P1 FIX] Contract settlements use domain transactional endpoint with mandatory idempotency
+        if (!input.idempotencyKey || typeof input.idempotencyKey !== 'string' || input.idempotencyKey.trim() === '') {
+            throw new Error('idempotencyKey jest wymagany dla createContractSettlement.');
+        }
+        const atomicResult = await repository.createSettlementAtomic({
             workerId: input.subcontractorId,
             workerType: 'subcontractor',
-            workerName,
             periodFrom: input.periodFrom,
             periodTo: input.periodTo,
-            createdAt: new Date().toISOString(),
-            updatedAt: new Date().toISOString(),
-            timeEntryIds: [], // Linked to contract, not time entries
-            totalHours: 0,    // Contract based
-            totalAmount: input.amount,
-            currency: 'PLN',
-            status: 'open',
-            notes: input.notes,
+            timeEntryIds: [],
+            advanceIds: [],
             type: 'contract',
             contractId: input.contractId,
             jobId: input.jobId,
-            stageId: input?.stageId || undefined,
-            grossAmount: input.amount,
-            overtimeHours: 0,
-            overtimePay: 0,
-            advanceDeductions: 0
-        };
+            stageId: input.stageId || undefined,
+            amount: input.amount,
+            exchangeRate: input.exchangeRate,
+            notes: input.notes,
+            idempotencyKey: input.idempotencyKey.trim()
+        });
 
-        await repository.createSettlement(newSettlement);
+        const newSettlement = atomicResult.settlement;
         setSettlements(prev => [...prev, newSettlement]);
         setMutationRevision(prev => prev + 1);
 
@@ -505,45 +443,9 @@ export const TiCoProvider = ({ children }: { children: ReactNode }) => {
     };
 
     const recalculateSettlement = async (id: string) => {
-        const settlement = settlements.find(s => s.id === id);
-        if (!settlement) return;
-
-        const linkedEntries = timeEntries.filter(t => settlement.timeEntryIds.includes(t.id));
-        const totalHours = linkedEntries.reduce((sum, t) => sum + t.hours, 0);
-        const baseAmount = linkedEntries.reduce((sum, t) => sum + t.cost, 0);
-
-        const dailyHoursMap = new Map<string, number>();
-        linkedEntries.forEach(t => {
-            const current = dailyHoursMap.get(t.date) || 0;
-            dailyHoursMap.set(t.date, current + t.hours);
-        });
-
-        let overtimeHours = 0;
-        let overtimePay = 0;
-        const firstHourlyRate = linkedEntries.find(c => c.hourlyRate)?.hourlyRate || 0;
-
-        dailyHoursMap.forEach((hours) => {
-            if (hours > 8) {
-                const dailyOvertime = hours - 8;
-                overtimeHours += dailyOvertime;
-                overtimePay += dailyOvertime * firstHourlyRate * 0.5;
-            }
-        });
-
-        const grossAmount = baseAmount + overtimePay;
-        const advanceDeductions = settlement.advanceDeductions || 0;
-        const totalAmount = grossAmount - advanceDeductions;
-
-        const updates = {
-            totalHours,
-            totalAmount,
-            grossAmount,
-            overtimePay,
-            overtimeHours,
-            updatedAt: new Date().toISOString()
-        };
-        await repository.updateSettlement(id, updates);
-        setSettlements(prev => prev.map(s => s.id === id ? { ...s, ...updates } : s));
+        // [P1 FIX] Authoritative server-side settlement recalculation based on actual DB records
+        const updated = await repository.recalculateSettlement(id);
+        setSettlements(prev => prev.map(s => s.id === id ? updated : s));
         setMutationRevision(prev => prev + 1);
     };
 

@@ -21,8 +21,15 @@ export const JobSubcontractorsTab = ({ job }: JobSubcontractorsTabProps) => {
     const [isModalOpen, setIsModalOpen] = useState(false);
     const [isSettleModalOpen, setIsSettleModalOpen] = useState(false);
     const [contractToSettle, setContractToSettle] = useState<SubcontractorContract | null>(null);
-    const [settleFormData, setSettleFormData] = useState({
+    const [settleFormData, setSettleFormData] = useState<{
+        amount: number;
+        exchangeRate?: number;
+        periodFrom: string;
+        periodTo: string;
+        notes: string;
+    }>({
         amount: 0,
+        exchangeRate: undefined,
         periodFrom: new Date().toISOString().split('T')[0],
         periodTo: new Date().toISOString().split('T')[0],
         notes: ''
@@ -31,6 +38,8 @@ export const JobSubcontractorsTab = ({ job }: JobSubcontractorsTabProps) => {
     const [formData, setFormData] = useState<Partial<SubcontractorContract>>({
         currency: 'PLN'
     });
+    const [isSubmittingSettle, setIsSubmittingSettle] = useState(false);
+    const [settleIdempotencyKey, setSettleIdempotencyKey] = useState<string>('');
 
     const jobContracts = contracts.filter(c => c.jobId === job.id);
     const stages = getJobStages(job.id);
@@ -94,8 +103,11 @@ export const JobSubcontractorsTab = ({ job }: JobSubcontractorsTabProps) => {
         const remaining = Math.max(0, contract.totalAmountNet - settled);
 
         setContractToSettle(contract);
+        setSettleIdempotencyKey(typeof crypto !== 'undefined' && crypto.randomUUID ? crypto.randomUUID() : ('idemp-contract-' + Date.now() + '-' + Math.random().toString(36).slice(2)));
+        setIsSubmittingSettle(false);
         setSettleFormData({
             amount: remaining,
+            exchangeRate: contract.currency === 'EUR' ? (contract.exchangeRate || undefined) : undefined,
             periodFrom: new Date().toISOString().split('T')[0],
             periodTo: new Date().toISOString().split('T')[0],
             notes: ''
@@ -105,25 +117,39 @@ export const JobSubcontractorsTab = ({ job }: JobSubcontractorsTabProps) => {
 
     const handleSettleSubmit = async (e: React.FormEvent) => {
         e.preventDefault();
-        if (!contractToSettle) return;
+        if (!contractToSettle || isSubmittingSettle) return;
 
         if (settleFormData.amount <= 0) {
             alert('Kwota rozliczenia musi być większa od zera.');
             return;
         }
 
-        await createContractSettlement({
-            contractId: contractToSettle.id,
-            subcontractorId: contractToSettle.subcontractorId,
-            jobId: contractToSettle.jobId,
-            stageId: contractToSettle.stageId || undefined,
-            amount: settleFormData.amount,
-            periodFrom: settleFormData.periodFrom,
-            periodTo: settleFormData.periodTo,
-            notes: settleFormData.notes
-        });
+        if (contractToSettle.currency !== 'PLN' && (!settleFormData.exchangeRate || settleFormData.exchangeRate <= 0)) {
+            alert('Dla kontraktu w walucie obcej wymagany jest poprawny kurs wymiany waluty.');
+            return;
+        }
 
-        setIsSettleModalOpen(false);
+        try {
+            setIsSubmittingSettle(true);
+            await createContractSettlement({
+                contractId: contractToSettle.id,
+                subcontractorId: contractToSettle.subcontractorId,
+                jobId: contractToSettle.jobId,
+                stageId: contractToSettle.stageId || undefined,
+                amount: settleFormData.amount,
+                exchangeRate: contractToSettle.currency !== 'PLN' ? settleFormData.exchangeRate : undefined,
+                periodFrom: settleFormData.periodFrom,
+                periodTo: settleFormData.periodTo,
+                notes: settleFormData.notes,
+                idempotencyKey: settleIdempotencyKey
+            });
+            setIsSettleModalOpen(false);
+        } catch (err: any) {
+            console.error('Failed to create contract settlement:', err);
+            alert(err?.message || 'Błąd podczas tworzenia rozliczenia kontraktowego.');
+        } finally {
+            setIsSubmittingSettle(false);
+        }
     };
 
     const getSubcontractorName = (id: string) => {
@@ -345,6 +371,31 @@ export const JobSubcontractorsTab = ({ job }: JobSubcontractorsTabProps) => {
                         step="0.01"
                     />
 
+                    {contractToSettle && contractToSettle.currency !== 'PLN' && (
+                        <div>
+                            <Input
+                                label={`Kurs wymiany (${contractToSettle.currency}/PLN)`}
+                                type="number"
+                                value={settleFormData.exchangeRate ?? ''}
+                                onChange={e => setSettleFormData({
+                                    ...settleFormData,
+                                    exchangeRate: e.target.value === '' ? undefined : parseFloat(e.target.value)
+                                })}
+                                required
+                                min="0.0001"
+                                step="0.0001"
+                                placeholder="Wprowadź kurs, np. 4.2850"
+                            />
+                            {typeof settleFormData.exchangeRate === 'number' && settleFormData.exchangeRate > 0 && settleFormData.amount > 0 && (
+                                <p className="text-xs text-gray-500 mt-1">
+                                    Szacunkowa wartość w PLN: <span className="font-semibold text-gray-800">
+                                        {(Math.round(settleFormData.amount * settleFormData.exchangeRate * 100) / 100).toLocaleString('pl-PL', { style: 'currency', currency: 'PLN' })}
+                                    </span>
+                                </p>
+                            )}
+                        </div>
+                    )}
+
                     <div className="grid grid-cols-2 gap-4">
                         <Input
                             label="Okres od"
@@ -370,11 +421,11 @@ export const JobSubcontractorsTab = ({ job }: JobSubcontractorsTabProps) => {
                     />
 
                     <div className="flex justify-end gap-3 pt-4 border-t mt-4">
-                        <Button type="button" variant="secondary" onClick={() => setIsSettleModalOpen(false)}>
+                        <Button type="button" variant="secondary" onClick={() => setIsSettleModalOpen(false)} disabled={isSubmittingSettle}>
                             Anuluj
                         </Button>
-                        <Button type="submit" variant="primary" className="bg-emerald-600 hover:bg-emerald-700">
-                            Zatwierdź rozliczenie
+                        <Button type="submit" variant="primary" disabled={isSubmittingSettle} className="bg-emerald-600 hover:bg-emerald-700">
+                            {isSubmittingSettle ? 'Zapisywanie...' : 'Zatwierdź rozliczenie'}
                         </Button>
                     </div>
                 </form>

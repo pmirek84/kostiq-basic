@@ -35,7 +35,30 @@ export interface TiCoRepository {
     // Settlements
     getSettlements(): Promise<Settlement[]>;
     createSettlement(settlement: Settlement): Promise<Settlement>;
+    createSettlementAtomic(input: {
+        workerId: string;
+        workerType: 'employee' | 'subcontractor';
+        periodFrom: string;
+        periodTo: string;
+        timeEntryIds?: string[];
+        advanceIds?: string[];
+        notes?: string;
+        type?: 'hourly' | 'contract';
+        contractId?: string;
+        jobId?: string;
+        stageId?: string;
+        amount?: number;
+        exchangeRate?: number;
+        idempotencyKey: string;
+    }): Promise<{
+        success: boolean;
+        settlement: Settlement;
+        updatedTimeEntryIds: string[];
+        updatedAdvanceIds: string[];
+        affectedJobs: string[];
+    }>;
     updateSettlement(id: string, updates: Partial<Settlement>): Promise<Settlement>;
+    recalculateSettlement(id: string): Promise<Settlement>;
 
     // Messages & Requests
     getMessages(): Promise<Message[]>;

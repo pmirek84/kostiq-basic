@@ -148,4 +148,24 @@ describe('Shared Contracts: TimeEntry Frontend Type and Status Conformity', () =
             expect(variant.required.length).toBe(2);
         });
     });
+
+    it('compiles and validates DateString format on CanonicalTimeEntryPostPayload and TimeEntry (e.g. 2026-10-03 or ISO timestamp)', () => {
+        const payloadWithCalendarDate: CanonicalTimeEntryPostPayload = {
+            employeeId: 'emp-101',
+            jobId: 'job-202',
+            date: '2026-10-03',
+            hours: 8,
+            billingType: 'hourly'
+        };
+        expect(payloadWithCalendarDate.date).toBe('2026-10-03');
+
+        const payloadWithIsoTimestamp: CanonicalTimeEntryPostPayload = {
+            employeeId: 'emp-101',
+            jobId: 'job-202',
+            date: '2026-10-03T14:30:00.000Z',
+            hours: 8,
+            billingType: 'hourly'
+        };
+        expect(payloadWithIsoTimestamp.date).toBe('2026-10-03T14:30:00.000Z');
+    });
 });

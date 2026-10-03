@@ -1,3 +1,4 @@
+const crypto = require('crypto');
 const express = require('express');
 const cors = require('cors');
 const path = require('path');
@@ -133,6 +134,44 @@ async function validateAndSaveUpload(req, res, next) {
 
 let db;
 let client;
+let isReplicaSet = false;
+let _testFailpoint = null;
+function setTestFailpoint(fp) {
+    _testFailpoint = fp;
+}
+function getTestFailpoint() {
+    return _testFailpoint;
+}
+let _testBarrierHook = null;
+function setTestBarrierHook(hook) {
+    _testBarrierHook = hook;
+}
+function getTestBarrierHook() {
+    return _testBarrierHook;
+}
+
+async function checkReplicaSetTopology(targetClient) {
+    if (!targetClient) return false;
+    try {
+        const helloRes = await targetClient.db().admin().command({ hello: 1 });
+        return Boolean(helloRes.setName && (helloRes.isWritablePrimary || helloRes.ismaster));
+    } catch (_) {
+        return false;
+    }
+}
+
+function requireTransactions(req, res, next) {
+    if (!isReplicaSet) {
+        if (process.env.ALLOW_NON_TRANSACTIONAL === 'true' || process.env.NODE_ENV === 'test') {
+            return next();
+        }
+        return res.status(503).json({
+            code: 'TRANSACTIONS_REQUIRED',
+            error: 'Operacja domenowa wymaga włączonego Replica Set w MongoDB (ACID transactions required). Skonfiguruj \'replication.replSet\' w konfiguracji bazy danych.'
+        });
+    }
+    next();
+}
 
 // Connect to MongoDB
 
@@ -145,7 +184,7 @@ const ALL_SYSTEM_COLLECTIONS = [
     'installation-rates', 'logistics-rates', 'rental-rates', 'sheet-metal',
     'custom-events', 'client-reports', 'checklists', 'checklist-templates',
     'standards', 'settings', 'jobStageItems', 'subcontractor_contracts',
-    'documents', 'equipment'
+    'documents', 'equipment', 'idempotency_keys'
 ];
 
 const ALLOWED_BATCH_IMPORT_COLLECTIONS = new Set([
@@ -166,8 +205,7 @@ const ALLOWED_MIGRATION_COLLECTIONS = new Set([
     'settings',
     'jobStageItems',
     'custom-events',
-    'subcontractor_contracts',
-    'settlements'
+    'subcontractor_contracts'
 ]);
 
 function toCanonicalJson(obj) {
@@ -347,6 +385,10 @@ async function reconcileDuplicatesAndEnsureIndexes(database) {
             // 2. Create unique sparse index
             if (typeof collection.createIndex === 'function') {
                 await collection.createIndex({ id: 1 }, { unique: true, sparse: true });
+            if (col === 'idempotency_keys') {
+                await collection.createIndex({ endpoint: 1, key: 1 }, { unique: true });
+                await collection.createIndex({ expiresAt: 1 }, { expireAfterSeconds: 0 });
+            }
             }
 
             // 3. Verify index exists with uniqueness
@@ -963,6 +1005,15 @@ async function connectDB() {
         await client.connect();
         console.log('Successfully connected to MongoDB');
         db = client.db();
+
+        // Topology check via hello command
+        try {
+            isReplicaSet = await checkReplicaSetTopology(client);
+            console.log(`[MONGODB TOPOLOGY] hello check: isReplicaSet=${isReplicaSet}`);
+        } catch (helloErr) {
+            console.warn('[MONGODB TOPOLOGY] hello check failed:', helloErr.message);
+            isReplicaSet = false;
+        }
 
         // Initialize Backup Schedule
         initBackupSchedule(db);
@@ -1746,8 +1797,9 @@ async function createNotification(data) {
 // Called after time-entry approval to update
 // actualLaborCost on the related Job document.
 // ==========================================
-async function recalculateJobLaborCosts(jobId, { throwOnError = false } = {}) {
+async function recalculateJobLaborCosts(jobId, { throwOnError = false, session = undefined } = {}) {
     if (!db || !jobId) return;
+    const opt = session ? { session } : {};
 
     try {
         // 1. Fetch all approved time entries for this job (approved + admin_approved)
@@ -1755,7 +1807,7 @@ async function recalculateJobLaborCosts(jobId, { throwOnError = false } = {}) {
             $or: [{ jobId: jobId }, { project_id: jobId }],
             status: { $in: ['approved', 'admin_approved'] },
             isActive: { $ne: false }
-        }).toArray();
+        }, opt).toArray();
 
         // 2. Fetch referenced settlements to check closed/exported status
         const settlementIds = Array.from(new Set(entries.map(e => e.settlementId).filter(Boolean)));
@@ -1764,7 +1816,7 @@ async function recalculateJobLaborCosts(jobId, { throwOnError = false } = {}) {
             const settlementDocs = await db.collection('settlements').find({
                 id: { $in: settlementIds },
                 isActive: { $ne: false }
-            }).toArray();
+            }, opt).toArray();
             settlementStatusMap = new Map(settlementDocs.map(s => [s.id, s.status]));
         }
 
@@ -1773,7 +1825,7 @@ async function recalculateJobLaborCosts(jobId, { throwOnError = false } = {}) {
             jobId: jobId,
             type: 'contract',
             isActive: { $ne: false }
-        }).toArray();
+        }, opt).toArray();
 
         let totalHours = 0;
         let totalCost = 0;
@@ -1807,22 +1859,54 @@ async function recalculateJobLaborCosts(jobId, { throwOnError = false } = {}) {
             }
         });
 
-        // Contract settlements aggregation
-        contractSettlements.forEach(cs => {
-            const amount = Number(cs.totalAmount) || 0;
-            totalCost += amount;
+        // Contract settlements aggregation (normalized to PLN accounting currency - fail-closed)
+        for (const cs of contractSettlements) {
+            let amountInPln = null;
+            if (typeof cs.amountInPln === 'number' && Number.isFinite(cs.amountInPln)) {
+                amountInPln = cs.amountInPln;
+            } else if (typeof cs.baseAmount === 'number' && Number.isFinite(cs.baseAmount)) {
+                amountInPln = cs.baseAmount;
+            } else if (cs.currency === 'PLN' || !cs.currency) {
+                amountInPln = Number(cs.totalAmount) || 0;
+            } else if (typeof cs.exchangeRate === 'number' && Number.isFinite(cs.exchangeRate) && cs.exchangeRate > 0) {
+                const normalizedRate = Math.round(cs.exchangeRate * 10000) / 10000;
+                amountInPln = Math.round((Number(cs.totalAmount) || 0) * normalizedRate * 100) / 100;
+            } else {
+                // Check if underlying contract has recorded exchangeRate
+                let contractRate = null;
+                if (cs.contractId && db && typeof db.collection === 'function') {
+                    try {
+                        const parentContract = await db.collection('subcontractor_contracts').findOne(
+                            { $or: [{ id: cs.contractId }, { _id: cs.contractId }] },
+                            opt
+                        );
+                        if (parentContract && typeof parentContract.exchangeRate === 'number' && parentContract.exchangeRate > 0) {
+                            contractRate = Math.round(parentContract.exchangeRate * 10000) / 10000;
+                        }
+                    } catch (_) {}
+                }
+
+                if (contractRate) {
+                    amountInPln = Math.round((Number(cs.totalAmount) || 0) * contractRate * 100) / 100;
+                } else {
+                    // Fail-closed: Never invent an arbitrary currency exchange rate (e.g. 4.30)!
+                    throw new Error(`Rozliczenie w walucie obcej '${cs.currency || 'EUR'}' (ID: ${cs.id}) dla zlecenia '${jobId}' nie posiada utrwalonego kursu wymiany ani kwoty w PLN. Wymagana naprawa danych lub kontrolowana migracja.`);
+                }
+            }
+
+            totalCost += amountInPln;
             const isSettled = cs.status === 'closed' || cs.status === 'exported';
             if (isSettled) {
-                settledCost += amount;
+                settledCost += amountInPln;
             }
             if (cs.stageId) {
                 const currentStage = stageMap.get(cs.stageId) || { hours: 0, cost: 0 };
                 stageMap.set(cs.stageId, {
                     hours: currentStage.hours,
-                    cost: currentStage.cost + amount
+                    cost: currentStage.cost + amountInPln
                 });
             }
-        });
+        }
 
         // Time entries count
         let totalEntriesCount = entries.length;
@@ -1830,12 +1914,12 @@ async function recalculateJobLaborCosts(jobId, { throwOnError = false } = {}) {
             totalEntriesCount = await db.collection('time-entries').countDocuments({
                 $or: [{ jobId: jobId }, { project_id: jobId }],
                 isActive: { $ne: false }
-            });
+            }, opt);
         }
 
         const job = await db.collection('jobs').findOne({
             $or: [{ id: jobId }, { _id: jobId }]
-        });
+        }, opt);
 
         const updateDoc = {
             actualLaborHours: totalHours,
@@ -1871,15 +1955,15 @@ async function recalculateJobLaborCosts(jobId, { throwOnError = false } = {}) {
         if (jobsColl && typeof jobsColl.updateOne === 'function') {
             await jobsColl.updateOne(
                 { $or: [{ id: jobId }, { _id: jobId }] },
-                { $set: updateDoc }
+                { $set: updateDoc },
+                opt
             );
         }
 
         console.log(`[TRIGGER] Recalculated job ${jobId}: actualLaborHours=${totalHours}, actualLaborCost=${totalCost}, settledLaborCost=${settledCost}`);
     } catch (err) {
         console.error(`[TRIGGER ERROR] Failed to recalculate labor costs for job ${jobId}:`, err.message);
-        // [P1 FIX] Flag job as aggregationPending so the failure is persisted, traceable, and retryable
-        if (db && typeof db.collection === 'function') {
+        if (!session && db && typeof db.collection === 'function') {
             try {
                 const jobsColl = db.collection('jobs');
                 if (jobsColl && typeof jobsColl.updateOne === 'function') {
@@ -2342,6 +2426,10 @@ const {
 } = require('../shared/contracts/index.cjs');
 
 const ajv = new Ajv({ allErrors: true, coerceTypes: false });
+ajv.addKeyword('tsType');
+ajv.addFormat('kostiq-date-string', (str) => extractValidDateKey(str) !== null);
+ajv.addFormat('date', (str) => isValidCalendarDate(str));
+ajv.addFormat('date-time', (str) => extractValidDateKey(str) !== null);
 ajv.addSchema(timeEntrySchema, 'timeEntry');
 ajv.addSchema(jobSchema, 'job');
 const validateTimeEntryPostSchema = ajv.getSchema('timeEntry#/definitions/TimeEntryPostPayload');
@@ -2354,7 +2442,7 @@ const validateJobBatchSchema = ajv.getSchema('job#/definitions/JobBatchImportPay
 const validateJobPaginatedSchema = ajv.getSchema('job#/definitions/JobPaginatedResponse');
 
 // Shared validation & normalization for time entries (used by single POST/PATCH and batch-import)
-async function validateAndNormalizeTimeEntryDoc(doc, { db, user, isBatch = false, isPatch = false, existingEntry = null }) {
+async function validateAndNormalizeTimeEntryDoc(doc, { db, user, isBatch = false, isPatch = false, existingEntry = null, session = null }) {
     if (!doc || typeof doc !== 'object') {
         return { error: 'Nieprawidłowy obiekt wpisu czasu.' };
     }
@@ -2445,6 +2533,13 @@ async function validateAndNormalizeTimeEntryDoc(doc, { db, user, isBatch = false
             if (firstErr.instancePath.includes('workerType')) {
                 return { error: 'Nieprawidłowy rodzaj wykonawcy (workerType): \'' + doc.workerType + '\'. Dozwolone: ' + WORKER_TYPES.join(', ') + '.' };
             }
+            if (firstErr.instancePath.includes('date')) {
+                const rawDate = String(doc.date);
+                if (/^\d{4}-\d{2}-\d{2}$/.test(rawDate) && !isValidCalendarDate(rawDate)) {
+                    return { error: `Nieprawidłowa data kalendarzowa: '${rawDate}'. Taki dzień nie istnieje w kalendarzu.` };
+                }
+                return { error: `Nieprawidłowy format daty: '${doc.date}'. Oczekiwano poprawnej daty kalendarzowej YYYY-MM-DD lub znacznika ISO.` };
+            }
         }
         const errorDetails = ajv.errorsText(schemaValidator.errors, { dataVar: 'payload', separator: '; ' });
         return { error: `Błąd walidacji schematu JSON: ${errorDetails}.` };
@@ -2498,40 +2593,24 @@ async function validateAndNormalizeTimeEntryDoc(doc, { db, user, isBatch = false
 
     // Shield #3 + FIX #2: UTC date normalization + Time Travel guard + Calendar validation
     if (doc.date) {
-        let entryDate;
         const rawDate = String(doc.date);
-
-        if (/^\d{4}-\d{2}-\d{2}$/.test(rawDate)) {
-            const [year, month, day] = rawDate.split('-').map(Number);
-            entryDate = new Date(Date.UTC(year, month - 1, day));
-            // Strict calendar validation (rejects invalid calendar days like 2026-02-31, 2025-02-29, 2026-04-31)
-            if (entryDate.getUTCFullYear() !== year || entryDate.getUTCMonth() !== month - 1 || entryDate.getUTCDate() !== day) {
+        const dateKey = extractValidDateKey(rawDate);
+        if (!dateKey) {
+            if (/^\d{4}-\d{2}-\d{2}$/.test(rawDate) && !isValidCalendarDate(rawDate)) {
                 return { error: `Nieprawidłowa data kalendarzowa: '${rawDate}'. Taki dzień nie istnieje w kalendarzu.` };
             }
-            doc.date = entryDate.toISOString();
-        } else {
-            entryDate = new Date(rawDate);
-            const isoMatch = rawDate.match(/^(\d{4})-(\d{2})-(\d{2})/);
-            if (isoMatch) {
-                const year = Number(isoMatch[1]);
-                const month = Number(isoMatch[2]);
-                const day = Number(isoMatch[3]);
-                const checkDate = new Date(Date.UTC(year, month - 1, day));
-                if (checkDate.getUTCFullYear() !== year || checkDate.getUTCMonth() !== month - 1 || checkDate.getUTCDate() !== day) {
-                    return { error: `Nieprawidłowa data kalendarzowa: '${rawDate}'. Taki dzień nie istnieje w kalendarzu.` };
-                }
-            }
+            return { error: `Nieprawidłowy format daty: '${rawDate}'. Oczekiwano poprawnej daty kalendarzowej YYYY-MM-DD lub znacznika ISO.` };
         }
 
-        if (isNaN(entryDate.getTime())) {
-            return { error: `Nieprawidłowy format daty: '${rawDate}'. Oczekiwano poprawnej daty.` };
-        }
+        const [year, month, day] = dateKey.split('-').map(Number);
+        const entryDate = new Date(Date.UTC(year, month - 1, day));
+        doc.date = entryDate.toISOString();
 
         const nowUTC = new Date();
-        const todayUTC = new Date(Date.UTC(nowUTC.getUTCFullYear(), nowUTC.getUTCMonth(), nowUTC.getUTCDate()));
+        const todayKey = nowUTC.toISOString().slice(0, 10);
 
-        // Reject future dates (beyond today)
-        if (entryDate > todayUTC) {
+        // Reject future dates (beyond today, comparing calendar day dateKey vs todayKey)
+        if (dateKey > todayKey) {
             return {
                 error: `Nie można zgłosić czasu z datą przyszłą (${rawDate}). Dozwolona data to dzisiaj lub wcześniej.`
             };
@@ -2539,12 +2618,14 @@ async function validateAndNormalizeTimeEntryDoc(doc, { db, user, isBatch = false
 
         // Reject dates older than MAX_BACKDATE_DAYS (default 7) unless admin/manager
         const MAX_BACKDATE_DAYS = 7;
+        const todayUTC = new Date(Date.UTC(nowUTC.getUTCFullYear(), nowUTC.getUTCMonth(), nowUTC.getUTCDate()));
         const oldestAllowed = new Date(todayUTC);
         oldestAllowed.setUTCDate(oldestAllowed.getUTCDate() - MAX_BACKDATE_DAYS);
+        const oldestAllowedKey = oldestAllowed.toISOString().slice(0, 10);
 
         const isAdminOverride = user && (user.role === 'admin' || user.role === 'manager');
 
-        if (entryDate < oldestAllowed && !isAdminOverride) {
+        if (dateKey < oldestAllowedKey && !isAdminOverride) {
             return {
                 error: `Data wpisu jest zbyt stara (${rawDate}). Pracownicy mogą wpisywać czas maksymalnie ${MAX_BACKDATE_DAYS} dni wstecz. Skontaktuj się z przełożonym.`
             };
@@ -2774,6 +2855,16 @@ async function validateTimeEntryBatch(req, res, next) {
         const firstErr = validateTimeEntryBatchSchema.errors?.[0];
         if (firstErr && (firstErr.keyword === 'required' || firstErr.params?.missingProperty === 'items')) {
             return res.status(400).json({ error: 'Brak tablicy items do zaimportowania.' });
+        }
+        const dateErr = validateTimeEntryBatchSchema.errors?.find(e => e.instancePath?.endsWith('/date'));
+        if (dateErr) {
+            const match = dateErr.instancePath ? dateErr.instancePath.match(/\/items\/(\d+)\/date$/) : null;
+            const idx = match ? Number(match[1]) : 0;
+            const rawVal = (req.body && Array.isArray(req.body.items) && req.body.items[idx]) ? req.body.items[idx].date : (dateErr.data || '');
+            if (typeof rawVal === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(rawVal) && !isValidCalendarDate(rawVal)) {
+                return res.status(400).json({ error: `Nieprawidłowa data kalendarzowa: '${rawVal}'. Taki dzień nie istnieje w kalendarzu.` });
+            }
+            return res.status(400).json({ error: `Nieprawidłowy format daty: '${rawVal}'. Oczekiwano poprawnej daty kalendarzowej YYYY-MM-DD lub znacznika ISO.` });
         }
         const errorDetails = ajv.errorsText(validateTimeEntryBatchSchema.errors, { dataVar: 'batchPayload', separator: '; ' });
         return res.status(400).json({ error: `Błąd walidacji schematu paczki importu: ${errorDetails}.` });
@@ -3068,62 +3159,57 @@ app.use('/api/logistics-rates', verifyToken, requireRoleOrSafeGet, createRouter(
 app.use('/api/rental-rates', verifyToken, requireRoleOrSafeGet, createRouter('rental-rates'));
 app.use('/api/sheet-metal', verifyToken, requireRoleOrSafeGet, createRouter('sheet-metal'));
 app.use('/api/crews', verifyToken, requireRoleOrSafeGet, createRouter('crews'));
-app.post('/api/time-entries/batch-update', verifyToken, requireRole('admin', 'manager'), async (req, res) => {
+app.post('/api/time-entries/batch-update', verifyToken, requireRole('admin', 'manager'), requireTransactions, async (req, res) => {
     try {
-        if (!db) return res.status(503).json({ error: 'Database not connected' });
-        const { ids, updates } = req.body;
-        if (!ids || !Array.isArray(ids)) {
-            return res.status(400).json({ error: 'Brak lub nieprawidłowa tablica identyfikatorów (ids).' });
+        const { ids, updates } = req.body || {};
+        if (!Array.isArray(ids) || ids.length === 0) {
+            return res.status(400).json({ error: 'Należy wskazać co najmniej jeden wpis czasu (tablica ids).' });
         }
-        if (ids.length === 0) {
-            return res.status(200).json({ success: true, count: 0, affectedJobs: [] });
-        }
-        if (!updates || typeof updates !== 'object' || Array.isArray(updates)) {
-            return res.status(400).json({ error: 'Brak obiektu aktualizacji (updates).' });
+        if (!updates || typeof updates !== 'object' || Object.keys(updates).length === 0) {
+            return res.status(400).json({ error: 'Obiekt aktualizacji (updates) nie może być pusty.' });
         }
 
-        // [P1 FIX] Guard against conflicting legacy and canonical fields in updates
-        if (updates.jobId !== undefined && updates.project_id !== undefined) {
-            if (String(updates.jobId).trim() !== String(updates.project_id).trim()) {
-                return res.status(400).json({ error: 'Niespójne wartości jobId oraz project_id w obiekcie aktualizacji.' });
-            }
-        }
-        if (updates.employeeId !== undefined && updates.employee_id !== undefined) {
-            if (String(updates.employeeId).trim() !== String(updates.employee_id).trim()) {
-                return res.status(400).json({ error: 'Niespójne wartości employeeId oraz employee_id w obiekcie aktualizacji.' });
-            }
+        // Whitelist allowed fields for batch-update
+        const allowedBatchFields = new Set([
+            'status', 'jobId', 'project_id', 'employeeId', 'employee_id',
+            'activityType', 'type', 'billingType', 'hours', 'rate',
+            'quantity', 'unitPrice', 'cost', 'hourlyRate', 'notes',
+            'adminId', 'admin_id', 'adminApprovedAt', 'admin_approved_at',
+            'adminRejectedAt', 'admin_rejected_at', 'adminNotes', 'rejectionReason'
+        ]);
+
+        const forbiddenFields = Object.keys(updates).filter(k => !allowedBatchFields.has(k) && k !== '_id' && k !== 'id');
+        if (forbiddenFields.length > 0) {
+            return res.status(400).json({
+                error: `Nieobsługiwane lub zabronione pole w aktualizacji wsadowej: ${forbiddenFields.join(', ')}. Dozwolone: ${Array.from(allowedBatchFields).join(', ')}.`
+            });
         }
 
-        // [P1 FIX] Strip forbidden identifiers and normalize legacy keys in safeUpdates
         const safeUpdates = { ...updates };
         delete safeUpdates._id;
-        delete safeUpdates.id; // Document identity must never be mutated via batch-update
+        delete safeUpdates.id;
+
+        // Check conflicting aliased fields
+        if (safeUpdates.jobId !== undefined && safeUpdates.project_id !== undefined && safeUpdates.jobId !== safeUpdates.project_id) {
+            return res.status(400).json({ error: 'Niespójne wartości jobId oraz project_id w aktualizacji wsadowej.' });
+        }
+        if (safeUpdates.employeeId !== undefined && safeUpdates.employee_id !== undefined && safeUpdates.employeeId !== safeUpdates.employee_id) {
+            return res.status(400).json({ error: 'Niespójne wartości employeeId oraz employee_id w aktualizacji wsadowej.' });
+        }
 
         const isJobUpdated = safeUpdates.jobId !== undefined || safeUpdates.project_id !== undefined;
-        if (isJobUpdated) {
-            const rawJobId = safeUpdates.jobId !== undefined ? safeUpdates.jobId : safeUpdates.project_id;
-            const effectiveJobId = typeof rawJobId === 'string' ? rawJobId.trim() : rawJobId;
-            if (!effectiveJobId) {
-                return res.status(400).json({ error: 'Pole jobId nie może być puste.' });
-            }
-            safeUpdates.jobId = effectiveJobId;
-            delete safeUpdates.project_id;
-        }
-
         const isEmpUpdated = safeUpdates.employeeId !== undefined || safeUpdates.employee_id !== undefined;
-        if (isEmpUpdated) {
-            const rawEmpId = safeUpdates.employeeId !== undefined ? safeUpdates.employeeId : safeUpdates.employee_id;
-            const effectiveEmpId = typeof rawEmpId === 'string' ? rawEmpId.trim() : rawEmpId;
-            if (!effectiveEmpId) {
-                return res.status(400).json({ error: 'Pole employeeId nie może być puste.' });
-            }
-            safeUpdates.employeeId = effectiveEmpId;
-            delete safeUpdates.employee_id;
+
+        if (safeUpdates.project_id !== undefined && safeUpdates.jobId === undefined) {
+            safeUpdates.jobId = safeUpdates.project_id;
+        }
+        if (safeUpdates.employee_id !== undefined && safeUpdates.employeeId === undefined) {
+            safeUpdates.employeeId = safeUpdates.employee_id;
         }
 
-        // [P1 FIX] Validate safeUpdates against TimeEntry PATCH JSON schema (Ajv)
-        const isPatchValid = validateTimeEntryPatchSchema(safeUpdates);
-        if (!isPatchValid) {
+        // Schema validation
+        const isValid = validateTimeEntryPatchSchema(safeUpdates);
+        if (!isValid) {
             const firstErr = validateTimeEntryPatchSchema.errors?.[0];
             if (firstErr) {
                 if (firstErr.instancePath.includes('status')) {
@@ -3154,27 +3240,166 @@ app.post('/api/time-entries/batch-update', verifyToken, requireRole('admin', 'ma
             return res.status(400).json({ error: 'Brak prawidłowych identyfikatorów w tablicy ids.' });
         }
 
-        // 1. [P1 FIX] Fail-closed snapshot: pre-fetch affected entries before mutation to identify all source jobs
-        let beforeEntries = [];
-        try {
-            beforeEntries = await db.collection('time-entries').find({
-                $or: [{ id: { $in: uniqueRequestedIds } }, { _id: { $in: uniqueRequestedIds } }]
-            }).toArray();
-        } catch (fetchErr) {
-            console.error('[batch-update snapshot time-entries ERROR]', fetchErr.message);
-            return res.status(500).json({
-                error: `Błąd pobierania wpisów czasu przed aktualizacją wsadową: ${fetchErr.message}`
+        const unsetDoc = {};
+        if (isJobUpdated) {
+            unsetDoc.project_id = "";
+        }
+        if (isEmpUpdated) {
+            unsetDoc.employee_id = "";
+        }
+
+        // FULL ACID TRANSACTIONAL BATCH-UPDATE (when Replica Set is active)
+        if (isReplicaSet && client) {
+            const session = client.startSession();
+            try {
+                let affectedJobIds = [];
+                let modifiedCount = 0;
+                let returnItems = [];
+
+                await session.withTransaction(async () => {
+                    // 1. Snapshot inside session
+                    const beforeEntries = await db.collection('time-entries').find(
+                        { $or: [{ id: { $in: uniqueRequestedIds } }, { _id: { $in: uniqueRequestedIds } }] },
+                        { session }
+                    ).toArray();
+
+                    // Fail-closed validation of requested vs found
+                    const foundIdSet = new Set();
+                    beforeEntries.forEach(e => {
+                        if (e.id) foundIdSet.add(String(e.id));
+                        if (e._id) foundIdSet.add(String(e._id));
+                    });
+
+                    const missingIds = uniqueRequestedIds.filter(id => !foundIdSet.has(id));
+                    if (missingIds.length > 0) {
+                        const err = new Error(`Nie znaleziono wszystkich wskazanych wpisów czasu. Brakujące identyfikatory: ${missingIds.join(', ')}.`);
+                        err.status = 404;
+                        err.missingIds = missingIds;
+                        throw err;
+                    }
+
+                    const nowIso = new Date().toISOString();
+                    const validatedCandidates = [];
+
+                    for (const entry of beforeEntries) {
+                        const candidatePatch = { ...safeUpdates };
+                        const valError = await validateAndNormalizeTimeEntryDoc(candidatePatch, {
+                            db,
+                            user: req.user,
+                            isBatch: true,
+                            isPatch: true,
+                            existingEntry: entry,
+                            session
+                        });
+                        if (valError) {
+                            const err = new Error(valError.error || 'Błąd walidacji wpisu czasu w operacji wsadowej.');
+                            err.status = valError.status || 400;
+                            throw err;
+                        }
+
+                        const candidateId = entry.id || (entry._id ? entry._id.toString() : null);
+                        const finalDoc = {
+                            ...entry,
+                            ...candidatePatch,
+                            id: candidateId,
+                            updatedAt: nowIso
+                        };
+                        delete finalDoc._id;
+                        if (isJobUpdated) delete finalDoc.project_id;
+                        if (isEmpUpdated) delete finalDoc.employee_id;
+
+                        validatedCandidates.push({ finalDoc, originalUpdatedAt: entry.updatedAt });
+                    }
+
+                    returnItems = validatedCandidates.map(c => c.finalDoc);
+
+                    // 2. Build CAS operations with optimistic filter
+                    const bulkOps = validatedCandidates.map(({ finalDoc, originalUpdatedAt }) => {
+                        const setDoc = { ...finalDoc };
+                        delete setDoc.id;
+                        const filter = {
+                            $or: [{ id: finalDoc.id }, { _id: finalDoc.id }]
+                        };
+                        if (originalUpdatedAt) {
+                            filter.updatedAt = originalUpdatedAt;
+                        }
+                        const op = {
+                            updateOne: {
+                                filter,
+                                update: { $set: setDoc }
+                            }
+                        };
+                        if (Object.keys(unsetDoc).length > 0) {
+                            op.updateOne.update.$unset = unsetDoc;
+                        }
+                        return op;
+                    });
+
+                    const bulkRes = await db.collection('time-entries').bulkWrite(bulkOps, { session });
+                    const matched = bulkRes.matchedCount !== undefined ? bulkRes.matchedCount : bulkOps.length;
+                    if (matched !== bulkOps.length) {
+                        const err = new Error(`Błąd współbieżności CAS: dopasowano ${matched} z ${bulkOps.length} wpisów. Dane zostały zmodyfikowane współbieżnie.`);
+                        err.status = 409;
+                        throw err;
+                    }
+                    modifiedCount = bulkRes.modifiedCount !== undefined ? bulkRes.modifiedCount : bulkOps.length;
+
+                    // Failpoint for testing real rollback after bulkWrite
+                    if (process.env.NODE_ENV === 'test' && _testFailpoint === 'after_batch_bulkwrite') {
+                        throw new Error('FAILPOINT: Simulated crash after batch bulkWrite');
+                    }
+
+                    // 3. Collect affected jobs and recalculate inside the exact same session (atomic, NO uncommitted pre-marking)
+                    const jobIds = new Set();
+                    beforeEntries.forEach(e => {
+                        if (e.jobId) jobIds.add(e.jobId);
+                        if (e.project_id) jobIds.add(e.project_id);
+                    });
+                    if (safeUpdates.jobId) jobIds.add(safeUpdates.jobId);
+                    affectedJobIds = Array.from(jobIds);
+
+                    for (const jobId of affectedJobIds) {
+                        await recalculateJobLaborCosts(jobId, { session, throwOnError: true });
+                    }
+                });
+
+                return res.status(200).json({
+                    success: true,
+                    modifiedCount,
+                    requestedCount: uniqueRequestedIds.length,
+                    items: returnItems,
+                    affectedJobs: affectedJobIds
+                });
+            } catch (txErr) {
+                console.error('[BATCH-UPDATE TRANSACTION ERROR - FULL ROLLBACK]', txErr);
+                return res.status(txErr.status || 500).json({
+                    error: txErr.message,
+                    missingIds: txErr.missingIds,
+                    affectedJobs: txErr.affectedJobs
+                });
+            } finally {
+                await session.endSession();
+            }
+        }
+
+        // Non-transactional fallback path (strictly allowed in dev/test only when ALLOW_NON_TRANSACTIONAL === 'true')
+        if (process.env.NODE_ENV === 'production' && process.env.ALLOW_NON_TRANSACTIONAL !== 'true') {
+            return res.status(503).json({
+                code: 'TRANSACTIONS_REQUIRED',
+                error: 'Serwer bazy danych nie obsługuje transakcji ACID (brak Replica Set). Operacja wsadowa odrzucona.'
             });
         }
 
-        // [P2 FIX] Fail-closed validation of requested vs found IDs:
-        // Reject entire operation if any requested ID is missing (no partial silent successes)
+        // Standalone fallback: pre-fetch snapshot, validate, pre-mark pending, and execute non-transactional bulkWrite
+        const beforeEntries = await db.collection('time-entries').find({
+            $or: [{ id: { $in: uniqueRequestedIds } }, { _id: { $in: uniqueRequestedIds } }]
+        }).toArray();
+
         const foundIdSet = new Set();
         beforeEntries.forEach(e => {
             if (e.id) foundIdSet.add(String(e.id));
             if (e._id) foundIdSet.add(String(e._id));
         });
-
         const missingIds = uniqueRequestedIds.filter(id => !foundIdSet.has(id));
         if (missingIds.length > 0) {
             return res.status(404).json({
@@ -3187,11 +3412,6 @@ app.post('/api/time-entries/batch-update', verifyToken, requireRole('admin', 'ma
         }
 
         const nowIso = new Date().toISOString();
-
-        // [P1 FIX] Validate and normalize every resulting document against authoritative TimeEntry rules.
-        // We pass candidatePatch = { ...safeUpdates } (NOT the full merged document) with isPatch: true.
-        // This ensures status-only updates (or non-cost fields) do NOT trigger cost recalculation
-        // based on the current employee rate, preserving historical entry cost/rate (identical to single PATCH).
         const validatedCandidates = [];
         for (const entry of beforeEntries) {
             const candidatePatch = { ...safeUpdates };
@@ -3218,11 +3438,9 @@ app.post('/api/time-entries/batch-update', verifyToken, requireRole('admin', 'ma
             delete finalDoc._id;
             if (isJobUpdated) delete finalDoc.project_id;
             if (isEmpUpdated) delete finalDoc.employee_id;
-
             validatedCandidates.push(finalDoc);
         }
 
-        // Collect all affected job IDs (both before and after mutation, supporting transfers & rejections)
         const jobIds = new Set();
         beforeEntries.forEach(e => {
             if (e.jobId) jobIds.add(e.jobId);
@@ -3230,9 +3448,7 @@ app.post('/api/time-entries/batch-update', verifyToken, requireRole('admin', 'ma
         });
         if (safeUpdates.jobId) jobIds.add(safeUpdates.jobId);
 
-        // [P1 FIX] Pre-mark all affected jobs as aggregationPending: true BEFORE writing to MongoDB.
-        // If bulkWrite encounters an unexpected failure or partial write mid-way, the jobs
-        // remain flagged for background reconciliation, ensuring consistency and preventing silent drift.
+        // Pre-mark pending in fallback mode
         if (jobIds.size > 0 && db && typeof db.collection === 'function') {
             const affectedJobIdsArray = Array.from(jobIds);
             const jobsColl = db.collection('jobs');
@@ -3241,31 +3457,12 @@ app.post('/api/time-entries/batch-update', verifyToken, requireRole('admin', 'ma
                     { $or: [{ id: { $in: affectedJobIdsArray } }, { _id: { $in: affectedJobIdsArray } }] },
                     { $set: { aggregationPending: true, updatedAt: nowIso } }
                 );
-            } else if (typeof jobsColl.updateOne === 'function') {
-                for (const jId of affectedJobIdsArray) {
-                    await jobsColl.updateOne(
-                        { $or: [{ id: jId }, { _id: jId }] },
-                        { $set: { aggregationPending: true, updatedAt: nowIso } }
-                    );
-                }
             }
-        }
-
-        // 2. [P1 FIX] Always persist the authoritative, normalized validatedCandidates via bulkWrite!
-        // Recalculated costs (e.g. from changing employeeId, rate, quantity, or unitPrice) and normalized
-        // workerType/activityType are NEVER lost or bypassed.
-        const unsetDoc = {};
-        if (isJobUpdated) {
-            unsetDoc.project_id = "";
-        }
-        if (isEmpUpdated) {
-            unsetDoc.employee_id = "";
         }
 
         const bulkOps = validatedCandidates.map(c => {
             const setDoc = { ...c };
             delete setDoc.id;
-
             const op = {
                 updateOne: {
                     filter: { $or: [{ id: c.id }, { _id: c.id }] },
@@ -3281,8 +3478,7 @@ app.post('/api/time-entries/batch-update', verifyToken, requireRole('admin', 'ma
         try {
             await db.collection('time-entries').bulkWrite(bulkOps);
         } catch (bulkErr) {
-            console.error('[BATCH-UPDATE bulkWrite ERROR]', bulkErr);
-            // Best-effort immediate recalculation for all affected jobs in case some writes committed
+            console.error('[BATCH-UPDATE fallback bulkWrite ERROR]', bulkErr);
             for (const jobId of jobIds) {
                 try {
                     await recalculateJobLaborCosts(jobId);
@@ -3291,7 +3487,6 @@ app.post('/api/time-entries/batch-update', verifyToken, requireRole('admin', 'ma
                 }
             }
 
-            // Inspect bulkErr for partial execution details
             if (bulkErr.name === 'MongoBulkWriteError' || bulkErr.result || bulkErr.writeErrors) {
                 const writeResult = bulkErr.result || {};
                 const modifiedCount = writeResult.modifiedCount || (writeResult.nModified || 0);
@@ -3315,38 +3510,35 @@ app.post('/api/time-entries/batch-update', verifyToken, requireRole('admin', 'ma
                     partialSuccess: succeededIds.length > 0,
                     succeededIds,
                     failedIds,
-                    matchedCount,
-                    modifiedCount,
+                    aggregationPending: true,
                     affectedJobs: Array.from(jobIds),
-                    aggregationPending: true
+                    requestedCount: uniqueRequestedIds.length,
+                    modifiedCount,
+                    matchedCount
                 });
             }
 
-            return res.status(500).json({
-                error: `Błąd zapisu wsadowego wpisów czasu: ${bulkErr.message}`,
-                affectedJobs: Array.from(jobIds),
-                aggregationPending: true
-            });
+            return res.status(500).json({ error: `Błąd zapisu wsadowego: ${bulkErr.message}` });
         }
 
-        // 3. [P1 & P2 FIX] Authoritative recalculation of all affected jobs regardless of status transition
-        // (recalculateJobLaborCosts atomically clears aggregationPending: false on success)
         for (const jobId of jobIds) {
-            await recalculateJobLaborCosts(jobId);
+            try {
+                await recalculateJobLaborCosts(jobId);
+            } catch (recalcErr) {
+                console.warn(`[batch-update fallback recalculation error for job ${jobId}]`, recalcErr.message);
+            }
         }
 
-        const updatedIds = validatedCandidates.map(c => c.id).filter(Boolean);
-        res.status(200).json({
+        return res.status(200).json({
             success: true,
-            count: updatedIds.length,
-            matchedCount: updatedIds.length,
-            updatedIds,
-            affectedJobs: Array.from(jobIds),
-            items: validatedCandidates
+            modifiedCount: validatedCandidates.length,
+            requestedCount: uniqueRequestedIds.length,
+            items: validatedCandidates,
+            affectedJobs: Array.from(jobIds)
         });
     } catch (err) {
-        console.error('[BATCH-UPDATE ERROR]', err);
-        res.status(500).json({ error: err.message });
+        console.error('[batch-update ERROR]', err);
+        return res.status(500).json({ error: `Błąd serwera podczas aktualizacji wsadowej: ${err.message}` });
     }
 });
 
@@ -3391,6 +3583,1826 @@ app.use('/api/time-entries', verifyToken, validateTimeEntry, createRouter('time-
     }
 }));
 
+function isValidCalendarDate(rawDate) {
+    if (typeof rawDate !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(rawDate)) {
+        return false;
+    }
+    const [year, month, day] = rawDate.split('-').map(Number);
+    const d = new Date(Date.UTC(year, month - 1, day));
+    return d.getUTCFullYear() === year && d.getUTCMonth() === month - 1 && d.getUTCDate() === day;
+}
+
+// [P3 FIX] Strict date normalization: accepts strictly YYYY-MM-DD or verified ISO 8601 (rejects trailing junk like 2026-10-03XYZ, invalid times like 99:99:99, and invalid offsets)
+function extractValidDateKey(rawDate) {
+    if (typeof rawDate !== 'string') return null;
+    // 1. Strict calendar date: YYYY-MM-DD
+    if (/^\d{4}-\d{2}-\d{2}$/.test(rawDate)) {
+        return isValidCalendarDate(rawDate) ? rawDate : null;
+    }
+    // 2. Strict full ISO 8601 timestamp with valid hours (00-23), minutes (00-59), seconds (00-59), optional ms, and valid timezone offset
+    if (/^\d{4}-\d{2}-\d{2}T(?:[01]\d|2[0-3]):[0-5]\d:[0-5]\d(?:\.\d{1,3})?(?:Z|[+-](?:[01]\d|2[0-3]):?[0-5]\d)?$/.test(rawDate)) {
+        const parsed = new Date(rawDate);
+        if (isNaN(parsed.getTime())) return null;
+        const datePart = rawDate.slice(0, 10);
+        return isValidCalendarDate(datePart) ? datePart : null;
+    }
+    return null;
+}
+
+// Authoritative domain calculation helper and fail-closed validator for hourly settlements
+// Shared between create-atomic and recalculate to ensure 100% calculation parity and strict data integrity
+function calculateHourlySettlementTotals(candidateEntries = [], candidateAdvances = []) {
+    if (!Array.isArray(candidateEntries)) {
+        const err = new Error('Wpisy czasu muszą być przekazane jako tablica.');
+        err.status = 400;
+        throw err;
+    }
+
+    // [P1 FIX] Strict fail-closed validation of all candidate time-entries
+    for (const entry of candidateEntries) {
+        if (!entry || typeof entry !== 'object') {
+            const err = new Error('Nieprawidłowy dokument wpisu czasu.');
+            err.status = 400;
+            throw err;
+        }
+
+        const entryId = entry.id || entry._id || 'unknown';
+
+        // 1. Hours: must be strict finite number, 0 <= hours <= 24 (no strings, no NaN, no negative)
+        if (typeof entry.hours !== 'number' || !Number.isFinite(entry.hours) || entry.hours < 0 || entry.hours > 24) {
+            const err = new Error(`Wpis czasu '${entryId}' posiada nieprawidłową lub nienumeryczną liczbę godzin (${entry.hours}). Wartość musi być skończoną liczbą od 0 do 24h.`);
+            err.status = 400;
+            throw err;
+        }
+
+        // 2. Cost: must be strict finite number, cost >= 0 (no strings, no NaN, no negative)
+        if (typeof entry.cost !== 'number' || !Number.isFinite(entry.cost) || entry.cost < 0) {
+            const err = new Error(`Wpis czasu '${entryId}' posiada nieprawidłowy lub nienumeryczny koszt (${entry.cost}). Koszt musi być nieujemną liczbą skończoną.`);
+            err.status = 400;
+            throw err;
+        }
+
+        // 3. Billing type
+        const bType = entry.billingType || 'hourly';
+        if (!['hourly', 'fixed', 'm2', 'mb'].includes(bType)) {
+            const err = new Error(`Wpis czasu '${entryId}' posiada nieznany typ rozliczenia (billingType: '${entry.billingType}'). Dopuszczalne wartości to: hourly, fixed, m2, mb.`);
+            err.status = 400;
+            throw err;
+        }
+
+        if (bType === 'hourly') {
+            if (entry.hours <= 0) {
+                const err = new Error(`Wpis czasu '${entryId}' o rozliczeniu godzinowym musi posiadać dodatnią liczbę godzin (aktualnie: ${entry.hours}).`);
+                err.status = 400;
+                throw err;
+            }
+            const hasExplicitRate = entry.hourlyRate !== undefined && entry.hourlyRate !== null;
+            let hRate = 0;
+            if (hasExplicitRate) {
+                if (typeof entry.hourlyRate !== 'number' || !Number.isFinite(entry.hourlyRate) || entry.hourlyRate <= 0) {
+                    const err = new Error(`Wpis czasu '${entryId}' o rozliczeniu godzinowym posiada nieprawidłową stawkę (${entry.hourlyRate}). Stawka godzinowa musi być dodatnią liczbą.`);
+                    err.status = 400;
+                    throw err;
+                }
+                hRate = entry.hourlyRate;
+                const expectedCostCents = toCents(entry.hours * hRate);
+                const actualCostCents = toCents(entry.cost);
+                if (Math.abs(expectedCostCents - actualCostCents) > 1) {
+                    const err = new Error(`Wpis czasu '${entryId}' posiada niespójny koszt (${entry.cost}) w stosunku do iloczynu godzin i stawki (${entry.hours}h × ${hRate} zł = ${toCurrency(expectedCostCents)} zł).`);
+                    err.status = 400;
+                    throw err;
+                }
+            } else {
+                hRate = entry.cost / entry.hours;
+                if (!Number.isFinite(hRate) || hRate <= 0) {
+                    const err = new Error(`Wpis czasu '${entryId}' o rozliczeniu godzinowym posiada nieprawidłową stawkę wynikową (${hRate}).`);
+                    err.status = 400;
+                    throw err;
+                }
+            }
+        } else if (bType === 'm2' || bType === 'mb') {
+            if (typeof entry.quantity !== 'number' || !Number.isFinite(entry.quantity) || entry.quantity <= 0) {
+                const err = new Error(`Wpis czasu '${entryId}' o rozliczeniu ${bType} posiada nieprawidłowy obmiar (${entry.quantity}). Obmiar musi być dodatnią liczbą.`);
+                err.status = 400;
+                throw err;
+            }
+            const rawRate = entry.rate !== undefined && entry.rate !== null ? entry.rate : entry.unitPrice;
+            if (typeof rawRate !== 'number' || !Number.isFinite(rawRate) || rawRate <= 0) {
+                const err = new Error(`Wpis czasu '${entryId}' o rozliczeniu ${bType} posiada nieprawidłową stawkę (${rawRate}). Stawka jednostkowa musi być dodatnią liczbą.`);
+                err.status = 400;
+                throw err;
+            }
+            const expectedCostCents = toCents(entry.quantity * rawRate);
+            const actualCostCents = toCents(entry.cost);
+            if (Math.abs(expectedCostCents - actualCostCents) > 1) {
+                const err = new Error(`Wpis czasu '${entryId}' posiada niespójny koszt (${entry.cost}) w stosunku do obmiaru i stawki (${entry.quantity} × ${rawRate} = ${toCurrency(expectedCostCents)} zł).`);
+                err.status = 400;
+                throw err;
+            }
+        } else if (bType === 'fixed') {
+            if (entry.cost <= 0) {
+                const err = new Error(`Wpis czasu '${entryId}' o rozliczeniu ryczałtowym posiada nieprawidłowy koszt (${entry.cost}). Koszt ryczałtu musi być dodatnią liczbą.`);
+                err.status = 400;
+                throw err;
+            }
+        }
+
+        // 4. Date validation (calendar validity check via extractValidDateKey, no trailing junk)
+        const dateKey = extractValidDateKey(entry.date);
+        if (!dateKey) {
+            const err = new Error(`Wpis czasu '${entryId}' posiada nieprawidłową lub nieistniejącą w kalendarzu datę (${entry.date}).`);
+            err.status = 400;
+            throw err;
+        }
+    }
+
+    // [P1 FIX] Strict fail-closed validation of candidate advances
+    let advanceDeductionsCents = 0;
+    if (Array.isArray(candidateAdvances)) {
+        for (const adv of candidateAdvances) {
+            if (!adv || typeof adv !== 'object') {
+                const err = new Error('Nieprawidłowy dokument zaliczki.');
+                err.status = 400;
+                throw err;
+            }
+            const advId = adv.id || adv._id || 'unknown';
+            if (typeof adv.amount !== 'number' || !Number.isFinite(adv.amount) || adv.amount <= 0) {
+                const err = new Error(`Zaliczka '${advId}' posiada nieprawidłową lub ujemną kwotę (${adv.amount}). Kwota zaliczki musi być dodatnią liczbą skończoną.`);
+                err.status = 400;
+                throw err;
+            }
+            advanceDeductionsCents += toCents(adv.amount);
+        }
+    } else if (typeof candidateAdvances === 'number') {
+        if (!Number.isFinite(candidateAdvances) || candidateAdvances < 0) {
+            const err = new Error(`Nieprawidłowa suma zaliczek (${candidateAdvances}). Wartość musi być skończoną liczbą nieujemną.`);
+            err.status = 400;
+            throw err;
+        }
+        advanceDeductionsCents = toCents(candidateAdvances);
+    } else {
+        const err = new Error('Zaliczki muszą być przekazane jako tablica dokumentów lub skończona liczba nieujemna.');
+        err.status = 400;
+        throw err;
+    }
+    const advanceDeductions = toCurrency(advanceDeductionsCents);
+
+    // Overtime applies ONLY to hourly entries; each day calculates overtime at that day's weighted rate
+    const hourlyEntries = candidateEntries.filter(t => !t.billingType || t.billingType === 'hourly');
+    const dailyHourlyMap = new Map();
+    hourlyEntries.forEach(t => {
+        const dateKey = extractValidDateKey(t.date);
+        const h = t.hours;
+        const rate = (typeof t.hourlyRate === 'number' && t.hourlyRate > 0) ? t.hourlyRate : (t.cost / h);
+        const cur = dailyHourlyMap.get(dateKey) || { hours: 0, costCents: 0, rate };
+        dailyHourlyMap.set(dateKey, {
+            hours: cur.hours + h,
+            costCents: cur.costCents + toCents(h * rate),
+            rate: rate || cur.rate
+        });
+    });
+
+    let overtimeHours = 0;
+    let overtimePayCents = 0;
+    dailyHourlyMap.forEach(({ hours: dayHours, costCents: dayCostCents, rate: dayRate }) => {
+        if (dayHours > 8) {
+            const dailyOvertime = dayHours - 8;
+            const effectiveRate = dayHours > 0 ? (dayCostCents / (dayHours * 100)) : dayRate;
+            overtimeHours += dailyOvertime;
+            overtimePayCents += toCents(dailyOvertime * effectiveRate * 0.5);
+        }
+    });
+
+    const overtimePay = toCurrency(overtimePayCents);
+    overtimeHours = Math.round(overtimeHours * 100) / 100;
+
+    let baseAmountCents = 0;
+    candidateEntries.forEach(t => {
+        baseAmountCents += toCents(t.cost);
+    });
+    const baseAmount = toCurrency(baseAmountCents);
+    const grossAmount = toCurrency(baseAmountCents + overtimePayCents);
+    const totalAmount = toCurrency(toCents(grossAmount) - advanceDeductionsCents);
+    const totalHours = Math.round(candidateEntries.reduce((sum, t) => sum + t.hours, 0) * 100) / 100;
+
+    return {
+        totalHours,
+        baseAmount,
+        overtimeHours,
+        overtimePay,
+        grossAmount,
+        advanceDeductions,
+        totalAmount
+    };
+}
+
+// ==========================================
+// FAZA 3: DOMAIN TRANSACTIONAL SETTLEMENT ENDPOINT
+// Atomically creates settlement, performs CAS updates on time-entries and advances,
+// recalculates job aggregates, and saves idempotency record in a single MongoDB transaction.
+// ==========================================
+app.post('/api/settlements/create-atomic', verifyToken, requireRole('admin', 'manager'), requireTransactions, async (req, res) => {
+    const rawKey = req.headers['idempotency-key'] || req.body?.idempotencyKey;
+    if (!rawKey || typeof rawKey !== 'string' || rawKey.trim() === '' || rawKey.trim().length > 128) {
+        return res.status(400).json({
+            error: 'Nagłówek Idempotency-Key (lub właściwość idempotencyKey w payloadzie) jest wymagany dla transakcyjnego rozliczenia i musi być niepustym ciągiem znaków o długości maksymalnie 128 znaków.'
+        });
+    }
+    const idempotencyKey = rawKey.trim();
+    const ownerToken = crypto.randomUUID();
+    let requestHash = null;
+    let reservedKey = false;
+    let leaseHeartbeat = null;
+    try {
+        // [P2 FIX] Full strict payload contract validation (fail-closed, rejects extra fields & non-arrays)
+        if (!req.body || typeof req.body !== 'object' || Array.isArray(req.body)) {
+            return res.status(400).json({ error: 'Payload żądania musi być poprawnym obiektem JSON.' });
+        }
+
+        const allowedPayloadFields = new Set([
+            'workerId', 'workerType', 'periodFrom', 'periodTo',
+            'timeEntryIds', 'advanceIds', 'notes', 'type', 'id',
+            'contractId', 'jobId', 'stageId', 'amount', 'exchangeRate', 'idempotencyKey'
+        ]);
+
+        const extraFields = Object.keys(req.body).filter(k => !allowedPayloadFields.has(k));
+        if (extraFields.length > 0) {
+            return res.status(400).json({
+                error: `Niedozwolone dodatkowe pola w żądaniu: ${extraFields.join(', ')}. Schemat CreateAtomicSettlementPayload nie dopuszcza nieznanych właściwości.`
+            });
+        }
+
+        const {
+            workerId,
+            workerType,
+            periodFrom,
+            periodTo,
+            timeEntryIds,
+            advanceIds = [],
+            notes = '',
+            type = 'hourly',
+            contractId,
+            jobId,
+            stageId,
+            amount,
+            exchangeRate
+        } = req.body;
+
+        if (exchangeRate !== undefined && exchangeRate !== null) {
+            if (typeof exchangeRate !== 'number' || !Number.isFinite(exchangeRate) || exchangeRate <= 0) {
+                return res.status(400).json({ error: 'Kurs wymiany waluty (exchangeRate), jeśli został podany, musi być dodatnią liczbą większą od zera.' });
+            }
+        }
+
+        if (!workerId || typeof workerId !== 'string' || workerId.trim() === '') {
+            return res.status(400).json({ error: 'Identyfikator wykonawcy (workerId) jest wymagany i musi być niepustym stringiem.' });
+        }
+        if (!['employee', 'subcontractor'].includes(workerType)) {
+            return res.status(400).json({ error: "Typ wykonawcy (workerType) musi być 'employee' lub 'subcontractor'." });
+        }
+
+        if (!isValidCalendarDate(periodFrom) || !isValidCalendarDate(periodTo)) {
+            return res.status(400).json({ error: 'Okres rozliczenia (periodFrom, periodTo) jest wymagany w formacie YYYY-MM-DD i musi być poprawną datą kalendarzową.' });
+        }
+        if (periodFrom > periodTo) {
+            return res.status(400).json({ error: `Data początkowa okresu ('${periodFrom}') nie może być późniejsza niż data końcowa ('${periodTo}').` });
+        }
+
+        const settlementType = type || 'hourly';
+        if (!['hourly', 'contract'].includes(settlementType)) {
+            return res.status(400).json({ error: `Nieprawidłowy typ rozliczenia (type: '${type}'). Dopuszczalne wartości to: 'hourly', 'contract'.` });
+        }
+
+        if (notes !== undefined && notes !== null && typeof notes !== 'string') {
+            return res.status(400).json({ error: 'Pole notes, jeśli podane, musi być ciągiem znaków.' });
+        }
+        if (req.body.id !== undefined && req.body.id !== null && (typeof req.body.id !== 'string' || req.body.id.trim() === '')) {
+            return res.status(400).json({ error: 'Identyfikator rozliczenia (id), jeśli podany, musi być niepustym stringiem.' });
+        }
+
+        if (settlementType === 'contract') {
+            if (workerType !== 'subcontractor') {
+                return res.status(400).json({ error: "Rozliczenia kontraktowe (type: 'contract') są dozwolone wyłącznie dla podwykonawców (workerType: 'subcontractor')." });
+            }
+            if (!contractId || typeof contractId !== 'string' || contractId.trim() === '') {
+                return res.status(400).json({ error: "Identyfikator kontraktu (contractId) jest wymagany dla rozliczenia kontraktowego." });
+            }
+            if (typeof amount !== 'number' || !Number.isFinite(amount) || amount <= 0) {
+                return res.status(400).json({ error: "Dla rozliczenia kontraktowego (type: 'contract') kwota (amount) jest wymagana i musi być liczbą większą od zera." });
+            }
+            if (req.body.advanceIds !== undefined && req.body.advanceIds !== null && (!Array.isArray(req.body.advanceIds) || req.body.advanceIds.length > 0)) {
+                return res.status(400).json({ error: "Rozliczenia kontraktowe nie obsługują potrąceń zaliczek." });
+            }
+            if (req.body.timeEntryIds !== undefined && req.body.timeEntryIds !== null && (!Array.isArray(req.body.timeEntryIds) || req.body.timeEntryIds.length > 0)) {
+                return res.status(400).json({ error: "Rozliczenia kontraktowe nie przyjmują wpisów czasu." });
+            }
+            if (jobId !== undefined && jobId !== null && (typeof jobId !== 'string' || jobId.trim() === '')) {
+                return res.status(400).json({ error: "Identyfikator zlecenia (jobId), jeśli podany, musi być niepustym stringiem." });
+            }
+            if (stageId !== undefined && stageId !== null && (typeof stageId !== 'string' || stageId.trim() === '')) {
+                return res.status(400).json({ error: "Identyfikator etapu (stageId), jeśli podany, musi być niepustym stringiem." });
+            }
+        } else {
+            if (!Array.isArray(timeEntryIds) || timeEntryIds.length === 0) {
+                return res.status(400).json({ error: 'Należy wskazać co najmniej jeden wpis czasu (timeEntryIds - tablica niepustych stringów).' });
+            }
+            if (!timeEntryIds.every(id => typeof id === 'string' && id.trim().length > 0)) {
+                return res.status(400).json({ error: 'Każdy element timeEntryIds musi być niepustym ciągiem znaków.' });
+            }
+            if (new Set(timeEntryIds).size !== timeEntryIds.length) {
+                return res.status(400).json({ error: 'Wskazana lista wpisów czasu (timeEntryIds) zawiera zduplikowane identyfikatory.' });
+            }
+
+            if (req.body.advanceIds !== undefined && req.body.advanceIds !== null) {
+                if (!Array.isArray(req.body.advanceIds)) {
+                    return res.status(400).json({ error: 'Pole advanceIds, jeśli zostało przekazane, musi być tablicą identyfikatorów.' });
+                }
+                if (!req.body.advanceIds.every(id => typeof id === 'string' && id.trim().length > 0)) {
+                    return res.status(400).json({ error: 'Każdy element advanceIds musi być niepustym ciągiem znaków.' });
+                }
+                if (new Set(req.body.advanceIds).size !== req.body.advanceIds.length) {
+                    return res.status(400).json({ error: 'Wskazana lista zaliczek (advanceIds) zawiera zduplikowane identyfikatory.' });
+                }
+            }
+
+            if (workerType === 'subcontractor' && Array.isArray(advanceIds) && advanceIds.length > 0) {
+                return res.status(400).json({ error: "Zaliczki (advanceIds) mogą być rozliczane wyłącznie dla pracowników (workerType='employee'). Podwykonawcy nie obsługują wniosków zaliczkowych." });
+            }
+        }
+
+        // Validate and normalize exchangeRate once to guarantee identical precision in hash, calculations, and persistence
+        let normalizedExchangeRate = null;
+        if (req.body.exchangeRate !== undefined && req.body.exchangeRate !== null) {
+            if (typeof req.body.exchangeRate !== 'number' || !Number.isFinite(req.body.exchangeRate) || req.body.exchangeRate <= 0) {
+                return res.status(400).json({ error: 'Pole exchangeRate, jeśli zostało przekazane, musi być dodatnią liczbą.' });
+            }
+            normalizedExchangeRate = Math.round(req.body.exchangeRate * 10000) / 10000;
+        }
+
+        // Canonical payload hash covering all semantic fields including notes, id, contractId, jobId, stageId, amount, exchangeRate
+        const canonicalPayload = {
+            workerId: workerId || '',
+            workerType: workerType || '',
+            periodFrom: periodFrom || null,
+            periodTo: periodTo || null,
+            timeEntryIds: Array.isArray(timeEntryIds) ? [...timeEntryIds].sort() : [],
+            advanceIds: Array.isArray(advanceIds) ? [...advanceIds].sort() : [],
+            notes: typeof notes === 'string' ? notes.trim() : '',
+            id: req.body?.id || null,
+            type: settlementType,
+            contractId: typeof contractId === 'string' ? contractId.trim() : null,
+            jobId: typeof jobId === 'string' ? jobId.trim() : null,
+            stageId: typeof stageId === 'string' ? stageId.trim() : null,
+            amount: typeof amount === 'number' && Number.isFinite(amount) ? Math.round(amount * 100) / 100 : null,
+            exchangeRate: normalizedExchangeRate
+        };
+        requestHash = crypto.createHash('sha256').update(JSON.stringify(canonicalPayload)).digest('hex');
+
+        // 2. Fast-path & Lease Reservation Idempotency Protocol (with ownerToken and expiresAt)
+        if (idempotencyKey && db && typeof db.collection === 'function') {
+            const existingIdemp = await db.collection('idempotency_keys').findOne({
+                endpoint: '/api/settlements/create-atomic',
+                key: idempotencyKey
+            });
+
+            if (existingIdemp) {
+                if (existingIdemp.status === 'completed' || (!existingIdemp.status && existingIdemp.responseBody)) {
+                    if (existingIdemp.requestHash === requestHash) {
+                        return res.status(existingIdemp.statusCode || 201).json(existingIdemp.responseBody);
+                    } else {
+                        return res.status(409).json({
+                            error: 'Klucz idempotencji został już użyty dla żądania o innym payloadzie (Idempotency Key Conflict).'
+                        });
+                    }
+                } else if (existingIdemp.status === 'pending') {
+                    const isExpired = existingIdemp.expiresAt && new Date(existingIdemp.expiresAt) < new Date();
+                    if (!isExpired && existingIdemp.requestHash && existingIdemp.requestHash !== requestHash) {
+                        return res.status(409).json({
+                            error: 'Klucz idempotencji został już użyty dla żądania o innym payloadzie (Idempotency Key Conflict).'
+                        });
+                    }
+                }
+            }
+
+            const now = new Date();
+            const leaseExpiresAt = new Date(now.getTime() + 30000); // 30s lease for in-flight transaction
+
+            try {
+                await db.collection('idempotency_keys').insertOne({
+                    id: new ObjectId().toString(),
+                    key: idempotencyKey,
+                    endpoint: '/api/settlements/create-atomic',
+                    requestHash,
+                    status: 'pending',
+                    ownerToken,
+                    createdAt: now,
+                    expiresAt: leaseExpiresAt
+                });
+                reservedKey = true;
+            } catch (insertErr) {
+                if (insertErr.code === 11000 || (insertErr.message && insertErr.message.includes('11000'))) {
+                    // Another request holds or is creating this key. Poll to see if it completes, fails, or expires.
+                    let acquired = false;
+                    for (let attempt = 0; attempt < 50; attempt++) {
+                        await new Promise(r => setTimeout(r, 100));
+                        const check = await db.collection('idempotency_keys').findOne({
+                            endpoint: '/api/settlements/create-atomic',
+                            key: idempotencyKey
+                        });
+
+                        if (!check) {
+                            try {
+                                await db.collection('idempotency_keys').insertOne({
+                                    id: new ObjectId().toString(),
+                                    key: idempotencyKey,
+                                    endpoint: '/api/settlements/create-atomic',
+                                    requestHash,
+                                    status: 'pending',
+                                    ownerToken,
+                                    createdAt: new Date(),
+                                    expiresAt: new Date(Date.now() + 30000)
+                                });
+                                reservedKey = true;
+                                acquired = true;
+                                break;
+                            } catch (_) {
+                                continue;
+                            }
+                        }
+
+                        if (check.status === 'completed' || (!check.status && check.responseBody)) {
+                            if (check.requestHash === requestHash) {
+                                return res.status(check.statusCode || 201).json(check.responseBody);
+                            } else {
+                                return res.status(409).json({
+                                    error: 'Klucz idempotencji został już użyty dla żądania o innym payloadzie (Idempotency Key Conflict).'
+                                });
+                            }
+                        }
+
+                        const isExpired = check.status === 'pending' && check.expiresAt && new Date(check.expiresAt) < new Date();
+                        if (check.status === 'failed' || isExpired) {
+                            const takeover = await db.collection('idempotency_keys').findOneAndUpdate(
+                                {
+                                    endpoint: '/api/settlements/create-atomic',
+                                    key: idempotencyKey,
+                                    $or: [
+                                        { status: 'failed' },
+                                        { status: 'pending', expiresAt: { $lt: new Date() } }
+                                    ]
+                                },
+                                {
+                                    $set: {
+                                        status: 'pending',
+                                        ownerToken,
+                                        requestHash,
+                                        updatedAt: new Date(),
+                                        expiresAt: new Date(Date.now() + 30000)
+                                    }
+                                },
+                                { returnDocument: 'after' }
+                            );
+                            if (takeover && (takeover.value || takeover._id || takeover.key)) {
+                                reservedKey = true;
+                                acquired = true;
+                                break;
+                            }
+                        }
+                    }
+
+                    if (!acquired && !reservedKey) {
+                        return res.status(409).json({
+                            error: 'Operacja jest w trakcie wykonywania przez inne żądanie lub nie została ukończona (Idempotency Key In Progress).'
+                        });
+                    }
+                } else {
+                    throw insertErr;
+                }
+            }
+
+            // [P1 FIX] Heartbeat lease renewal: keep pending lease alive for long-running operations
+            if (reservedKey) {
+                leaseHeartbeat = setInterval(async () => {
+                    try {
+                        await db.collection('idempotency_keys').updateOne(
+                            { endpoint: '/api/settlements/create-atomic', key: idempotencyKey, ownerToken, status: 'pending' },
+                            { $set: { expiresAt: new Date(Date.now() + 30000), updatedAt: new Date() } }
+                        );
+                    } catch (_) {}
+                }, 10000);
+                if (leaseHeartbeat.unref) leaseHeartbeat.unref();
+            }
+        }
+
+        // 3. Pre-generate IDs and timestamps BEFORE withTransaction
+        const settlementId = req.body?.id || new ObjectId().toString();
+        const nowIso = new Date().toISOString();
+
+        let responsePayload = null;
+        const executeOperations = async (sess) => {
+            const opt = sess ? { session: sess } : {};
+
+            if (settlementType === 'contract') {
+                // A. Subcontractor lookup
+                const sub = await db.collection('subcontractors').findOne(
+                    { $or: [{ id: workerId }, { _id: workerId }] },
+                    opt
+                );
+                if (!sub) {
+                    const err = new Error(`Podwykonawca '${workerId}' nie został odnaleziony w bazie danych.`);
+                    err.status = 404;
+                    throw err;
+                }
+                const workerName = sub.name || workerId;
+
+                // B. Contract lookup and subcontractor verification
+                const contract = await db.collection('subcontractor_contracts').findOne(
+                    { $or: [{ id: contractId }, { _id: contractId }] },
+                    opt
+                );
+                if (!contract) {
+                    const err = new Error(`Kontrakt '${contractId}' nie został odnaleziony w bazie danych.`);
+                    err.status = 404;
+                    throw err;
+                }
+                if (contract.subcontractorId !== workerId) {
+                    const err = new Error(`Kontrakt '${contractId}' należy do innego podwykonawcy ('${contract.subcontractorId}'), a żądanie wskazuje '${workerId}'.`);
+                    err.status = 400;
+                    throw err;
+                }
+
+                // C. Verify contract limit vs previous active non-cancelled settlements
+                // [P2 FIX] Ignore soft-deleted settlements (isActive: false) and cancelled settlements
+                const prevSettlements = await db.collection('settlements').find(
+                    {
+                        contractId,
+                        status: { $ne: 'cancelled' },
+                        isActive: { $ne: false }
+                    },
+                    opt
+                ).toArray();
+
+                let previouslySettledCents = 0;
+                for (const s of prevSettlements) {
+                    const sAmt = typeof s.totalAmount === 'number' ? s.totalAmount : (typeof s.amount === 'number' ? s.amount : 0);
+                    previouslySettledCents += Math.round(sAmt * 100);
+                }
+
+                const contractTotalNet = typeof contract.totalAmountNet === 'number' ? contract.totalAmountNet : (typeof contract.totalAmount === 'number' ? contract.totalAmount : 0);
+                const contractLimitCents = Math.round(contractTotalNet * 100);
+                const requestedCents = Math.round(amount * 100);
+
+                if (previouslySettledCents + requestedCents > contractLimitCents) {
+                    const remainingNet = Math.max(0, (contractLimitCents - previouslySettledCents) / 100);
+                    const err = new Error(`Kwota rozliczenia (${amount} ${contract.currency || 'PLN'}) przekracza pozostały limit kontraktu (${remainingNet} ${contract.currency || 'PLN'} z sumy ${contractTotalNet} ${contract.currency || 'PLN'}).`);
+                    err.status = 400;
+                    throw err;
+                }
+
+                // [P1 FIX] Atomic CAS reservation on subcontractor_contracts:
+                // Modifies the contract document inside the transaction session to guarantee write-conflict detection
+                // on concurrent settlements and prevents write skew. Uses $and to ensure id filter is NOT overwritten.
+                const contractCasResult = await db.collection('subcontractor_contracts').updateOne(
+                    {
+                        $and: [
+                            { $or: [{ id: contractId }, { _id: contractId }] },
+                            { subcontractorId: workerId },
+                            {
+                                $or: [
+                                    { version: contract.version || 0 },
+                                    { version: { $exists: false } }
+                                ]
+                            }
+                        ]
+                    },
+                    {
+                        $set: {
+                            settledAmountCents: previouslySettledCents + requestedCents,
+                            updatedAt: nowIso
+                        },
+                        $inc: {
+                            version: 1
+                        }
+                    },
+                    opt
+                );
+
+                if (contractCasResult.matchedCount !== 1) {
+                    const err = new Error(`Błąd współbieżności CAS: wersja kontraktu uległa zmianie w wyniku równoległej operacji.`);
+                    err.status = 409;
+                    throw err;
+                }
+
+                // D. Prepare newSettlement with explicit contract fields and EUR/PLN currency conversion
+                // [P1 FIX] Support EUR/foreign contracts with fail-closed explicit exchangeRate and amountInPln (no silent fallback)
+                const contractCurrency = contract.currency || 'PLN';
+                let effectiveExchangeRate = 1.0;
+                if (contractCurrency !== 'PLN') {
+                    let candidateRate = normalizedExchangeRate;
+                    if (!candidateRate && typeof contract.exchangeRate === 'number' && Number.isFinite(contract.exchangeRate) && contract.exchangeRate > 0) {
+                        candidateRate = Math.round(contract.exchangeRate * 10000) / 10000;
+                    }
+
+                    if (!candidateRate) {
+                        const err = new Error(`Dla rozliczenia kontraktu w walucie obcej ('${contractCurrency}') wymagany jest jawny, utrwalony kurs wymiany waluty (exchangeRate w żądaniu lub exchangeRate zapisany na kontrakcie).`);
+                        err.status = 400;
+                        throw err;
+                    }
+                    effectiveExchangeRate = candidateRate;
+                }
+                const amountInPln = Math.round(amount * effectiveExchangeRate * 100) / 100;
+
+                const targetJobId = contract.jobId || jobId || null;
+                const targetStageId = contract.stageId !== undefined ? contract.stageId : (stageId || null);
+                const newSettlement = {
+                    id: settlementId,
+                    workerId,
+                    workerType: 'subcontractor',
+                    workerName,
+                    periodFrom,
+                    periodTo,
+                    createdAt: nowIso,
+                    updatedAt: nowIso,
+                    timeEntryIds: [],
+                    advanceIds: [],
+                    totalHours: 0,
+                    totalAmount: Math.round(amount * 100) / 100,
+                    grossAmount: Math.round(amount * 100) / 100,
+                    overtimeHours: 0,
+                    overtimePay: 0,
+                    advanceDeductions: 0,
+                    currency: contractCurrency,
+                    exchangeRate: effectiveExchangeRate,
+                    amountInPln: amountInPln,
+                    baseAmount: amountInPln,
+                    status: 'open',
+                    notes: typeof notes === 'string' ? notes.trim() : '',
+                    type: 'contract',
+                    contractId,
+                    jobId: targetJobId,
+                    stageId: targetStageId
+                };
+
+                // E. Insert settlement
+                await db.collection('settlements').insertOne(newSettlement, opt);
+
+                // F. Recalculate affected job if linked
+                const affectedJobIds = new Set();
+                if (targetJobId) {
+                    affectedJobIds.add(targetJobId);
+                    await recalculateJobLaborCosts(targetJobId, { session: sess, throwOnError: true });
+                }
+
+                // G. Transition idempotency key record to 'completed' inside transaction
+                if (process.env.NODE_ENV === 'test' && _testFailpoint === 'invalidate_lease_before_commit') {
+                    await db.collection('idempotency_keys').deleteOne({ endpoint: '/api/settlements/create-atomic', key: idempotencyKey });
+                }
+                if (idempotencyKey && reservedKey) {
+                    const idempUpdateRes = await db.collection('idempotency_keys').updateOne(
+                        { endpoint: '/api/settlements/create-atomic', key: idempotencyKey, ownerToken },
+                        {
+                            $set: {
+                                status: 'completed',
+                                requestHash,
+                                statusCode: 201,
+                                responseBody: {
+                                    success: true,
+                                    settlement: newSettlement,
+                                    updatedTimeEntryIds: [],
+                                    updatedAdvanceIds: [],
+                                    affectedJobs: Array.from(affectedJobIds)
+                                },
+                                completedAt: new Date(),
+                                expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000)
+                            }
+                        },
+                        { ...opt, upsert: false }
+                    );
+
+                    if (idempUpdateRes.matchedCount !== 1) {
+                        const err = new Error(`Utrata dzierżawy idempotencji dla klucza '${idempotencyKey}'. Rezerwacja wygasła lub została przejęta przez inne żądanie. Transakcja została wycofana.`);
+                        err.status = 409;
+                        throw err;
+                    }
+                }
+
+                responsePayload = {
+                    success: true,
+                    settlement: newSettlement,
+                    updatedTimeEntryIds: [],
+                    updatedAdvanceIds: [],
+                    affectedJobs: Array.from(affectedJobIds)
+                };
+                return;
+            }
+
+            // A. Entity lookup
+            let workerName = 'Nieznany';
+            if (workerType === 'employee') {
+                const emp = await db.collection('employees').findOne(
+                    { $or: [{ id: workerId }, { _id: workerId }] },
+                    opt
+                );
+                if (!emp) {
+                    const err = new Error(`Pracownik '${workerId}' nie został odnaleziony w bazie danych.`);
+                    err.status = 404;
+                    throw err;
+                }
+                workerName = emp.firstName ? `${emp.firstName} ${emp.lastName || ''}`.trim() : (emp.name || workerId);
+            } else {
+                const sub = await db.collection('subcontractors').findOne(
+                    { $or: [{ id: workerId }, { _id: workerId }] },
+                    opt
+                );
+                if (!sub) {
+                    const err = new Error(`Podwykonawca '${workerId}' nie został odnaleziony w bazie danych.`);
+                    err.status = 404;
+                    throw err;
+                }
+                workerName = sub.name || workerId;
+            }
+
+            // B. Fetch and strictly verify requested time entries
+            const candidateEntries = await db.collection('time-entries').find({
+                $or: [{ id: { $in: timeEntryIds } }, { _id: { $in: timeEntryIds } }]
+            }, opt).toArray();
+
+            if (candidateEntries.length !== timeEntryIds.length) {
+                const foundIds = new Set(candidateEntries.map(e => e.id || (e._id ? e._id.toString() : null)));
+                const missing = timeEntryIds.filter(id => !foundIds.has(id));
+                const err = new Error(`Nie znaleziono wszystkich wskazanych wpisów czasu. Brakujące ID: ${missing.join(', ')}.`);
+                err.status = 404;
+                throw err;
+            }
+
+            for (const entry of candidateEntries) {
+                const entryWorkerId = entry.employeeId || entry.employee_id;
+                if (entryWorkerId !== workerId) {
+                    const err = new Error(`Wpis czasu '${entry.id}' należy do innego wykonawcy ('${entryWorkerId}') niż rozliczany ('${workerId}').`);
+                    err.status = 400;
+                    throw err;
+                }
+
+                // [P1 FIX] Strict workerType verification
+                let entryWorkerType = entry.workerType;
+                if (!entryWorkerType) {
+                    if (entry.subcontractorId) {
+                        entryWorkerType = 'subcontractor';
+                    } else if (entry.type === 'subcontractor' || entry.type === 'employee') {
+                        entryWorkerType = entry.type;
+                    } else {
+                        const empCount = await db.collection('employees').countDocuments({ $or: [{ id: workerId }, { _id: workerId }] }, opt);
+                        const subCount = await db.collection('subcontractors').countDocuments({ $or: [{ id: workerId }, { _id: workerId }] }, opt);
+                        if (empCount > 0 && subCount === 0) {
+                            entryWorkerType = 'employee';
+                        } else if (subCount > 0 && empCount === 0) {
+                            entryWorkerType = 'subcontractor';
+                        } else {
+                            const err = new Error(`Wpis czasu '${entry.id}' nie posiada określonego workerType, a identyfikator '${workerId}' jest niejednoznaczny w bazie. Wymagana wcześniejsza normalizacja wpisu.`);
+                            err.status = 400;
+                            throw err;
+                        }
+                    }
+                }
+                if (entryWorkerType !== workerType) {
+                    const err = new Error(`Wpis czasu '${entry.id}' posiada typ wykonawcy '${entryWorkerType}', podczas gdy rozliczenie tworzone jest dla '${workerType}'.`);
+                    err.status = 400;
+                    throw err;
+                }
+
+                // [P1 FIX] Strict calendar date validation & period date range verification (rejects trailing junk)
+                const entryDateStr = extractValidDateKey(entry.date);
+                if (!entryDateStr) {
+                    const err = new Error(`Wpis czasu '${entry.id}' posiada nieprawidłową lub nieistniejącą w kalendarzu datę (${entry.date}).`);
+                    err.status = 400;
+                    throw err;
+                }
+                if (entryDateStr < periodFrom || entryDateStr > periodTo) {
+                    const err = new Error(`Wpis czasu '${entry.id}' o dacie '${entryDateStr || entry.date}' wykracza poza deklarowany okres rozliczenia (${periodFrom} do ${periodTo}).`);
+                    err.status = 400;
+                    throw err;
+                }
+
+                if (!['approved', 'admin_approved'].includes(entry.status)) {
+                    const err = new Error(`Wpis czasu '${entry.id}' nie jest zatwierdzony (status: '${entry.status}'). Do rozliczenia kwalifikują się wyłącznie wpisy zatwierdzone.`);
+                    err.status = 400;
+                    throw err;
+                }
+                if (entry.settlementId) {
+                    const err = new Error(`Wpis czasu '${entry.id}' został już wcześniej rozliczony (settlementId: '${entry.settlementId}').`);
+                    err.status = 409;
+                    throw err;
+                }
+
+                // Strict financial and bounds validation (fail-closed, BSON/JS type check)
+                // [P1 FIX] Non-negative hours allowed for all; hours=0 is permitted for fixed/m2/mb
+                if (typeof entry.hours !== 'number' || !Number.isFinite(entry.hours) || entry.hours < 0 || entry.hours > 24) {
+                    const err = new Error(`Wpis czasu '${entry.id}' posiada nieprawidłową lub nienumeryczną liczbę godzin (${entry.hours}). Wartość musi być liczbą nieujemną nieprzekraczającą 24h.`);
+                    err.status = 400;
+                    throw err;
+                }
+
+                if (typeof entry.cost !== 'number' || !Number.isFinite(entry.cost) || entry.cost < 0) {
+                    const err = new Error(`Wpis czasu '${entry.id}' posiada nieprawidłowy lub nienumeryczny koszt (${entry.cost}). Koszt musi być nieujemną liczbą skończoną.`);
+                    err.status = 400;
+                    throw err;
+                }
+
+                const bType = entry.billingType || 'hourly';
+                if (!['hourly', 'fixed', 'm2', 'mb'].includes(bType)) {
+                    const err = new Error(`Wpis czasu '${entry.id}' posiada nieznany typ rozliczenia (billingType: '${entry.billingType}'). Dopuszczalne wartości to: hourly, fixed, m2, mb.`);
+                    err.status = 400;
+                    throw err;
+                }
+
+                if (bType === 'hourly') {
+                    // Hourly billing strictly requires hours > 0
+                    if (entry.hours <= 0) {
+                        const err = new Error(`Wpis czasu '${entry.id}' o rozliczeniu godzinowym musi posiadać dodatnią liczbę godzin (aktualnie: ${entry.hours}).`);
+                        err.status = 400;
+                        throw err;
+                    }
+                    const hasExplicitRate = entry.hourlyRate !== undefined && entry.hourlyRate !== null;
+                    let hRate = 0;
+                    if (hasExplicitRate) {
+                        if (typeof entry.hourlyRate !== 'number' || !Number.isFinite(entry.hourlyRate) || entry.hourlyRate <= 0) {
+                            const err = new Error(`Wpis czasu '${entry.id}' o rozliczeniu godzinowym posiada nieprawidłową stawkę (${entry.hourlyRate}). Stawka godzinowa musi być dodatnią liczbą.`);
+                            err.status = 400;
+                            throw err;
+                        }
+                        hRate = entry.hourlyRate;
+                        const expectedCostCents = toCents(entry.hours * hRate);
+                        const actualCostCents = toCents(entry.cost);
+                        if (Math.abs(expectedCostCents - actualCostCents) > 1) {
+                            const err = new Error(`Wpis czasu '${entry.id}' posiada niespójny koszt (${entry.cost}) w stosunku do iloczynu godzin i stawki (${entry.hours}h × ${hRate} zł = ${toCurrency(expectedCostCents)} zł).`);
+                            err.status = 400;
+                            throw err;
+                        }
+                    } else {
+                        hRate = entry.hours > 0 ? entry.cost / entry.hours : 0;
+                        if (!Number.isFinite(hRate) || hRate <= 0) {
+                            const err = new Error(`Wpis czasu '${entry.id}' o rozliczeniu godzinowym posiada nieprawidłową stawkę wynikową (${hRate}).`);
+                            err.status = 400;
+                            throw err;
+                        }
+                    }
+                } else if (bType === 'm2' || bType === 'mb') {
+                    if (typeof entry.quantity !== 'number' || !Number.isFinite(entry.quantity) || entry.quantity <= 0) {
+                        const err = new Error(`Wpis czasu '${entry.id}' o rozliczeniu ${bType} posiada nieprawidłowy obmiar (${entry.quantity}). Obmiar musi być dodatnią liczbą.`);
+                        err.status = 400;
+                        throw err;
+                    }
+                    const rawRate = entry.rate !== undefined && entry.rate !== null ? entry.rate : entry.unitPrice;
+                    if (typeof rawRate !== 'number' || !Number.isFinite(rawRate) || rawRate <= 0) {
+                        const err = new Error(`Wpis czasu '${entry.id}' o rozliczeniu ${bType} posiada nieprawidłową stawkę (${rawRate}). Stawka jednostkowa musi być dodatnią liczbą.`);
+                        err.status = 400;
+                        throw err;
+                    }
+                    const expectedCostCents = toCents(entry.quantity * rawRate);
+                    const actualCostCents = toCents(entry.cost);
+                    if (Math.abs(expectedCostCents - actualCostCents) > 1) {
+                        const err = new Error(`Wpis czasu '${entry.id}' posiada niespójny koszt (${entry.cost}) w stosunku do obmiaru i stawki (${entry.quantity} × ${rawRate} = ${toCurrency(expectedCostCents)} zł).`);
+                        err.status = 400;
+                        throw err;
+                    }
+                } else if (bType === 'fixed') {
+                    if (entry.cost <= 0) {
+                        const err = new Error(`Wpis czasu '${entry.id}' o rozliczeniu ryczałtowym posiada nieprawidłowy koszt (${entry.cost}). Koszt ryczałtu musi być dodatnią liczbą.`);
+                        err.status = 400;
+                        throw err;
+                    }
+                }
+            }
+
+            // C. Fetch and verify advance requests (if any)
+            let advanceDeductions = 0;
+            const validAdvanceIds = [];
+            if (Array.isArray(advanceIds) && advanceIds.length > 0) {
+                if (workerType !== 'employee') {
+                    const err = new Error("Zaliczki mogą być rozliczane wyłącznie dla pracowników (workerType='employee'). Podwykonawca nie może zostać obciążony zaliczką.");
+                    err.status = 400;
+                    throw err;
+                }
+
+                const candidateAdvances = await db.collection('requests').find({
+                    $or: [{ id: { $in: advanceIds } }, { _id: { $in: advanceIds } }]
+                }, opt).toArray();
+
+                if (candidateAdvances.length !== advanceIds.length) {
+                    const foundAdvIds = new Set(candidateAdvances.map(a => a.id || (a._id ? a._id.toString() : null)));
+                    const missingAdv = advanceIds.filter(id => !foundAdvIds.has(id));
+                    const err = new Error(`Nie znaleziono wszystkich wskazanych zaliczek. Brakujące ID: ${missingAdv.join(', ')}.`);
+                    err.status = 404;
+                    throw err;
+                }
+
+                for (const adv of candidateAdvances) {
+                    const advWorkerId = adv.employeeId || adv.employee_id;
+                    if (advWorkerId !== workerId) {
+                        const err = new Error(`Zaliczka '${adv.id}' należy do innego pracownika ('${advWorkerId}').`);
+                        err.status = 400;
+                        throw err;
+                    }
+                    if (adv.type !== 'zaliczka') {
+                        const err = new Error(`Wniosek '${adv.id}' nie jest zaliczką (typ: '${adv.type}').`);
+                        err.status = 400;
+                        throw err;
+                    }
+                    if (adv.status !== 'zaakceptowany') {
+                        const err = new Error(`Zaliczka '${adv.id}' nie jest zaakceptowana (status: '${adv.status}').`);
+                        err.status = 400;
+                        throw err;
+                    }
+                    if (adv.settlementId) {
+                        const err = new Error(`Zaliczka '${adv.id}' została już wcześniej rozliczona (settlementId: '${adv.settlementId}').`);
+                        err.status = 409;
+                        throw err;
+                    }
+
+                    // Strict fail-closed numeric validation of advance amount
+                    if (typeof adv.amount !== 'number' || !Number.isFinite(adv.amount) || adv.amount <= 0) {
+                        const err = new Error(`Zaliczka '${adv.id}' posiada nieprawidłową lub ujemną kwotę (${adv.amount}). Kwota zaliczki musi być dodatnią liczbą skończoną.`);
+                        err.status = 400;
+                        throw err;
+                    }
+                    advanceDeductions = toCurrency(toCents(advanceDeductions) + toCents(adv.amount));
+                    validAdvanceIds.push(adv.id);
+                }
+            }
+
+            // D. Overtime & Financial Totals
+            // [P1 FIX] Authoritative domain calculation shared between create-atomic and recalculate
+            const totals = calculateHourlySettlementTotals(candidateEntries, advanceDeductions);
+            const { totalHours, baseAmount, overtimeHours, overtimePay, grossAmount, totalAmount } = totals;
+
+            const newSettlement = {
+                id: settlementId,
+                workerId,
+                workerType,
+                workerName,
+                periodFrom,
+                periodTo,
+                createdAt: nowIso,
+                updatedAt: nowIso,
+                timeEntryIds,
+                advanceIds: validAdvanceIds,
+                totalHours,
+                baseAmount,
+                totalAmount,
+                grossAmount,
+                overtimeHours,
+                overtimePay,
+                advanceDeductions,
+                currency: 'PLN',
+                status: 'open',
+                notes: typeof notes === 'string' ? notes.trim() : '',
+                type: type || 'hourly'
+            };
+
+            // E. CAS Update time-entries: filter by workerId, approved status, and NO existing settlementId
+            const teCasFilter = {
+                $or: [{ id: { $in: timeEntryIds } }, { _id: { $in: timeEntryIds } }],
+                status: { $in: ['approved', 'admin_approved'] },
+                $and: [
+                    {
+                        $or: [
+                            { employeeId: workerId },
+                            { employee_id: workerId }
+                        ]
+                    },
+                    {
+                        $or: [
+                            { settlementId: { $exists: false } },
+                            { settlementId: null },
+                            { settlementId: false }
+                        ]
+                    }
+                ]
+            };
+            const teUpdateResult = await db.collection('time-entries').updateMany(
+                teCasFilter,
+                { $set: { settlementId, updatedAt: nowIso } },
+                opt
+            );
+            if (teUpdateResult.modifiedCount !== timeEntryIds.length) {
+                const err = new Error(`Błąd współbieżności CAS: zaktualizowano ${teUpdateResult.modifiedCount} z ${timeEntryIds.length} wpisów czasu. Dane uległy zmianie podczas rozliczania.`);
+                err.status = 409;
+                throw err;
+            }
+
+            // Test failpoint trigger (real rollback after time entries update)
+            if (process.env.NODE_ENV === 'test' && _testFailpoint === 'after_time_entries_updated') {
+                throw new Error('FAILPOINT: Simulated crash after time-entries updated');
+            }
+
+            // F. CAS Update requests (advances)
+            if (validAdvanceIds.length > 0) {
+                const advCasFilter = {
+                    $or: [{ id: { $in: validAdvanceIds } }, { _id: { $in: validAdvanceIds } }],
+                    status: 'zaakceptowany',
+                    $and: [
+                        {
+                            $or: [
+                                { employeeId: workerId },
+                                { employee_id: workerId }
+                            ]
+                        },
+                        {
+                            $or: [
+                                { settlementId: { $exists: false } },
+                                { settlementId: null },
+                                { settlementId: false }
+                            ]
+                        }
+                    ]
+                };
+                const advUpdateResult = await db.collection('requests').updateMany(
+                    advCasFilter,
+                    { $set: { settlementId, updatedAt: nowIso } },
+                    opt
+                );
+                if (advUpdateResult.modifiedCount !== validAdvanceIds.length) {
+                    const err = new Error(`Błąd współbieżności CAS: zaktualizowano ${advUpdateResult.modifiedCount} z ${validAdvanceIds.length} zaliczek.`);
+                    err.status = 409;
+                    throw err;
+                }
+            }
+
+            // G. Insert settlement
+            await db.collection('settlements').insertOne(newSettlement, opt);
+
+            // H. Recalculate affected jobs within the same session
+            const affectedJobIds = new Set();
+            candidateEntries.forEach(e => {
+                if (e.jobId) affectedJobIds.add(e.jobId);
+                if (e.project_id) affectedJobIds.add(e.project_id);
+            });
+            for (const jId of affectedJobIds) {
+                await recalculateJobLaborCosts(jId, { session: sess, throwOnError: true });
+            }
+
+            // I. Transition idempotency key record to 'completed' inside the transaction
+            // [P1 FIX] Strict lease verification: matchedCount must be exactly 1, or lease was lost
+            if (process.env.NODE_ENV === 'test' && _testFailpoint === 'invalidate_lease_before_commit') {
+                await db.collection('idempotency_keys').deleteOne({ endpoint: '/api/settlements/create-atomic', key: idempotencyKey });
+            }
+            if (idempotencyKey && reservedKey) {
+                const idempUpdateRes = await db.collection('idempotency_keys').updateOne(
+                    { endpoint: '/api/settlements/create-atomic', key: idempotencyKey, ownerToken },
+                    {
+                        $set: {
+                            status: 'completed',
+                            requestHash,
+                            statusCode: 201,
+                            responseBody: {
+                                success: true,
+                                settlement: newSettlement,
+                                updatedTimeEntryIds: timeEntryIds,
+                                updatedAdvanceIds: validAdvanceIds,
+                                affectedJobs: Array.from(affectedJobIds)
+                            },
+                            completedAt: new Date(),
+                            expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000)
+                        }
+                    },
+                    { ...opt, upsert: false }
+                );
+
+                if (idempUpdateRes.matchedCount !== 1) {
+                    const err = new Error(`Utrata dzierżawy idempotencji dla klucza '${idempotencyKey}'. Rezerwacja wygasła lub została przejęta przez inne żądanie. Transakcja została wycofana.`);
+                    err.status = 409;
+                    throw err;
+                }
+            }
+
+            responsePayload = {
+                success: true,
+                settlement: newSettlement,
+                updatedTimeEntryIds: timeEntryIds,
+                updatedAdvanceIds: validAdvanceIds,
+                affectedJobs: Array.from(affectedJobIds)
+            };
+        };
+
+        // [P2 FIX] Stop heartbeat and extend lease before entering transaction
+        // External writes to idempotency_keys during withTransaction cause WriteConflict.
+        if (leaseHeartbeat) {
+            clearInterval(leaseHeartbeat);
+            leaseHeartbeat = null;
+        }
+        if (idempotencyKey && reservedKey && db && typeof db.collection === 'function') {
+            try {
+                await db.collection('idempotency_keys').updateOne(
+                    { endpoint: '/api/settlements/create-atomic', key: idempotencyKey, ownerToken, status: 'pending' },
+                    { $set: { expiresAt: new Date(Date.now() + 60000), updatedAt: new Date() } }
+                );
+            } catch (_) {}
+        }
+
+        if (isReplicaSet && client) {
+            const session = client.startSession();
+            try {
+                await session.withTransaction(async () => {
+                    await executeOperations(session);
+                });
+            } finally {
+                await session.endSession();
+            }
+        } else {
+            await executeOperations(null);
+        }
+
+        return res.status(201).json(responsePayload);
+    } catch (err) {
+        console.error('[SETTLEMENT-CREATE-ATOMIC ERROR]', err);
+        // If this invocation reserved the pending key but the transaction aborted, clean up the reservation
+        if (reservedKey && idempotencyKey && ownerToken && db && typeof db.collection === 'function') {
+            try {
+                await db.collection('idempotency_keys').deleteOne({
+                    endpoint: '/api/settlements/create-atomic',
+                    key: idempotencyKey,
+                    ownerToken,
+                    status: 'pending'
+                });
+            } catch (_) {}
+        }
+
+        // [P2 FIX] Handle concurrent duplicate request or race condition:
+        // A parallel request with the same idempotency key may have won the race, causing
+        // this request to fail on entry settlementId conflict, CAS conflict, or unique index E11000.
+        // We poll for the completed idempotency key record from the winning request (up to 5s).
+        if (idempotencyKey && db && typeof db.collection === 'function') {
+            const isConflictOrRace = err.code === 11000 ||
+                (err.message && err.message.includes('11000')) ||
+                err.status === 409 ||
+                (err.message && (err.message.includes('CAS') || err.message.includes('rozliczony')));
+
+            if (isConflictOrRace) {
+                for (let attempt = 0; attempt < 50; attempt++) {
+                    const committed = await db.collection('idempotency_keys').findOne({
+                        endpoint: '/api/settlements/create-atomic',
+                        key: idempotencyKey
+                    });
+                    if (committed && (committed.status === 'completed' || (!committed.status && committed.responseBody))) {
+                        if (committed.requestHash === requestHash) {
+                            return res.status(committed.statusCode || 201).json(committed.responseBody);
+                        } else {
+                            return res.status(409).json({
+                                error: 'Klucz idempotencji został już użyty dla żądania o innym payloadzie (Idempotency Key Conflict).'
+                            });
+                        }
+                    }
+                    if (!committed || committed.status === 'failed') {
+                        break;
+                    }
+                    await new Promise(r => setTimeout(r, 100));
+                }
+            }
+        }
+        return res.status(err.status || 500).json({ error: err.message });
+    } finally {
+        if (leaseHeartbeat) {
+            clearInterval(leaseHeartbeat);
+        }
+    }
+});
+
+// [P2 FIX] Helper for resilient, CAS-verified reconciliation of contract settledAmountCents
+async function reconcileContractSettledAmount(cId, opt = {}) {
+    if (!db || typeof db.collection !== 'function') return;
+    const session = opt.session;
+    const maxRetries = 5;
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+        try {
+            const contract = await db.collection('subcontractor_contracts').findOne(
+                { $or: [{ id: cId }, { _id: cId }] },
+                opt
+            );
+            if (!contract) return;
+
+            const activeContractSettlements = await db.collection('settlements').find(
+                {
+                    contractId: cId,
+                    status: { $ne: 'cancelled' },
+                    isActive: { $ne: false }
+                },
+                opt
+            ).toArray();
+
+            const totalActiveCents = activeContractSettlements.reduce((sum, s) => {
+                const amt = typeof s.totalAmount === 'number' ? s.totalAmount : (typeof s.amount === 'number' ? s.amount : 0);
+                return sum + Math.round(amt * 100);
+            }, 0);
+
+            const filter = {
+                $and: [
+                    { $or: [{ id: cId }, { _id: cId }] },
+                    {
+                        $or: [
+                            { version: contract.version || 0 },
+                            { version: { $exists: false } }
+                        ]
+                    }
+                ]
+            };
+
+            const result = await db.collection('subcontractor_contracts').updateOne(
+                filter,
+                {
+                    $set: {
+                        settledAmountCents: totalActiveCents,
+                        updatedAt: new Date().toISOString()
+                    },
+                    $inc: { version: 1 }
+                },
+                opt
+            );
+
+            const modified = result.modifiedCount !== undefined ? result.modifiedCount : result.matchedCount;
+            if (modified > 0) {
+                return;
+            }
+            if (session) {
+                throw new Error(`Konflikt wersji kontraktu '${cId}' podczas synchronizacji po operacji na rozliczeniu.`);
+            }
+            await new Promise(r => setTimeout(r, 10 * attempt));
+        } catch (err) {
+            if (session || attempt === maxRetries) {
+                console.error(`[RECONCILE ERROR] Failed to reconcile contract ${cId} settledAmountCents:`, err.message);
+                throw err;
+            }
+        }
+    }
+}
+
+// [P1 FIX] Dedicated ACID Transactional DELETE for settlements: atomicity between delete, unlinking time-entries/advances, contract limit CAS, and job recalculation
+app.delete('/api/settlements/:id', verifyToken, requireRole('admin', 'manager'), requireTransactions, async (req, res) => {
+    try {
+        if (!db) return res.status(503).json({ error: 'Database not connected' });
+        const { id } = req.params;
+        const filter = { id };
+
+        const clientToUse = typeof client !== 'undefined' ? client : (db.client || null);
+        let session = null;
+
+        // Fail-closed checks on transaction availability
+        if (!isReplicaSet && process.env.ALLOW_NON_TRANSACTIONAL !== 'true' && process.env.NODE_ENV !== 'test') {
+            return res.status(503).json({
+                code: 'TRANSACTIONS_REQUIRED',
+                error: 'Operacja usunięcia rozliczenia wymaga włączonego Replica Set w MongoDB (ACID transactions required).'
+            });
+        }
+
+        if (isReplicaSet && clientToUse) {
+            try {
+                session = clientToUse.startSession();
+            } catch (sessErr) {
+                console.error('[DELETE /api/settlements/:id] Failed to start MongoDB session:', sessErr.message);
+                if (process.env.ALLOW_NON_TRANSACTIONAL !== 'true' && process.env.NODE_ENV !== 'test') {
+                    return res.status(503).json({
+                        code: 'TRANSACTIONS_REQUIRED',
+                        error: `Nie udało się zainicjalizować sesji transakcyjnej MongoDB: ${sessErr.message}`
+                    });
+                }
+            }
+        }
+
+        const executeDelete = async (sess) => {
+            const opt = sess ? { session: sess } : {};
+            const docToDelete = await db.collection('settlements').findOne(filter, opt);
+            if (!docToDelete) {
+                const err = new Error('Item not found');
+                err.status = 404;
+                throw err;
+            }
+
+            // [P1 FIX] Relational discrepancy guard:
+            // Verify that no timeEntryIds or advanceIds declared in this settlement are bound to a DIFFERENT settlement.
+            if (Array.isArray(docToDelete.timeEntryIds) && docToDelete.timeEntryIds.length > 0) {
+                const foreignEntries = await db.collection('time-entries').find({
+                    $or: [{ id: { $in: docToDelete.timeEntryIds } }, { _id: { $in: docToDelete.timeEntryIds } }],
+                    settlementId: { $exists: true, $ne: null, $nin: [false, docToDelete.id] }
+                }, opt).toArray();
+
+                if (foreignEntries.length > 0) {
+                    const foreignIds = foreignEntries.map(e => `${e.id} (settlementId: ${e.settlementId})`).join(', ');
+                    const err = new Error(`Rozbieżność relacji: wpisy czasu [${foreignIds}] są przypisane do innego rozliczenia, podczas gdy widnieją w usuwanym rozliczeniu '${docToDelete.id}'. Usunięcie zostało przerwane w celu ochrony spójności danych.`);
+                    err.status = 409;
+                    throw err;
+                }
+            }
+
+            if (Array.isArray(docToDelete.advanceIds) && docToDelete.advanceIds.length > 0) {
+                const foreignAdvances = await db.collection('requests').find({
+                    $or: [{ id: { $in: docToDelete.advanceIds } }, { _id: { $in: docToDelete.advanceIds } }],
+                    settlementId: { $exists: true, $ne: null, $nin: [false, docToDelete.id] }
+                }, opt).toArray();
+
+                if (foreignAdvances.length > 0) {
+                    const foreignIds = foreignAdvances.map(a => `${a.id} (settlementId: ${a.settlementId})`).join(', ');
+                    const err = new Error(`Rozbieżność relacji: zaliczki [${foreignIds}] są przypisane do innego rozliczenia, podczas gdy widnieją w usuwanym rozliczeniu '${docToDelete.id}'. Usunięcie zostało przerwane.`);
+                    err.status = 409;
+                    throw err;
+                }
+            }
+
+            // 1. Collect affected jobs from strictly matching entries
+            const affectedJobIds = new Set();
+            if (docToDelete.jobId) affectedJobIds.add(docToDelete.jobId);
+
+            const linkedEntries = await db.collection('time-entries').find({ settlementId: docToDelete.id }, opt).toArray();
+            linkedEntries.forEach(e => {
+                if (e.jobId) affectedJobIds.add(e.jobId);
+                if (e.project_id) affectedJobIds.add(e.project_id);
+            });
+
+            // 2. Atomically unlink settlementId STRICTLY from entries bound to this settlement
+            await db.collection('time-entries').updateMany(
+                { settlementId: docToDelete.id },
+                {
+                    $unset: { settlementId: "" },
+                    $set: { updatedAt: new Date().toISOString() }
+                },
+                opt
+            );
+
+            // 3. Atomically unlink settlementId STRICTLY from advances bound to this settlement
+            await db.collection('requests').updateMany(
+                { settlementId: docToDelete.id },
+                {
+                    $unset: { settlementId: "" },
+                    $set: { updatedAt: new Date().toISOString() }
+                },
+                opt
+            );
+
+            // 4. Delete the settlement document itself
+            const delRes = await db.collection('settlements').deleteOne(filter, opt);
+            if (delRes.deletedCount === 0) {
+                const err = new Error('Item not found');
+                err.status = 404;
+                throw err;
+            }
+
+            // 5. Synchronize contract settledAmountCents inside the transaction with version lock
+            if (docToDelete.contractId) {
+                await reconcileContractSettledAmount(docToDelete.contractId, opt);
+            }
+
+            // 6. Recalculate all affected jobs within the session
+            for (const jId of affectedJobIds) {
+                await recalculateJobLaborCosts(jId, { session: sess, throwOnError: true });
+            }
+        };
+
+        if (session) {
+            try {
+                await session.withTransaction(async () => {
+                    await executeDelete(session);
+                });
+            } finally {
+                await session.endSession();
+            }
+        } else {
+            if (process.env.ALLOW_NON_TRANSACTIONAL !== 'true' && process.env.NODE_ENV !== 'test') {
+                return res.status(503).json({
+                    code: 'TRANSACTIONS_REQUIRED',
+                    error: 'Brak aktywnej sesji transakcyjnej MongoDB. Operacja usunięcia rozliczenia została wstrzymana (fail-closed).'
+                });
+            }
+            await executeDelete(null);
+        }
+
+        return res.status(204).send();
+    } catch (err) {
+        const status = err.status || 500;
+        if (status === 404) return res.status(404).json({ error: 'Item not found' });
+        console.error('[DELETE /api/settlements/:id ERROR]', err.message);
+        return res.status(status).json({ error: err.message });
+    }
+});
+
+// [P1 FIX] Block generic POST /api/settlements: domain settlements must use POST /api/settlements/create-atomic
+app.post('/api/settlements', verifyToken, (req, res) => {
+    return res.status(405).json({
+        error: "Bezpośrednie tworzenie rozliczeń przez ogólny endpoint POST /api/settlements jest zablokowane. Wymagane jest użycie transakcyjnego endpointu domenowego POST /api/settlements/create-atomic."
+    });
+});
+
+// [P1 FIX] Block generic batch-import for settlements: bulk settlement imports bypass create-atomic domain logic
+app.all('/api/settlements/batch-import', verifyToken, (req, res) => {
+    return res.status(405).json({
+        error: "Import wsadowy rozliczeń (batch-import) jest zabroniony. Rozliczenia muszą być tworzone transakcyjnie przez POST /api/settlements/create-atomic."
+    });
+});
+
+// [P1 FIX] Restricted PATCH /api/settlements/:id: prevents bypassing domain calculations & relational changes
+app.patch('/api/settlements/:id', verifyToken, requireRole('admin', 'manager'), async (req, res) => {
+    try {
+        if (!db) return res.status(503).json({ error: 'Database not connected' });
+        const { id } = req.params;
+        const body = req.body || {};
+
+        const forbiddenFields = [
+            'totalAmount', 'grossAmount', 'advanceDeductions', 'overtimePay',
+            'overtimeHours', 'timeEntryIds', 'advanceIds', 'contractId',
+            'workerId', 'workerType', 'currency', 'exchangeRate',
+            'amountInPln', 'baseAmount', 'jobId', 'stageId', 'periodFrom', 'periodTo',
+            'totalHours'
+        ];
+
+        const hasForbidden = forbiddenFields.some(f => body[f] !== undefined);
+        if (hasForbidden) {
+            return res.status(400).json({
+                error: "Modyfikacja pól finansowych i relacyjnych rozliczenia (kwoty, stawki, wpisy czasu, zaliczki, kontrakt) jest zabroniona przez ogólny PATCH. Użyj dedykowanych endpointów domenowych (create-atomic lub recalculate)."
+            });
+        }
+
+        const updates = {};
+        if (body.notes !== undefined) {
+            if (typeof body.notes !== 'string') {
+                return res.status(400).json({ error: 'Pole notes musi być ciągiem znaków.' });
+            }
+            updates.notes = body.notes.trim();
+        }
+
+        const validStatuses = ['open', 'closed', 'exported', 'cancelled'];
+        if (body.status !== undefined) {
+            if (!validStatuses.includes(body.status)) {
+                return res.status(400).json({ error: `Nieprawidłowy status rozliczenia. Dozwolone: ${validStatuses.join(', ')}.` });
+            }
+            updates.status = body.status;
+        }
+
+        if (Object.keys(updates).length === 0) {
+            return res.status(400).json({ error: 'Brak dozwolonych zmian do aktualizacji (dozwolone: notes, dozwolone przejścia status).' });
+        }
+
+        updates.updatedAt = new Date().toISOString();
+
+        // [P1 FIX] Transaction availability check (fail-closed, matching DELETE and recalculate)
+        const isStatusChange = updates.status !== undefined;
+        const clientToUse = typeof client !== 'undefined' ? client : (db.client || null);
+        let session = null;
+
+        if (isStatusChange && !isReplicaSet && process.env.ALLOW_NON_TRANSACTIONAL !== 'true' && process.env.NODE_ENV !== 'test') {
+            return res.status(503).json({
+                code: 'TRANSACTIONS_REQUIRED',
+                error: 'Operacja zmiany statusu rozliczenia wymaga włączonego Replica Set w MongoDB (ACID transactions required).'
+            });
+        }
+
+        if (isStatusChange && isReplicaSet && clientToUse && typeof clientToUse.startSession === 'function') {
+            try {
+                if (_testFailpoint === 'force_session_failure') {
+                    throw new Error('Simulated startSession failure');
+                }
+                if (_testFailpoint === 'session_returns_null') {
+                    session = null;
+                } else {
+                    session = clientToUse.startSession();
+                }
+            } catch (sessErr) {
+                console.error('[PATCH /api/settlements/:id] Failed to start MongoDB session:', sessErr.message);
+                if (process.env.ALLOW_NON_TRANSACTIONAL !== 'true' && process.env.NODE_ENV !== 'test') {
+                    return res.status(503).json({
+                        code: 'TRANSACTIONS_REQUIRED',
+                        error: `Nie udało się zainicjalizować sesji transakcyjnej MongoDB: ${sessErr.message}`
+                    });
+                }
+            }
+        }
+
+        const ALLOWED_TRANSITIONS = {
+            open: ['closed', 'exported', 'cancelled'],
+            closed: ['open', 'exported', 'cancelled'],
+            exported: ['cancelled'],
+            cancelled: []
+        };
+
+        const executeMutation = async (sess) => {
+            const opt = sess ? { session: sess } : {};
+
+            // 1. [P1 FIX] Read current state INSIDE transaction to prevent race conditions on status machine
+            const currentDoc = await db.collection('settlements').findOne({ id }, opt);
+            if (!currentDoc) {
+                const err = new Error('Settlement not found');
+                err.status = 404;
+                throw err;
+            }
+
+            // Test barrier hook for real concurrent concurrency testing
+            if (_testBarrierHook) {
+                await _testBarrierHook({ id, currentDoc, updates, session: sess });
+            }
+
+            // 2. [P1 FIX] Validate status state machine on the live transactional snapshot
+            if (updates.status !== undefined && updates.status !== currentDoc.status) {
+                const currentStatus = currentDoc.status || 'open';
+                const targetStatus = updates.status;
+                const allowed = ALLOWED_TRANSITIONS[currentStatus] || [];
+                if (!allowed.includes(targetStatus)) {
+                    const err = new Error(`Niedozwolone przejście statusu z '${currentStatus}' do '${targetStatus}'. Rozliczenie w statusie '${currentStatus}' nie zezwala na przejście do '${targetStatus}'.`);
+                    err.code = 'INVALID_STATUS_TRANSITION';
+                    err.status = 400;
+                    throw err;
+                }
+            }
+
+            // 3. Handle cancellation vs normal status/notes update
+            const isCancelling = updates.status === 'cancelled' && currentDoc.status !== 'cancelled';
+            const affectedJobIds = new Set();
+            if (currentDoc.jobId) affectedJobIds.add(currentDoc.jobId);
+
+            if (isStatusChange) {
+                const linkedEntries = await db.collection('time-entries').find({ settlementId: id }, opt).toArray();
+                linkedEntries.forEach(e => {
+                    if (e.jobId) affectedJobIds.add(e.jobId);
+                    if (e.project_id) affectedJobIds.add(e.project_id);
+                });
+            }
+
+            // 4. [P1 FIX] Atomic CAS update filtering by { id, status: currentDoc.status }
+            const casFilter = { id, status: currentDoc.status };
+            const updateRes = await db.collection('settlements').updateOne(casFilter, { $set: updates }, opt);
+            if (updateRes.matchedCount !== 1) {
+                const err = new Error(`Błąd współbieżności CAS: status rozliczenia uległ modyfikacji przez równoległą operację (oczekiwano '${currentDoc.status}'). Operacja została przerwana.`);
+                err.status = 409;
+                throw err;
+            }
+
+            if (isCancelling) {
+                // Unlink entries and advances atomically
+                await db.collection('time-entries').updateMany(
+                    { settlementId: id },
+                    { $unset: { settlementId: "" }, $set: { updatedAt: new Date().toISOString() } },
+                    opt
+                );
+                await db.collection('requests').updateMany(
+                    { settlementId: id },
+                    { $unset: { settlementId: "" }, $set: { updatedAt: new Date().toISOString() } },
+                    opt
+                );
+
+                if (currentDoc.contractId) {
+                    await reconcileContractSettledAmount(currentDoc.contractId, opt);
+                }
+            }
+
+            // Recalculate labor costs for all affected jobs in transaction
+            if (isStatusChange) {
+                for (const jId of affectedJobIds) {
+                    await recalculateJobLaborCosts(jId, { session: sess, throwOnError: true });
+                }
+            }
+        };
+
+        if (session) {
+            try {
+                await session.withTransaction(async () => {
+                    await executeMutation(session);
+                });
+            } finally {
+                await session.endSession();
+            }
+        } else {
+            // [P1 FIX] Fail-closed check: No silent non-transactional fallback in production if session is missing
+            if (isStatusChange && process.env.ALLOW_NON_TRANSACTIONAL !== 'true' && process.env.NODE_ENV !== 'test') {
+                return res.status(503).json({
+                    code: 'TRANSACTIONS_REQUIRED',
+                    error: 'Brak aktywnej sesji transakcyjnej MongoDB. Zmiana statusu rozliczenia wymaga transakcji ACID (fail-closed).'
+                });
+            }
+            await executeMutation(null);
+        }
+
+        const updatedDoc = await db.collection('settlements').findOne({ id });
+        return res.status(200).json(updatedDoc);
+    } catch (err) {
+        const status = err.status || 500;
+        if (status === 404) return res.status(404).json({ error: 'Settlement not found' });
+        if (err.code === 'INVALID_STATUS_TRANSITION') return res.status(400).json({ code: err.code, error: err.message });
+        console.error('[PATCH /api/settlements/:id ERROR]', err.message);
+        return res.status(status).json({ error: err.message });
+    }
+});
+
+// [P1 FIX] Authoritative server-side settlement recalculation endpoint
+app.post('/api/settlements/:id/recalculate', verifyToken, requireRole('admin', 'manager'), requireTransactions, async (req, res) => {
+    try {
+        if (!db) return res.status(503).json({ error: 'Database not connected' });
+        const { id } = req.params;
+
+        const clientToUse = typeof client !== 'undefined' ? client : (db.client || null);
+        let session = null;
+
+        // Fail-closed checks on transaction availability (matching DELETE and PATCH cancel)
+        if (!isReplicaSet && process.env.ALLOW_NON_TRANSACTIONAL !== 'true' && process.env.NODE_ENV !== 'test') {
+            return res.status(503).json({
+                code: 'TRANSACTIONS_REQUIRED',
+                error: 'Operacja przeliczenia rozliczenia wymaga włączonego Replica Set w MongoDB (ACID transactions required).'
+            });
+        }
+
+        if (isReplicaSet && clientToUse && typeof clientToUse.startSession === 'function') {
+            try {
+                session = clientToUse.startSession();
+            } catch (sessErr) {
+                console.error('[POST /api/settlements/:id/recalculate] Failed to start MongoDB session:', sessErr.message);
+                if (process.env.ALLOW_NON_TRANSACTIONAL !== 'true' && process.env.NODE_ENV !== 'test') {
+                    return res.status(503).json({
+                        code: 'TRANSACTIONS_REQUIRED',
+                        error: `Nie udało się zainicjalizować sesji transakcyjnej MongoDB: ${sessErr.message}`
+                    });
+                }
+            }
+        }
+
+        let updatedDoc = null;
+        const executeRecalculate = async (sess) => {
+            const opt = sess ? { session: sess } : {};
+            const settlement = await db.collection('settlements').findOne({ id }, opt);
+            if (!settlement) {
+                const err = new Error('Settlement not found');
+                err.status = 404;
+                throw err;
+            }
+
+            if (settlement.status === 'cancelled') {
+                const err = new Error('Nie można przeliczyć anulowanego rozliczenia.');
+                err.status = 400;
+                throw err;
+            }
+
+            // [P1 FIX] Exported settlement is an accounting terminal state - forbid recalculation
+            if (settlement.status === 'exported') {
+                const err = new Error("Nie można przeliczyć wyeksportowanego rozliczenia (status: 'exported'). Rozliczenie w statusie 'exported' jest ostateczne pod względem księgowym.");
+                err.status = 400;
+                throw err;
+            }
+
+            const nowIso = new Date().toISOString();
+
+            if (settlement.type === 'contract') {
+                if (settlement.contractId) {
+                    await reconcileContractSettledAmount(settlement.contractId, opt);
+                }
+                if (settlement.jobId) {
+                    await recalculateJobLaborCosts(settlement.jobId, { session: sess, throwOnError: true });
+                }
+                updatedDoc = await db.collection('settlements').findOne({ id }, opt);
+                return;
+            }
+
+            // [P1 FIX] Relational discrepancy guard (matching DELETE):
+            // Verify that no timeEntryIds or advanceIds declared in this settlement are bound to a DIFFERENT settlement.
+            const teIds = Array.isArray(settlement.timeEntryIds) ? settlement.timeEntryIds : [];
+            if (teIds.length > 0) {
+                const foreignEntries = await db.collection('time-entries').find({
+                    $or: [{ id: { $in: teIds } }, { _id: { $in: teIds } }],
+                    settlementId: { $exists: true, $ne: null, $nin: [false, id] }
+                }, opt).toArray();
+
+                if (foreignEntries.length > 0) {
+                    const foreignIds = foreignEntries.map(e => `${e.id} (settlementId: ${e.settlementId})`).join(', ');
+                    const err = new Error(`Rozbieżność relacji: wpisy czasu [${foreignIds}] są przypisane do innego rozliczenia, podczas gdy widnieją w przeliczanym rozliczeniu '${id}'. Przeliczenie zostało przerwane w celu ochrony spójności danych.`);
+                    err.status = 409;
+                    throw err;
+                }
+            }
+
+            const advIds = Array.isArray(settlement.advanceIds) ? settlement.advanceIds : [];
+            if (advIds.length > 0) {
+                const foreignAdvances = await db.collection('requests').find({
+                    $or: [{ id: { $in: advIds } }, { _id: { $in: advIds } }],
+                    settlementId: { $exists: true, $ne: null, $nin: [false, id] }
+                }, opt).toArray();
+
+                if (foreignAdvances.length > 0) {
+                    const foreignIds = foreignAdvances.map(a => `${a.id} (settlementId: ${a.settlementId})`).join(', ');
+                    const err = new Error(`Rozbieżność relacji: zaliczki [${foreignIds}] są przypisane do innego rozliczenia, podczas gdy widnieją w przeliczanym rozliczeniu '${id}'. Przeliczenie zostało przerwane w celu ochrony spójności danych.`);
+                    err.status = 409;
+                    throw err;
+                }
+            }
+
+            // [P1 FIX] Fetch ALL records pointing to this settlement (settlementId: id)
+            const linkedEntries = await db.collection('time-entries').find({
+                settlementId: id
+            }, opt).toArray();
+
+            const linkedAdvances = await db.collection('requests').find({
+                settlementId: id
+            }, opt).toArray();
+
+            // [P1 FIX] Fail-closed verification: check isActive and status on all linked entries
+            const invalidEntries = linkedEntries.filter(e => e.isActive === false || !['approved', 'admin_approved'].includes(e.status));
+            if (invalidEntries.length > 0) {
+                const badDetails = invalidEntries.map(e => `${e.id} (status: '${e.status}', isActive: ${e.isActive})`).join(', ');
+                const err = new Error(`Niespójność danych rozliczenia: powiązane wpisy czasu [${badDetails}] są nieaktywne lub niezatwierdzone. Przeliczenie zostało przerwane w celu ochrony spójności danych (fail-closed).`);
+                err.status = 409;
+                throw err;
+            }
+
+            // [P1 FIX] Fail-closed verification: check status and type on all linked advances
+            const invalidAdvances = linkedAdvances.filter(a => a.status !== 'zaakceptowany' || a.type !== 'zaliczka');
+            if (invalidAdvances.length > 0) {
+                const badAdvDetails = invalidAdvances.map(a => `${a.id} (status: '${a.status}', typ: '${a.type}')`).join(', ');
+                const err = new Error(`Niespójność danych rozliczenia: powiązane zaliczki [${badAdvDetails}] posiadają nieprawidłowy status lub typ. Przeliczenie zostało przerwane w celu ochrony spójności danych (fail-closed).`);
+                err.status = 409;
+                throw err;
+            }
+
+            // [P1 FIX] Fail-closed bidirectional check: verify declared timeEntryIds and advanceIds match linked records
+            const linkedEntryIds = new Set(linkedEntries.map(e => e.id));
+            const missingDeclaredEntries = teIds.filter(tid => !linkedEntryIds.has(tid));
+            if (missingDeclaredEntries.length > 0) {
+                const err = new Error(`Niespójność relacji: wpisy czasu [${missingDeclaredEntries.join(', ')}] zadeklarowane w rozliczeniu nie są z nim powiązane w bazie danych (brak settlementId='${id}'). Przeliczenie zostało przerwane.`);
+                err.status = 409;
+                throw err;
+            }
+
+            const linkedAdvIds = new Set(linkedAdvances.map(a => a.id));
+            const missingDeclaredAdvances = advIds.filter(aid => !linkedAdvIds.has(aid));
+            if (missingDeclaredAdvances.length > 0) {
+                const err = new Error(`Niespójność relacji: zaliczki [${missingDeclaredAdvances.join(', ')}] zadeklarowane w rozliczeniu nie są z nim powiązane w bazie danych (brak settlementId='${id}'). Przeliczenie zostało przerwane.`);
+                err.status = 409;
+                throw err;
+            }
+
+            // [P1 FIX] Authoritative domain calculation helper shared with create-atomic
+            const totals = calculateHourlySettlementTotals(linkedEntries, linkedAdvances);
+            const { totalHours, baseAmount, overtimeHours, overtimePay, grossAmount, advanceDeductions, totalAmount } = totals;
+
+            const recalcUpdates = {
+                timeEntryIds: linkedEntries.map(e => e.id),
+                advanceIds: linkedAdvances.map(a => a.id),
+                totalHours,
+                baseAmount,
+                overtimeHours,
+                overtimePay,
+                grossAmount,
+                advanceDeductions,
+                totalAmount,
+                updatedAt: nowIso
+            };
+
+            await db.collection('settlements').updateOne({ id }, { $set: recalcUpdates }, opt);
+
+            // [P1 FIX] Update strictly records that belong to this settlement (prevent relational hijacking)
+            await db.collection('time-entries').updateMany(
+                { settlementId: id },
+                { $set: { updatedAt: nowIso } },
+                opt
+            );
+            if (linkedAdvances.length > 0) {
+                await db.collection('requests').updateMany(
+                    { settlementId: id },
+                    { $set: { updatedAt: nowIso } },
+                    opt
+                );
+            }
+
+            // Recalculate affected jobs
+            const affectedJobIds = new Set();
+            if (settlement.jobId) affectedJobIds.add(settlement.jobId);
+            linkedEntries.forEach(e => {
+                if (e.jobId) affectedJobIds.add(e.jobId);
+                if (e.project_id) affectedJobIds.add(e.project_id);
+            });
+
+            for (const jId of affectedJobIds) {
+                await recalculateJobLaborCosts(jId, { session: sess, throwOnError: true });
+            }
+
+            updatedDoc = await db.collection('settlements').findOne({ id }, opt);
+        };
+
+        if (session) {
+            try {
+                await session.withTransaction(async () => {
+                    await executeRecalculate(session);
+                });
+            } finally {
+                await session.endSession();
+            }
+        } else {
+            if (process.env.ALLOW_NON_TRANSACTIONAL !== 'true' && process.env.NODE_ENV !== 'test') {
+                return res.status(503).json({
+                    code: 'TRANSACTIONS_REQUIRED',
+                    error: 'Brak aktywnej sesji transakcyjnej MongoDB. Operacja przeliczenia rozliczenia została wstrzymana (fail-closed).'
+                });
+            }
+            await executeRecalculate(null);
+        }
+
+        return res.status(200).json(updatedDoc);
+    } catch (err) {
+        console.error('[POST /api/settlements/:id/recalculate ERROR]', err.message);
+        return res.status(err.status || 500).json({ error: err.message });
+    }
+});
+
 app.use('/api/settlements', verifyToken, validateSettlement, createRouter('settlements', {
     afterMutation: async (action, ctx) => {
         try {
@@ -3413,6 +5425,32 @@ app.use('/api/settlements', verifyToken, validateSettlement, createRouter('settl
                         if (old?.id) settlementIds.add(old.id);
                     }
                 });
+            }
+
+            // [P2 FIX] Synchronize settledAmountCents on subcontractor_contracts with CAS & version check
+            const contractIds = new Set();
+            if (ctx.oldDoc?.contractId) contractIds.add(ctx.oldDoc.contractId);
+            if (ctx.doc?.contractId) contractIds.add(ctx.doc.contractId);
+            if (ctx.updates?.contractId) contractIds.add(ctx.updates.contractId);
+            if (ctx.items && Array.isArray(ctx.items)) {
+                ctx.items.forEach(s => {
+                    if (s.contractId) contractIds.add(s.contractId);
+                    if (ctx.oldDocsMap?.has(s.id)) {
+                        const old = ctx.oldDocsMap.get(s.id);
+                        if (old?.contractId) contractIds.add(old.contractId);
+                    }
+                });
+            }
+            if (ctx.id && db && typeof db.collection === 'function' && contractIds.size === 0) {
+                const doc = await db.collection('settlements').findOne({ id: ctx.id });
+                if (doc?.contractId) contractIds.add(doc.contractId);
+            }
+            for (const cId of contractIds) {
+                try {
+                    await reconcileContractSettledAmount(cId);
+                } catch (recErr) {
+                    console.error(`[afterMutation settlements] Contract reconcile error for ${cId}:`, recErr.message);
+                }
             }
 
             if (settlementIds.size > 0 && db && typeof db.collection === 'function') {
@@ -4438,7 +6476,17 @@ module.exports = {
     app,
     connectDB,
     closeGracefully,
-    setDb: (testDb, ready = true) => { db = testDb; dbReady = ready; indexInitError = ready ? null : "Database marked not ready"; },
+        setDb: (testDb, ready = true, testClient = null, testIsReplicaSet = null) => {
+        db = testDb;
+        dbReady = ready;
+        indexInitError = ready ? null : "Database marked not ready";
+        client = testClient;
+        if (testIsReplicaSet !== null) {
+            isReplicaSet = testIsReplicaSet;
+        } else {
+            isReplicaSet = Boolean(testClient);
+        }
+    },
     reconcileDuplicatesAndEnsureIndexes,
     seedInitialDataIfEmpty,
     repairLegacyC4c2ac3Standards,
@@ -4473,5 +6521,11 @@ module.exports = {
     validateJobBatchSchema,
     validateJobPaginatedSchema,
     recalculateJobLaborCosts,
-    reconcilePendingJobAggregates
+    reconcilePendingJobAggregates,
+    calculateHourlySettlementTotals,
+    setTestFailpoint,
+    getTestFailpoint,
+    setTestBarrierHook,
+    getTestBarrierHook,
+    extractValidDateKey
 };

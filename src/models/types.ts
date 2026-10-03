@@ -373,6 +373,9 @@ export interface SubcontractorContract {
     description: string;
     totalAmountNet: number;
     currency: 'PLN' | 'EUR';
+    exchangeRate?: number;
+    settledAmountCents?: number;
+    version?: number;
 
     plannedStartDate?: string;
     plannedEndDate?: string;
@@ -429,7 +432,10 @@ export interface Settlement {
 
     totalHours: number;
     totalAmount: number;
-    currency: 'PLN';
+    currency: 'PLN' | 'EUR';
+    exchangeRate?: number;
+    amountInPln?: number;
+    baseAmount?: number;
 
     status: SettlementStatus;
     notes?: string;

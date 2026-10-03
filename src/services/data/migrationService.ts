@@ -57,8 +57,7 @@ export const MIGRATION_STORES = [
     { name: 'settings', endpoint: 'settings' },
     { name: 'jobStageItems', endpoint: 'jobStageItems' },
     { name: 'custom-events', endpoint: 'custom-events' },
-    { name: 'subcontractor_contracts', endpoint: 'subcontractor_contracts' },
-    { name: 'settlements', endpoint: 'settlements' }
+    { name: 'subcontractor_contracts', endpoint: 'subcontractor_contracts' }
 ] as const;
 
 function cleanForComparison(obj: any): any {
