@@ -160,6 +160,10 @@ export interface JobPatchPayload {
   riskFlag?: JobRiskFlag;
   riskComment?: string;
   stages?: JobStagePostPayload[];
+  /**
+   * Expected editVersion of the job document for optimistic concurrency locking.
+   */
+  expectedVersion: number;
   [k: string]: unknown;
 }
 export interface JobBatchImportPayload {
@@ -226,6 +230,10 @@ export interface Job {
   stages?: JobStage[];
   createdAt?: string;
   updatedAt?: string;
+  /**
+   * User edit version counter for optimistic concurrency locking.
+   */
+  editVersion: number;
   [k: string]: unknown;
 }
 export interface JobPaginatedResponse {

@@ -388,7 +388,8 @@ export const JobsPage = () => {
                                 onClick={async () => {
                                     if (deleteConfirmation) {
                                         try {
-                                            await deleteJob(deleteConfirmation);
+                                            const targetJob = jobs.find(j => j.id === deleteConfirmation);
+                                            await deleteJob(deleteConfirmation, targetJob?.editVersion);
                                             setDeleteConfirmation(null);
                                         } catch (err) {
                                             console.error('Failed to delete job:', err);

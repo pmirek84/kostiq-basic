@@ -62,9 +62,16 @@ test('ACID Multi-Document Transactions: Real Replica Set Verification', async (t
             } catch (_) {}
         }
 
-        try {
-            fs.rmSync(ephemeralDbPath, { recursive: true, force: true });
-        } catch (_) {}
+        for (let r = 0; r < 20; r++) {
+            try {
+                if (fs.existsSync(ephemeralDbPath)) {
+                    fs.rmSync(ephemeralDbPath, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+                }
+                break;
+            } catch (_) {
+                await new Promise(res => setTimeout(res, 100));
+            }
+        }
     });
 
     // [P2 FIX] Sequential polling without overlapping intervals, closing every unaccepted connection
@@ -3579,4 +3586,399 @@ test('ACID Multi-Document Transactions: Real Replica Set Verification', async (t
         assert.match(createIsoRes.body.error, /nieprawidłową lub nieistniejącą w kalendarzu datę/);
     });
 
+    await t.test('45. [P1 DOMAIN ACID] POST /api/jobs/create-atomic: atomic numbering, stage items insert, and real rollback on failpoint', async () => {
+        const uid = Date.now();
+        const year = new Date().getFullYear();
+        const idempKey = 'idemp-job-atomic-' + uid;
+
+        // Ensure client exists in testDb
+        await testDb.collection('clients').updateOne(
+            { id: 'client-acid-job' },
+            { $set: { id: 'client-acid-job', name: 'Klient ACID Test', isActive: true } },
+            { upsert: true }
+        );
+
+        const validPayload = {
+            job: {
+                id: 'job-atomic-' + uid,
+                name: 'ACID Szklany Biurowiec',
+                clientId: 'client-acid-job',
+                status: 'planned',
+                revenuePlannedNet: 80000,
+                stages: [
+                    { id: 'stage-acid-1', name: 'Pomiary i Projekt', plannedRevenueNet: 10000, plannedCostNet: 4000 },
+                    { id: 'stage-acid-2', name: 'Produkcja i Montaż', plannedRevenueNet: 70000, plannedCostNet: 35000 }
+                ]
+            },
+            stageItems: [
+                { id: 'stage-item-acid-1', stageId: 'stage-acid-2', constructionName: 'Fasada Słupek-Rygiel', quantityInStage: 10 },
+                { id: 'stage-item-acid-2', stageId: 'stage-acid-2', constructionName: 'Drzwi Automatyczne', quantityInStage: 2 }
+            ],
+            idempotencyKey: idempKey
+        };
+
+        // 1. Success path: commits Job, stageItems, sequence number and idempotency key
+        const successRes = await request(app)
+            .post('/api/jobs/create-atomic')
+            .set('Authorization', 'Bearer ' + adminToken)
+            .set('Idempotency-Key', idempKey)
+            .send(validPayload);
+
+        assert.strictEqual(successRes.status, 201);
+        assert.strictEqual(successRes.body.success, true);
+        assert.strictEqual(successRes.body.job.id, 'job-atomic-' + uid);
+        assert.strictEqual(successRes.body.job.editVersion, 1);
+        assert.strictEqual(successRes.body.job.isActive, true);
+        assert.strictEqual(successRes.body.job.actualLaborHours, 0);
+        assert.strictEqual(successRes.body.job.actualLaborCost, 0);
+        assert.match(successRes.body.job.jobCode, new RegExp('^CF-' + year + '-\\d{3}$'));
+        assert.strictEqual(successRes.body.stageItemsCount, 2);
+
+        // Verify in DB
+        const savedJob = await testDb.collection('jobs').findOne({ id: 'job-atomic-' + uid });
+        assert.ok(savedJob, 'Job must be committed to MongoDB');
+        assert.strictEqual(savedJob.name, 'ACID Szklany Biurowiec');
+        assert.strictEqual(savedJob.editVersion, 1);
+
+        const savedItems = await testDb.collection('jobStageItems').find({ jobId: 'job-atomic-' + uid }).toArray();
+        assert.strictEqual(savedItems.length, 2, 'Stage items must be committed to MongoDB');
+
+        const idempRec = await testDb.collection('idempotency_keys').findOne({ endpoint: '/api/jobs/create-atomic', key: idempKey });
+        assert.ok(idempRec);
+        assert.strictEqual(idempRec.status, 'completed');
+
+        // 2. Real ACID Rollback on mid-transaction crash (failpoint after_job_insert)
+        const failedIdempKey = 'idemp-job-fail-' + uid;
+        const failedJobId = 'job-atomic-fail-' + uid;
+        const failPayload = {
+            job: {
+                id: failedJobId,
+                name: 'ACID Zlecenie Skazane na Rollback',
+                clientId: 'client-acid-job',
+                status: 'planned'
+            },
+            stageItems: [
+                { id: 'stage-item-fail-' + uid, stageId: 'stage-x', constructionName: 'Brakujący Element', quantityInStage: 1 }
+            ],
+            idempotencyKey: failedIdempKey
+        };
+
+        setTestFailpoint('after_job_insert');
+        try {
+            const failRes = await request(app)
+                .post('/api/jobs/create-atomic')
+                .set('Authorization', 'Bearer ' + adminToken)
+                .set('Idempotency-Key', failedIdempKey)
+                .send(failPayload);
+
+            assert.strictEqual(failRes.status, 500);
+            assert.match(failRes.body.error, /FAILPOINT: Simulated crash after job insert/);
+
+            // Verify total rollback in MongoDB
+            const shouldNotExistJob = await testDb.collection('jobs').findOne({ id: failedJobId });
+            assert.strictEqual(shouldNotExistJob, null, 'Job must NOT exist after aborted transaction (clean ACID rollback)');
+
+            const shouldNotExistItems = await testDb.collection('jobStageItems').find({ jobId: failedJobId }).toArray();
+            assert.strictEqual(shouldNotExistItems.length, 0, 'Stage items must NOT exist after aborted transaction');
+        } finally {
+            setTestFailpoint(null);
+        }
+
+        // 3. Idempotency Replay (identical payload -> cached 201)
+        const replayRes = await request(app)
+            .post('/api/jobs/create-atomic')
+            .set('Authorization', 'Bearer ' + adminToken)
+            .set('Idempotency-Key', idempKey)
+            .send(validPayload);
+
+        assert.strictEqual(replayRes.status, 201);
+        assert.strictEqual(replayRes.body.job.id, 'job-atomic-' + uid);
+        assert.strictEqual(replayRes.body.job.jobCode, successRes.body.job.jobCode);
+
+        // 4. Idempotency Conflict (different payload with same key -> 409)
+        const conflictRes = await request(app)
+            .post('/api/jobs/create-atomic')
+            .set('Authorization', 'Bearer ' + adminToken)
+            .set('Idempotency-Key', idempKey)
+            .send({
+                ...validPayload,
+                job: { ...validPayload.job, name: 'Inna Nazwa - Wykrycie Konfliktu Idempotencji' }
+            });
+
+        assert.strictEqual(conflictRes.status, 409);
+        assert.match(conflictRes.body.error, /Klucz idempotencji został już użyty dla żądania o innym payloadzie/);
+
+        // 5. Canonical Hash Invariance: identical payload with shuffled key order returns 201 cached replay
+        const shuffledPayload = {
+            idempotencyKey: idempKey,
+            stageItems: [ ...validPayload.stageItems ],
+            job: {
+                revenuePlannedNet: validPayload.job.revenuePlannedNet,
+                stages: validPayload.job.stages,
+                status: validPayload.job.status,
+                clientId: validPayload.job.clientId,
+                name: validPayload.job.name,
+                id: validPayload.job.id
+            }
+        };
+
+        const shuffledReplayRes = await request(app)
+            .post('/api/jobs/create-atomic')
+            .set('Authorization', 'Bearer ' + adminToken)
+            .set('Idempotency-Key', idempKey)
+            .send(shuffledPayload);
+
+        assert.strictEqual(shuffledReplayRes.status, 201);
+        assert.strictEqual(shuffledReplayRes.body.job.id, 'job-atomic-' + uid);
+        assert.strictEqual(shuffledReplayRes.body.job.jobCode, successRes.body.job.jobCode);
+
+        // 6. StageItems or Notes change triggers 409 conflict
+        const stageItemConflictRes = await request(app)
+            .post('/api/jobs/create-atomic')
+            .set('Authorization', 'Bearer ' + adminToken)
+            .set('Idempotency-Key', idempKey)
+            .send({
+                ...validPayload,
+                stageItems: [
+                    {
+                        id: 'stage-item-acid-1',
+                        stageId: 'stage-acid-2',
+                        constructionName: 'Fasada Słupek-Rygiel - ZMIANA',
+                        quantityInStage: 99
+                    }
+                ]
+            });
+        assert.strictEqual(stageItemConflictRes.status, 409);
+        assert.match(stageItemConflictRes.body.error, /Klucz idempotencji został już użyty dla żądania o innym payloadzie/);
+    });
+
+    await t.test('46. [P1 DOMAIN] Counter synchronization from existing jobs and unique jobCode index enforcement', async () => {
+        // Use dedicated test year 2025 to cleanly verify cold-start counter synchronization
+        const testYear = 2025;
+        const testCodePrefix = `CF-${testYear}-`;
+
+        // 1. Seed existing jobs CF-2025-001 ... CF-2025-005
+        const seededJobs = [];
+        for (let i = 1; i <= 5; i++) {
+            seededJobs.push({
+                id: `job-seed-${testYear}-${i}`,
+                jobCode: `${testCodePrefix}${String(i).padStart(3, '0')}`,
+                name: `Istniejące Zlecenie ${i}`,
+                clientId: 'client-acid-job',
+                status: 'planned',
+                createdAt: `${testYear}-01-10T10:00:00Z`,
+                updatedAt: `${testYear}-01-10T10:00:00Z`,
+                isActive: true,
+                editVersion: 1
+            });
+        }
+        await testDb.collection('jobs').insertMany(seededJobs);
+
+        // 2. Delete any existing counter doc for testYear
+        await testDb.collection('counters').deleteOne({ _id: `job_${testYear}` });
+
+        // 3. Ensure indexes and run synchronization
+        await reconcileDuplicatesAndEnsureIndexes(testDb);
+
+        // Verify counter document is now synchronized to at least 5
+        const counterDoc = await testDb.collection('counters').findOne({ _id: `job_${testYear}` });
+        assert.ok(counterDoc);
+        assert.ok(counterDoc.seq >= 5, `Expected counter seq >= 5, got ${counterDoc.seq}`);
+
+        // 4. Test Unique Index enforcement directly on MongoDB
+        // Attempting to manually insert an active job with an already taken jobCode must fail with E11000 duplicate key error
+        let dupErr = null;
+        try {
+            await testDb.collection('jobs').insertOne({
+                id: 'job-manual-dup-check',
+                jobCode: `${testCodePrefix}001`,
+                name: 'Zduplikowany kod zlecenia',
+                clientId: 'client-acid-job',
+                status: 'planned',
+                createdAt: new Date().toISOString(),
+                updatedAt: new Date().toISOString(),
+                isActive: true,
+                editVersion: 1
+            });
+        } catch (err) {
+            dupErr = err;
+        }
+
+        assert.ok(dupErr, 'Unique index on jobCode must reject duplicate jobCode insert');
+        assert.ok(dupErr.code === 11000 || dupErr.message.includes('11000'), 'Error code must be E11000 duplicate key error');
+    });
+
+    await t.test('47. [P1 DOMAIN ACID] POST /api/jobs/batch-import rolls back and aborts with 500 when counter update fails', async () => {
+        const failJobId = 'job-batch-fail-counter-1';
+        const failJobCode = 'CF-2026-888';
+
+        // Ensure failJobId does not exist initially
+        await testDb.collection('jobs').deleteOne({ id: failJobId });
+
+        const { setTestFailpoint } = require('../server.js');
+        setTestFailpoint('batch_job_counter_failure');
+        try {
+            const res = await request(app)
+                .post('/api/jobs/batch-import')
+                .set('Authorization', 'Bearer ' + adminToken)
+                .send({
+                    items: [
+                        { id: failJobId, name: 'Zlecenie z Awarią Licznika', clientId: 'client-acid-job', jobCode: failJobCode }
+                    ]
+                });
+
+            assert.strictEqual(res.status, 500, 'Batch import must return 500 on counter update failure');
+            assert.match(res.body.errors ? res.body.errors.join(' ') : (res.body.error || ''), /Simulated counter update failure/);
+
+            // ACID Verification: Because of transaction rollback, the job was NOT inserted!
+            const docInDb = await testDb.collection('jobs').findOne({ id: failJobId });
+            assert.strictEqual(docInDb, null, 'Job document must NOT be persisted in database after counter failure rollback');
+
+            // Counter was NOT updated to 888
+            const counterDoc = await testDb.collection('counters').findOne({ _id: 'job_2026' });
+            if (counterDoc) {
+                assert.ok((counterDoc.seq || 0) < 888, 'Counter sequence must not be bumped to 888');
+            }
+        } finally {
+            setTestFailpoint(null);
+            await testDb.collection('jobs').deleteOne({ id: failJobId });
+        }
+    });
+
+    await t.test('48. [P1 DOMAIN ACID] POST /api/jobs/batch-import in production fails closed with 503 TRANSACTIONS_REQUIRED when Replica Set / session is unavailable, zero writes performed', async () => {
+        const origNodeEnv = process.env.NODE_ENV;
+        const origAllowNonTx = process.env.ALLOW_NON_TRANSACTIONAL;
+        process.env.NODE_ENV = 'production';
+        delete process.env.ALLOW_NON_TRANSACTIONAL;
+
+        const { setTestFailpoint } = require('../server.js');
+        const failJob1Id = 'job-batch-fail-closed-1';
+        const failJob2Id = 'job-batch-fail-closed-2';
+
+        try {
+            // Case 1: startSession throws error
+            setTestFailpoint('force_session_failure');
+            const resA = await request(app)
+                .post('/api/jobs/batch-import')
+                .set('Authorization', 'Bearer ' + adminToken)
+                .send({
+                    items: [
+                        { id: failJob1Id, name: 'Zlecenie Bez RS 1', clientId: 'client-acid-job' },
+                        { id: failJob2Id, name: 'Zlecenie Bez RS 2', clientId: 'client-acid-job' }
+                    ]
+                });
+
+            assert.strictEqual(resA.status, 503, 'Must return 503 when session start fails in production');
+            assert.strictEqual(resA.body.code, 'TRANSACTIONS_REQUIRED');
+
+            // Zero writes verified in DB
+            const docA1 = await testDb.collection('jobs').findOne({ id: failJob1Id });
+            const docA2 = await testDb.collection('jobs').findOne({ id: failJob2Id });
+            assert.strictEqual(docA1, null, 'Job 1 must NOT be saved on 503 fail-closed');
+            assert.strictEqual(docA2, null, 'Job 2 must NOT be saved on 503 fail-closed');
+
+            // Case 2: startSession returns null
+            setTestFailpoint('session_returns_null');
+            const resB = await request(app)
+                .post('/api/jobs/batch-import')
+                .set('Authorization', 'Bearer ' + adminToken)
+                .send({
+                    items: [
+                        { id: failJob1Id, name: 'Zlecenie Bez RS 1', clientId: 'client-acid-job' },
+                        { id: failJob2Id, name: 'Zlecenie Bez RS 2', clientId: 'client-acid-job' }
+                    ]
+                });
+
+            assert.strictEqual(resB.status, 503, 'Must return 503 when session is null in production');
+            assert.strictEqual(resB.body.code, 'TRANSACTIONS_REQUIRED');
+
+            // Zero writes verified in DB
+            const docB1 = await testDb.collection('jobs').findOne({ id: failJob1Id });
+            const docB2 = await testDb.collection('jobs').findOne({ id: failJob2Id });
+            assert.strictEqual(docB1, null, 'Job 1 must NOT be saved on 503 fail-closed');
+            assert.strictEqual(docB2, null, 'Job 2 must NOT be saved on 503 fail-closed');
+        } finally {
+            setTestFailpoint(null);
+            process.env.NODE_ENV = origNodeEnv;
+            if (origAllowNonTx !== undefined) process.env.ALLOW_NON_TRANSACTIONAL = origAllowNonTx;
+            await testDb.collection('jobs').deleteMany({ id: { $in: [failJob1Id, failJob2Id] } });
+        }
+    });
+
+    await t.test('49. [P1 DOMAIN ACID] POST /api/jobs/batch-import with 2 jobs where second hits E11000 duplicate key triggers full rollback (409, succeeded: 0, first job not persisted, counter untouched)', async () => {
+        const existingJobId = 'job-acid-batch-existing';
+        const existingJobCode = 'CF-2026-950';
+
+        const newJob1Id = 'job-acid-batch-new-1';
+        const newJob1Code = 'CF-2026-951';
+
+        const conflictingJob2Id = 'job-acid-batch-conflicting-2';
+        const conflictingJob2Code = existingJobCode; // Duplicate jobCode triggers E11000 on unique index
+
+        // Clean slate
+        await testDb.collection('jobs').deleteMany({
+            id: { $in: [existingJobId, newJob1Id, conflictingJob2Id] }
+        });
+
+        // 1. Seed existing job in database with existingJobCode
+        await testDb.collection('jobs').insertOne({
+            id: existingJobId,
+            jobCode: existingJobCode,
+            name: 'Istniejące Zlecenie w Bazie',
+            clientId: 'client-acid-job',
+            status: 'planned',
+            createdAt: new Date().toISOString(),
+            updatedAt: new Date().toISOString(),
+            isActive: true,
+            editVersion: 1
+        });
+
+        // Record initial counter state for 2026
+        const initialCounterDoc = await testDb.collection('counters').findOne({ _id: 'job_2026' });
+        const initialSeq = initialCounterDoc ? (initialCounterDoc.seq || 0) : 0;
+
+        try {
+            // 2. Send batch with 2 jobs: Job 1 is new/valid, Job 2 has conflicting jobCode
+            const res = await request(app)
+                .post('/api/jobs/batch-import')
+                .set('Authorization', 'Bearer ' + adminToken)
+                .send({
+                    items: [
+                        { id: newJob1Id, jobCode: newJob1Code, name: 'Nowe Zlecenie 1', clientId: 'client-acid-job' },
+                        { id: conflictingJob2Id, jobCode: conflictingJob2Code, name: 'Zlecenie Konfliktujące z Istniejącym Kodem', clientId: 'client-acid-job' }
+                    ]
+                });
+
+            // 3. Must return 409 BATCH_IMPORT_VERSION_CONFLICT with succeeded: 0
+            assert.strictEqual(res.status, 409, 'Batch import with duplicate key conflict must return 409');
+            assert.strictEqual(res.body.code, 'BATCH_IMPORT_VERSION_CONFLICT');
+            assert.strictEqual(res.body.status, 'failed');
+            assert.strictEqual(res.body.succeeded, 0, 'Transactional batch write must have succeeded: 0 after rollback');
+            assert.strictEqual(res.body.failed, 2, 'Both items marked as failed');
+            assert.deepStrictEqual(res.body.succeededIds, []);
+            assert.deepStrictEqual(res.body.failedIds, [newJob1Id, conflictingJob2Id]);
+
+            // 4. ACID Verification: Rollback means Job 1 was NOT inserted into MongoDB!
+            const job1InDb = await testDb.collection('jobs').findOne({ id: newJob1Id });
+            assert.strictEqual(job1InDb, null, 'Job 1 must NOT exist in database due to full transaction rollback!');
+
+            const job2InDb = await testDb.collection('jobs').findOne({ id: conflictingJob2Id });
+            assert.strictEqual(job2InDb, null, 'Job 2 must NOT exist in database');
+
+            // 5. Counter sequence must NOT be bumped to 951
+            const postCounterDoc = await testDb.collection('counters').findOne({ _id: 'job_2026' });
+            const postSeq = postCounterDoc ? (postCounterDoc.seq || 0) : 0;
+            assert.strictEqual(postSeq, initialSeq, `Counter seq must remain untouched at ${initialSeq}, got ${postSeq}`);
+
+            // 6. Existing job in database is untouched
+            const existingInDb = await testDb.collection('jobs').findOne({ id: existingJobId });
+            assert.ok(existingInDb);
+            assert.strictEqual(existingInDb.name, 'Istniejące Zlecenie w Bazie');
+            assert.strictEqual(existingInDb.editVersion, 1);
+        } finally {
+            await testDb.collection('jobs').deleteMany({
+                id: { $in: [existingJobId, newJob1Id, conflictingJob2Id] }
+            });
+        }
+    });
 });

@@ -57,6 +57,11 @@ export class MongoAdapter<T extends { id: string }> implements IStorageAdapter<T
                         duration: 8000,
                         description: 'Twoje zmiany nie zostały zapisane. Skopiuj je i odśwież formularz.'
                     });
+                } else if (response.status === 428) {
+                    toast.error(errorMsg || 'Wymagany token wersji dokumentu (Optimistic Locking).', {
+                        duration: 8000,
+                        description: 'Operacja wymaga przekazania oczekiwanej wersji rekordu.'
+                    });
                 } else if (response.status !== 404) {
                     toast.error(errorMsg);
                 }
@@ -145,17 +150,33 @@ export class MongoAdapter<T extends { id: string }> implements IStorageAdapter<T
     }
 
     async create(item: T): Promise<string> {
+        let payload: any = item;
+        // For jobs: contract strictly forbids editVersion and expectedVersion in POST payload
+        if (this.endpoint === 'jobs') {
+            const { editVersion, expectedVersion, ...rest } = item as any;
+            payload = rest;
+        }
         const res = await this.fetchJson<T>(this.url, {
             method: 'POST',
-            body: JSON.stringify(item)
+            body: JSON.stringify(payload)
         });
         return res.id;
     }
 
     async update(id: string, item: Partial<T>): Promise<void> {
+        let payload: any = { ...item };
+        // For jobs: contract requires expectedVersion in PATCH and forbids editVersion
+        if (this.endpoint === 'jobs') {
+            const expectedVersion = payload.expectedVersion ?? payload.editVersion;
+            delete payload.editVersion;
+            if (typeof expectedVersion !== 'number') {
+                throw new Error(`[MongoAdapter] Aktualizacja zlecenia ${id} wymaga podania expectedVersion lub editVersion.`);
+            }
+            payload.expectedVersion = expectedVersion;
+        }
         await this.fetchJson(`${this.url}/${id}`, {
             method: 'PATCH',
-            body: JSON.stringify(item)
+            body: JSON.stringify(payload)
         });
     }
 
@@ -167,7 +188,65 @@ export class MongoAdapter<T extends { id: string }> implements IStorageAdapter<T
     }
 
     async save(item: T): Promise<string> {
-        // Shield #1: Optimistic Locking — attach current updatedAt as sentinel so server can detect conflicts
+        // Dedicated handling for jobs complying with Phase 4 Optimistic Locking contract
+        if (this.endpoint === 'jobs') {
+            const jobItem = item as any;
+            const expectedVersion = jobItem.expectedVersion ?? jobItem.editVersion;
+            const { editVersion, expectedVersion: _exp, ...patchFields } = jobItem;
+
+            // Only attempt PATCH if the item already carries an explicit version token
+            if (typeof expectedVersion === 'number') {
+                const patchPayload = {
+                    ...patchFields,
+                    expectedVersion
+                };
+
+                const res = await this.request(`${this.url}/${item.id}`, {
+                    method: 'PATCH',
+                    body: JSON.stringify(patchPayload)
+                });
+
+                if (res.ok) {
+                    return item.id;
+                }
+
+                if (res.status === 409) {
+                    let errorMsg = 'Zlecenie zostało zmodyfikowane przez innego użytkownika.';
+                    try {
+                        const error = await res.json();
+                        errorMsg = error.error || errorMsg;
+                    } catch (e) { /* noop */ }
+                    toast.error(errorMsg, {
+                        duration: 8000,
+                        description: 'Twoje zmiany nie zostały zapisane. Pobierz aktualne dane przed ponowną próbą.'
+                    });
+                    const err = new Error(`VERSION_CONFLICT: ${errorMsg}`);
+                    (err as any).status = 409;
+                    throw err;
+                }
+
+                if (res.status === 404) {
+                    const errMsg = `Zlecenie ${item.id} nie istnieje lub zostało usunięte. Nie można zapisać zmian.`;
+                    toast.error(errMsg);
+                    const err = new Error(`NOT_FOUND: ${errMsg}`);
+                    (err as any).status = 404;
+                    throw err;
+                }
+
+                let errorMsg = `Błąd zapisu zlecenia: ${res.status} ${res.statusText}`;
+                try {
+                    const errJson = await res.json();
+                    errorMsg = errJson.error || errorMsg;
+                } catch (e) { /* noop */ }
+                toast.error(errorMsg);
+                throw new Error(errorMsg);
+            }
+
+            // Unversioned brand new item goes directly to create
+            return this.create(item);
+        }
+
+        // Generic save for other collections (shield #1 _lastUpdatedAt)
         const itemWithSentinel = {
             ...item,
             ...(((item as any).updatedAt) ? { _lastUpdatedAt: (item as any).updatedAt } : {})
@@ -203,9 +282,17 @@ export class MongoAdapter<T extends { id: string }> implements IStorageAdapter<T
         throw new Error(`Failed to save item: ${res.status} ${res.statusText}`);
     }
 
-    async delete(id: string): Promise<void> {
-        await this.fetchJson(`${this.url}/${id}`, {
-            method: 'DELETE'
+    async delete(id: string, options?: { expectedVersion?: number }): Promise<void> {
+        const headers: Record<string, string> = {};
+        let requestUrl = `${this.url}/${id}`;
+        if (options && typeof options.expectedVersion === 'number') {
+            headers['If-Match'] = `"${options.expectedVersion}"`;
+            const separator = requestUrl.includes('?') ? '&' : '?';
+            requestUrl = `${requestUrl}${separator}expectedVersion=${options.expectedVersion}`;
+        }
+        await this.fetchJson(requestUrl, {
+            method: 'DELETE',
+            headers
         });
     }
 

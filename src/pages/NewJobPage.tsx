@@ -1,9 +1,12 @@
 import { useState } from 'react';
+import { v4 as uuidv4 } from 'uuid';
 import { useNavigate } from 'react-router-dom';
 import { useJobs } from '../context/JobsContext';
 import { useClients } from '../context/ClientsContext';
 import { ChevronLeft, Save } from 'lucide-react';
-import type { Job, Client } from '../models/types';
+import { toast } from 'sonner';
+import type { Client } from '../models/types';
+import type { JobPostPayload } from '../../shared/contracts/job.generated';
 
 export const NewJobPage = () => {
     const navigate = useNavigate();
@@ -11,7 +14,17 @@ export const NewJobPage = () => {
     const { clients } = useClients();
 
     const [isLoading, setIsLoading] = useState(false);
-    const [formData, setFormData] = useState<Partial<Job>>({
+    // Operation idempotency key preserved across retries for this form session
+    const [idempotencyKey] = useState(() => uuidv4());
+    const [formData, setFormData] = useState<{
+        name: string;
+        clientId: string;
+        status: JobPostPayload['status'];
+        location: string;
+        plannedStartDate: string;
+        plannedEndDate: string;
+        notesInternal: string;
+    }>({
         name: '',
         clientId: '',
         status: 'draft',
@@ -23,10 +36,17 @@ export const NewJobPage = () => {
 
     const handleSubmit = async (e: React.FormEvent) => {
         e.preventDefault();
-        setIsLoading(true);
 
-        // Simulate API delay
-        await new Promise(resolve => setTimeout(resolve, 500));
+        if (!formData.name?.trim()) {
+            toast.error('Nazwa zlecenia jest wymagana.');
+            return;
+        }
+        if (!formData.clientId) {
+            toast.error('Wybór klienta jest wymagany.');
+            return;
+        }
+
+        setIsLoading(true);
 
         try {
             const selectedClient = clients.find(c => c.id === formData.clientId);
@@ -38,22 +58,26 @@ export const NewJobPage = () => {
                 return `${c.name || ''} ${c.lastName || ''}`.trim() || 'Client';
             };
 
-            addJob({
-                ...(formData as any), // Cast to any to avoid partial issues during creation if strict
+            const payload: JobPostPayload = {
+                name: formData.name.trim(),
+                clientId: formData.clientId,
                 clientName: getClientName(selectedClient),
+                status: formData.status || 'draft',
+                location: formData.location || undefined,
+                plannedStartDate: formData.plannedStartDate || undefined,
+                plannedEndDate: formData.plannedEndDate || undefined,
+                notesInternal: formData.notesInternal || undefined,
                 riskFlag: 'none',
-                // Initialize default financials
                 revenuePlannedNet: 0,
-                revenueActualNet: 0,
-                plannedTotalCost: 0,
-                actualTotalCost: 0,
-                documentCount: 0,
-                checklistCount: 0
-            });
+                plannedTotalCost: 0
+            };
 
+            await addJob(payload, idempotencyKey);
+            toast.success('Zlecenie zostało pomyślnie utworzone.');
             navigate('/jobs');
-        } catch (error) {
+        } catch (error: any) {
             console.error('Failed to create job:', error);
+            toast.error(error.message || 'Nie udało się utworzyć zlecenia.');
         } finally {
             setIsLoading(false);
         }

@@ -10,7 +10,7 @@ export interface IStorageAdapter<T> {
     create(item: T): Promise<string>; // Returns ID
     update(id: string, item: Partial<T>): Promise<void>;
     save(item: T): Promise<string>; // UPSERT (Create or Update)
-    delete(id: string): Promise<void>;
+    delete(id: string, options?: { expectedVersion?: number }): Promise<void>;
 
     // Optional: Filter support
     find(predicate: (item: T) => boolean): Promise<T[]>;

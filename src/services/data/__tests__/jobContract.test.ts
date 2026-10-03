@@ -86,6 +86,7 @@ describe('Shared Contracts: Job Frontend Type and Status Conformity', () => {
         const job: Job = {
             id: 'job-1',
             jobCode: 'JOB-2026-001',
+            editVersion: 1,
             name: 'Montaż fasad',
             clientId: 'client-1',
             clientName: 'Inwestor Sp. z o.o.',
@@ -100,6 +101,7 @@ describe('Shared Contracts: Job Frontend Type and Status Conformity', () => {
         };
 
         expect(job.status).toBe('planned');
+        expect(job.editVersion).toBe(1);
         expect(MODEL_JOB_STATUSES.includes(job.status)).toBe(true);
     });
 
@@ -116,9 +118,56 @@ describe('Shared Contracts: Job Frontend Type and Status Conformity', () => {
         expect(postPayload.clientId).toBe('client-101');
 
         const patchPayload: JobPatchPayload = {
+            expectedVersion: 1,
             priority: 'high',
             status: 'in_progress'
         };
         expect(patchPayload.status).toBe('in_progress');
+        expect(patchPayload.expectedVersion).toBe(1);
+    });
+
+    it('enforces optimistic locking contract: Job requires editVersion, JobPatchPayload requires expectedVersion', () => {
+        // 1. Poprawny Job w schemacie zawiera editVersion
+        expect(JOB_SCHEMA.definitions.Job.required).toContain('editVersion');
+        expect(JOB_SCHEMA.definitions.Job.properties.editVersion.type).toBe('integer');
+        expect(JOB_SCHEMA.definitions.Job.properties.editVersion.minimum).toBe(1);
+
+        // 2. PATCH bez expectedVersion jest niezgodny ze schematem
+        expect(JOB_SCHEMA.definitions.JobPatchPayload.required).toContain('expectedVersion');
+        expect(JOB_SCHEMA.definitions.JobPatchPayload.properties.expectedVersion.type).toBe('integer');
+        expect(JOB_SCHEMA.definitions.JobPatchPayload.properties.expectedVersion.minimum).toBe(1);
+
+        // 3. editVersion przesłane w POST/PATCH jako zwykła zmiana jest odrzucane przez schemat
+        expect(JOB_SCHEMA.definitions.JobPatchPayload.not).toEqual({
+            required: ['editVersion']
+        });
+        expect(JOB_SCHEMA.definitions.JobPostPayload.not).toEqual({
+            anyOf: [
+                { required: ['editVersion'] },
+                { required: ['expectedVersion'] }
+            ]
+        });
+    });
+
+    it('differentiates editVersion on Job from expectedVersion on JobPatchPayload at generated TypeScript level', () => {
+        // 1. Job (models/types.ts) strictly defines editVersion, and strictly lacks expectedVersion
+        type JobKeys = keyof Job;
+        const jobHasEditVersion: 'editVersion' extends JobKeys ? true : false = true;
+        const jobLacksExpectedVersion: 'expectedVersion' extends JobKeys ? false : true = true;
+        expect(jobHasEditVersion).toBe(true);
+        expect(jobLacksExpectedVersion).toBe(true);
+
+        // 2. JobPatchPayload (shared/contracts/job.generated.ts) explicitly requires expectedVersion: number
+        const patchHasExpectedVersion: JobPatchPayload['expectedVersion'] extends number ? true : false = true;
+        // editVersion is not a declared member of JobPatchPayload, falling back to index signature 'unknown'
+        const patchLacksEditVersion: JobPatchPayload['editVersion'] extends number ? false : true = true;
+        expect(patchHasExpectedVersion).toBe(true);
+        expect(patchLacksEditVersion).toBe(true);
+
+        // 3. JobPostPayload (shared/contracts/job.generated.ts) has neither editVersion nor expectedVersion
+        const postLacksEditVersion: JobPostPayload['editVersion'] extends number ? false : true = true;
+        const postLacksExpectedVersion: JobPostPayload['expectedVersion'] extends number ? false : true = true;
+        expect(postLacksEditVersion).toBe(true);
+        expect(postLacksExpectedVersion).toBe(true);
     });
 });

@@ -618,6 +618,7 @@ export interface JobExpense {
 export interface Job {
     id: string;
     jobCode: string; // e.g., CF-2026-001
+    editVersion: number;
     name: string;
     clientId: string;
     clientName: string; // Denormalized for easier display

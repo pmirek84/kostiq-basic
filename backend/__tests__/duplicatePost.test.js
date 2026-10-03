@@ -745,7 +745,7 @@ test('Database Indexing & Migration: Reconciling Duplicates & Verification', asy
                 return {
                     aggregate: () => ({ toArray: async () => [] }),
                     createIndex: async () => 'id_1',
-                    indexes: async () => [{ key: { id: 1 }, unique: true }]
+                    indexes: async () => [{ key: { id: 1 }, unique: true }, { key: { jobCode: 1 }, unique: true }]
                 };
             }
         };

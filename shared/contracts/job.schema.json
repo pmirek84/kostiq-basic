@@ -396,7 +396,21 @@
           }
         }
       },
-      "additionalProperties": true
+      "additionalProperties": true,
+      "not": {
+        "anyOf": [
+          {
+            "required": [
+              "editVersion"
+            ]
+          },
+          {
+            "required": [
+              "expectedVersion"
+            ]
+          }
+        ]
+      }
     },
     "JobPatchPayload": {
       "type": "object",
@@ -530,9 +544,22 @@
           "items": {
             "$ref": "#/definitions/JobStagePostPayload"
           }
+        },
+        "expectedVersion": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Expected editVersion of the job document for optimistic concurrency locking."
         }
       },
-      "additionalProperties": true
+      "additionalProperties": true,
+      "required": [
+        "expectedVersion"
+      ],
+      "not": {
+        "required": [
+          "editVersion"
+        ]
+      }
     },
     "JobBatchImportPayload": {
       "type": "object",
@@ -590,7 +617,8 @@
         "jobCode",
         "name",
         "clientId",
-        "status"
+        "status",
+        "editVersion"
       ],
       "properties": {
         "id": {
@@ -751,6 +779,11 @@
         },
         "updatedAt": {
           "type": "string"
+        },
+        "editVersion": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "User edit version counter for optimistic concurrency locking."
         }
       },
       "additionalProperties": true

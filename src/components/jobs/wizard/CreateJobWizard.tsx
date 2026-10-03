@@ -1,5 +1,6 @@
 
 import { useState, useEffect, Fragment } from 'react';
+import { v4 as uuidv4 } from 'uuid';
 import type { Offer, Job, JobStage, OfferItem, OfferItemAllocation } from '../../../models/types';
 import { useJobs } from '../../../context/JobsContext';
 import { X, ChevronRight, ChevronLeft, Check, ChevronDown } from 'lucide-react';
@@ -15,6 +16,8 @@ export const CreateJobWizard = ({ offer, offerItems = [], onClose, onSuccess }: 
     const { createJobWithStages } = useJobs();
     const [step, setStep] = useState(1);
     const [isLoading, setIsLoading] = useState(false);
+    // Operation idempotency key preserved across retries for this wizard session
+    const [idempotencyKey] = useState(() => uuidv4());
     const [error, setError] = useState<string | null>(null);
 
     // State
@@ -71,7 +74,7 @@ export const CreateJobWizard = ({ offer, offerItems = [], onClose, onSuccess }: 
         try {
             setIsLoading(true);
             setError(null);
-            await createJobWithStages(jobData, stages, allocations);
+            await createJobWithStages(jobData, stages, allocations, idempotencyKey);
             if (onSuccess) {
                 await onSuccess();
             }

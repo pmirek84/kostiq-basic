@@ -1,5 +1,6 @@
 import { createContext, useContext, useState, useEffect, useCallback, type ReactNode } from 'react';
 import type { Job, JobStage, JobStageItem, Offer, Construction } from '../models/types';
+import type { JobPostPayload } from '../../shared/contracts/job.generated';
 import { v4 as uuidv4 } from 'uuid';
 import { jobStorage } from '../services/storage/jobStorage';
 import { jobStageItemStorage } from '../services/storage/jobStageItemStorage';
@@ -10,12 +11,12 @@ import { toast } from 'sonner';
 
 interface JobsContextType {
     jobs: Job[];
-    addJob: (jobData: Omit<Job, 'id' | 'createdAt' | 'updatedAt' | 'jobCode'>) => Promise<void>;
+    addJob: (jobData: JobPostPayload, idempotencyKey?: string) => Promise<Job>;
     updateJob: (id: string, updates: Partial<Job>) => Promise<void>;
-    deleteJob: (id: string) => Promise<void>;
+    deleteJob: (id: string, expectedVersion?: number) => Promise<void>;
     getJob: (id: string) => Job | undefined;
     getJobStages: (jobId: string) => JobStage[];
-    createJobWithStages: (jobData: any, stages: any[], allocations: any[]) => Promise<void>;
+    createJobWithStages: (jobData: any, stages: any[], allocations: any[], idempotencyKey?: string) => Promise<void>;
     addJobStage: (jobId: string, stageData: any) => Promise<void>;
     updateJobStage: (jobId: string, stageId: string, updates: any) => Promise<void>;
     deleteJobStage: (jobId: string, stageId: string) => Promise<void>;
@@ -87,115 +88,42 @@ export function JobsProvider({ children }: { children: ReactNode }) {
         refreshJobs();
     }, []);
 
-    // Seeding Logic for Jobs
-    useEffect(() => {
-        const seedDefaultJob = async () => {
-            // Dynamic import to avoid circular dependency issues if any, or just import USE_MONGO
-            // Since we act on !USE_MONGO.
-            // We can check local storage key to avoid re-running if jobs exist but checking job count is safer for empty state.
-            const { USE_MONGO } = await import('../services/storage/adapterFactory');
-            if (USE_MONGO) return;
 
-            const allJobs = await jobStorage.getAllJobs();
-            // Check for the specific "Current" demo job, not just any job
-            const demoJobNowExists = allJobs.some(j => j.jobCode === 'CF-DEMO-NOW');
 
-            if (!demoJobNowExists) {
-                console.log("[JobsContext] Seeding CURRENT demo job...");
+    const addJob = async (jobData: JobPostPayload, idempotencyKey?: string): Promise<Job> => {
+        const jobId = jobData.id || uuidv4();
 
-                const jobId = uuidv4();
-                const date = new Date(); // Today
-                const jobCode = 'CF-DEMO-NOW';
-
-                // Try to link to the default seeded offer if exists
-                const offers = await offerStorage.getAllOffers();
-                const templateOffer = offers.find(o => o.number === 'WZÓR-STD-01');
-
-                const newJob: Job = {
-                    id: jobId,
-                    jobCode,
-                    name: templateOffer ? `Zlecenie: ${templateOffer.title} (TERAZ)` : 'Przykładowe Zlecenie (TERAZ)',
-                    status: 'in_progress',
-                    offerId: templateOffer?.id,
-                    clientId: templateOffer?.clientId || 'client-1', // simplified
-                    clientName: 'Jan Kowalski (Klient)',
-                    location: 'Koszalin',
-                    createdAt: date.toISOString(),
-                    updatedAt: date.toISOString(),
-                    plannedStartDate: date.toISOString(), // Start today
-                    plannedEndDate: new Date(date.getTime() + 7 * 24 * 60 * 60 * 1000).toISOString(), // End in 7 days
-                    totalPlannedRevenueNet: 15000,
-                    stages: [
-                        {
-                            id: uuidv4(),
-                            jobId: jobId,
-                            name: 'Montaż Konstrukcji (Etap 1)',
-                            type: 'podstawowy',
-                            status: 'planowany',
-                            startPlanned: date.toISOString(),
-                            endPlanned: new Date(date.getTime() + 7 * 24 * 60 * 60 * 1000).toISOString(),
-                            plannedRevenueNet: 15000,
-                            billingType: 'hourly',
-                            // Assign the seeded crew automatically
-                            assignedTeams: ['Ekipa 1 (Jan)'],
-                            assignedStartTime: '08:00',
-                            assignedLocation: 'Koszalin',
-                            plannedLaborHours: 120 // Explicitly set hours to ensure capacity calculation
-                        }
-                    ],
-                    riskFlag: 'none'
-                };
-                // Ensure link
-                newJob.stages![0].jobId = newJob.id;
-
-                await jobStorage.saveJob(newJob);
-                await refreshJobs();
-            }
-        };
-        seedDefaultJob();
-    }, []);
-
-    const addJob = async (jobData: Omit<Job, 'id' | 'createdAt' | 'updatedAt' | 'jobCode'>) => {
-        const allJobs = await jobStorage.getAllJobs();
-        const date = new Date();
-        const year = date.getFullYear();
-        const count = allJobs.filter(j => new Date(j.createdAt).getFullYear() === year).length + 1;
-        const jobCode = `CF-${year}-${String(count).padStart(3, '0')}`;
-
-        const newJob: Job = {
+        const postPayload: JobPostPayload = {
             ...jobData,
-            id: uuidv4(),
-            jobCode,
-            createdAt: date.toISOString(),
-            updatedAt: date.toISOString(),
+            id: jobId,
+            status: jobData.status || 'planned',
             riskFlag: jobData.riskFlag || 'none',
-            stages: [
-                {
-                    id: uuidv4(),
-                    jobId: '', // Set below
-                    name: 'Etap podstawowy',
-                    type: 'podstawowy',
-                    status: 'planowany',
-                    plannedRevenueNet: jobData.totalPlannedRevenueNet || 0,
-                    billingType: 'hourly'
-                } as any
-            ]
+            stages: (jobData.stages && jobData.stages.length > 0)
+                ? jobData.stages.map(s => ({ ...s, jobId: s.jobId || jobId }))
+                : [
+                    {
+                        id: uuidv4(),
+                        jobId: jobId,
+                        name: 'Etap podstawowy',
+                        type: 'podstawowy',
+                        status: 'planowany',
+                        plannedRevenueNet: jobData.revenuePlannedNet || 0,
+                        billingType: 'hourly'
+                    }
+                ]
         };
-        newJob.stages![0].jobId = newJob.id;
 
-        await jobStorage.saveJob(newJob);
+        const result = await jobStorage.createJobAtomic({
+            job: postPayload,
+            stageItems: [],
+            idempotencyKey
+        });
         await refreshJobs();
+        return result.job;
     };
 
-    const createJobWithStages = async (jobData: any, stages: any[], allocations: any[]) => {
+    const createJobWithStages = async (jobData: any, stages: any[], allocations: any[], idempotencyKey?: string) => {
         try {
-            // We need latest jobs to generate code
-            const allJobs = await jobStorage.getAllJobs();
-            const date = new Date();
-            const year = date.getFullYear();
-            const count = allJobs.filter(j => new Date(j.createdAt).getFullYear() === year).length + 1;
-            const jobCode = `CF-${year}-${String(count).padStart(3, '0')}`;
-
             let offer: Offer | undefined;
             let constructions: Construction[] = [];
 
@@ -206,45 +134,57 @@ export function JobsProvider({ children }: { children: ReactNode }) {
                 }
             }
 
-            // Use Adapter to create robustness Snapshot
+            // Use Adapter to create robust snapshot (jobCode generated authoritatively by atomic counter in backend)
             const { job, stageItems } = OfferToJobAdapter.prepareSnapshot({
                 offer,
                 constructions,
                 jobData,
                 stages,
                 allocations,
-                jobCode
+                jobCode: ''
             });
 
-            await jobStorage.saveJob(job);
-
-            if (stageItems.length > 0) {
-                await jobStageItemStorage.saveBatch(stageItems);
-            }
+            // Domain transactional endpoint: counter -> Job -> stageItems -> idempotency key
+            // Executed in a single MongoDB ACID transaction session without any frontend compensation!
+            await jobStorage.createJobAtomic({ job, stageItems, idempotencyKey });
 
             await refreshJobs();
         } catch (error) {
-            console.error('Failed to create job with stages:', error);
+            console.error('Failed to create job with stages atomically:', error);
             throw error;
         }
     };
 
-    const updateJob = async (id: string, updates: Partial<Job>) => {
+    const updateJob = async (id: string, updates: Partial<Job> & { expectedVersion?: number }) => {
         const job = jobs.find(j => j.id === id);
         if (job) {
-            await jobStorage.updateJob(id, updates);
+            const expectedVersion = (updates as any).expectedVersion ?? job.editVersion;
+            if (typeof expectedVersion !== 'number') {
+                throw new Error(`[JobsContext] Brak wersji zlecenia (editVersion) dla ${id}. Nie można zaktualizować zlecenia.`);
+            }
+            const payload: any = {
+                ...updates,
+                expectedVersion
+            };
+            delete payload.editVersion;
+            await jobStorage.updateJob(id, payload);
             await refreshJobs();
         }
     };
 
-    const deleteJob = async (id: string) => {
+    const deleteJob = async (id: string, expectedVersionParam?: number) => {
         try {
-            await jobStorage.deleteJob(id);
+            const job = jobs.find(j => j.id === id);
+            const expectedVersion = expectedVersionParam ?? job?.editVersion;
+            if (typeof expectedVersion !== 'number') {
+                throw new Error(`[JobsContext] Brak wersji zlecenia (editVersion) dla ${id}. Nie można bezpiecznie zarchiwizować zlecenia.`);
+            }
+            await jobStorage.deleteJob(id, expectedVersion);
             toast.success('Zlecenie zostało zarchiwizowane');
             await refreshJobs();
         } catch (err) {
             console.error('Delete failed:', err);
-            // Error toast handled by MongoAdapter
+            throw err;
         }
     };
 
@@ -261,39 +201,24 @@ export function JobsProvider({ children }: { children: ReactNode }) {
                 status: 'planowany',
                 billingType: 'hourly'
             };
-            const updatedJob = {
-                ...job,
-                stages: [...(job.stages || []), newStage],
-                updatedAt: new Date().toISOString()
-            };
-            await jobStorage.saveJob(updatedJob);
-            await refreshJobs();
+            const updatedStages = [...(job.stages || []), newStage];
+            await updateJob(jobId, { stages: updatedStages, expectedVersion: job.editVersion });
         }
     };
 
     const updateJobStage = async (jobId: string, stageId: string, updates: any) => {
         const job = jobs.find(j => j.id === jobId);
         if (job) {
-            const updatedJob = {
-                ...job,
-                stages: (job.stages || []).map(s => s.id === stageId ? { ...s, ...updates } : s),
-                updatedAt: new Date().toISOString()
-            };
-            await jobStorage.saveJob(updatedJob);
-            await refreshJobs();
+            const updatedStages = (job.stages || []).map(s => s.id === stageId ? { ...s, ...updates } : s);
+            await updateJob(jobId, { stages: updatedStages, expectedVersion: job.editVersion });
         }
     };
 
     const deleteJobStage = async (jobId: string, stageId: string) => {
         const job = jobs.find(j => j.id === jobId);
         if (job) {
-            const updatedJob = {
-                ...job,
-                stages: (job.stages || []).filter(s => s.id !== stageId),
-                updatedAt: new Date().toISOString()
-            };
-            await jobStorage.saveJob(updatedJob);
-            await refreshJobs();
+            const updatedStages = (job.stages || []).filter(s => s.id !== stageId);
+            await updateJob(jobId, { stages: updatedStages, expectedVersion: job.editVersion });
         }
     };
 

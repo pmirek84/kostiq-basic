@@ -22,7 +22,9 @@ const {
     validateJobBatchSchema,
     validateJobPaginatedSchema,
     recalculateJobLaborCosts,
-    reconcilePendingJobAggregates
+    reconcilePendingJobAggregates,
+    setTestBarrierHook,
+    setTestFailpoint
 } = require('../server');
 
 const { jobSchema } = require('../../shared/contracts/index.cjs');
@@ -55,7 +57,8 @@ test('Shared Contracts: Job JSON Schema, Statuses, Lifecycle and Financial Prote
         countDocuments: async () => jobsStore.size,
         findOne: async (filter) => {
             const id = filter.$or ? filter.$or[0].id : filter.id;
-            return jobsStore.get(id) || null;
+            const doc = jobsStore.get(id);
+            return doc ? { ...doc } : null;
         },
         find: (filter) => {
             let list = Array.from(jobsStore.values());
@@ -86,7 +89,23 @@ test('Shared Contracts: Job JSON Schema, Statuses, Lifecycle and Financial Prote
             };
             return cursor;
         },
+        indexes: async () => [{ key: { id: 1 }, unique: true }, { key: { jobCode: 1 }, unique: true }],
+        createIndex: async () => {},
         insertOne: async (doc) => {
+            if (jobsStore.has(doc.id)) {
+                const err = new Error(`E11000 duplicate key error collection: jobs index: id_1 dup key: { id: "${doc.id}" }`);
+                err.code = 11000;
+                throw err;
+            }
+            if (doc.jobCode) {
+                for (const existing of jobsStore.values()) {
+                    if (existing.jobCode === doc.jobCode && existing.id !== doc.id && existing.isActive !== false) {
+                        const err = new Error(`E11000 duplicate key error collection: jobs index: jobCode_1 dup key: { jobCode: "${doc.jobCode}" }`);
+                        err.code = 11000;
+                        throw err;
+                    }
+                }
+            }
             jobsStore.set(doc.id, { ...doc });
             return { insertedId: doc.id };
         },
@@ -94,8 +113,38 @@ test('Shared Contracts: Job JSON Schema, Statuses, Lifecycle and Financial Prote
             const id = filter.id || (filter.$or ? filter.$or[0].id : null);
             const existing = jobsStore.get(id);
             if (!existing) return { matchedCount: 0, modifiedCount: 0 };
+            if (filter.editVersion !== undefined && existing.editVersion !== filter.editVersion) {
+                return { matchedCount: 0, modifiedCount: 0 };
+            }
+            if (filter.isActive !== undefined) {
+                if (filter.isActive?.$ne !== undefined && existing.isActive === filter.isActive.$ne) {
+                    return { matchedCount: 0, modifiedCount: 0 };
+                } else if (typeof filter.isActive === 'boolean' && existing.isActive !== filter.isActive) {
+                    return { matchedCount: 0, modifiedCount: 0 };
+                }
+            }
             if (update.$set) Object.assign(existing, update.$set);
+            if (update.$inc) {
+                for (const [k, v] of Object.entries(update.$inc)) {
+                    existing[k] = (existing[k] || 0) + v;
+                }
+            }
             return { matchedCount: 1, modifiedCount: 1 };
+        },
+        findOneAndUpdate: async (filter, update, options) => {
+            const id = filter.id || (filter.$or ? filter.$or[0].id : null);
+            const existing = jobsStore.get(id);
+            if (!existing) return null;
+            if (filter.editVersion !== undefined && existing.editVersion !== filter.editVersion) {
+                return null;
+            }
+            if (update.$set) Object.assign(existing, update.$set);
+            if (update.$inc) {
+                for (const [k, v] of Object.entries(update.$inc)) {
+                    existing[k] = (existing[k] || 0) + v;
+                }
+            }
+            return { ...existing };
         },
         updateMany: async (filter, update) => {
             let count = 0;
@@ -122,18 +171,58 @@ test('Shared Contracts: Job JSON Schema, Statuses, Lifecycle and Financial Prote
             return { matchedCount: count, modifiedCount: count };
         },
         bulkWrite: async (ops) => {
-            let count = 0;
-            for (const op of ops) {
+            const snapshot = new Map(jobsStore);
+            let upsertedCount = 0;
+            let insertedCount = 0;
+            let modifiedCount = 0;
+            let matchedCount = 0;
+            const writeErrors = [];
+            for (let i = 0; i < ops.length; i++) {
+                const op = ops[i];
+                if (op.insertOne) {
+                    const doc = op.insertOne.document;
+                    if (jobsStore.has(doc.id)) {
+                        writeErrors.push({
+                            index: i,
+                            code: 11000,
+                            errmsg: `E11000 duplicate key error collection: jobs index: id_1 dup key: { id: "${doc.id}" }`
+                        });
+                        continue;
+                    }
+                    jobsStore.set(doc.id, { ...doc });
+                    insertedCount++;
+                }
                 if (op.updateOne) {
                     const id = op.updateOne.filter.id;
+                    const existed = jobsStore.has(id);
                     const doc = jobsStore.get(id) || { id };
                     if (op.updateOne.update.$set) Object.assign(doc, op.updateOne.update.$set);
-                    if (op.updateOne.update.$setOnInsert && !jobsStore.has(id)) Object.assign(doc, op.updateOne.update.$setOnInsert);
+                    if (op.updateOne.update.$setOnInsert && !existed) Object.assign(doc, op.updateOne.update.$setOnInsert);
                     jobsStore.set(id, doc);
-                    count++;
+                    if (existed) {
+                        matchedCount++;
+                        modifiedCount++;
+                    } else {
+                        upsertedCount++;
+                    }
                 }
             }
-            return { upsertedCount: count, modifiedCount: 0, matchedCount: 0 };
+            if (writeErrors.length > 0) {
+                // Transaction rollback simulation for jobs
+                jobsStore.clear();
+                for (const [k, v] of snapshot) jobsStore.set(k, v);
+                const bulkErr = new Error('E11000 duplicate key error');
+                bulkErr.code = 11000;
+                bulkErr.writeErrors = writeErrors;
+                bulkErr.result = {
+                    insertedCount,
+                    upsertedCount,
+                    modifiedCount,
+                    matchedCount
+                };
+                throw bulkErr;
+            }
+            return { upsertedCount, modifiedCount, matchedCount, insertedCount };
         }
     };
 
@@ -338,6 +427,101 @@ test('Shared Contracts: Job JSON Schema, Statuses, Lifecycle and Financial Prote
         })
     };
 
+    const countersStore = new Map();
+    const stageItemsStore = new Map();
+    const idempotencyKeysStore = new Map();
+
+    const mockCountersColl = {
+        findOneAndUpdate: async (filter, update) => {
+            const id = filter._id || filter.id;
+            let current = countersStore.get(id);
+            if (!current) {
+                current = { _id: id, seq: 0 };
+                countersStore.set(id, current);
+            }
+            if (update.$inc) {
+                for (const [k, v] of Object.entries(update.$inc)) {
+                    current[k] = (current[k] || 0) + v;
+                }
+            }
+            return { value: { ...current }, seq: current.seq };
+        },
+        updateOne: async (filter, update) => {
+            const id = filter._id || filter.id;
+            let current = countersStore.get(id);
+            if (!current) {
+                current = { _id: id, seq: 0 };
+                countersStore.set(id, current);
+            }
+            if (update.$inc) {
+                for (const [k, v] of Object.entries(update.$inc)) {
+                    current[k] = (current[k] || 0) + v;
+                }
+            }
+            if (update.$max) {
+                for (const [k, v] of Object.entries(update.$max)) {
+                    current[k] = Math.max(current[k] || 0, v);
+                }
+            }
+            return { matchedCount: 1, modifiedCount: 1 };
+        },
+        findOne: async (filter) => {
+            const id = filter._id || filter.id;
+            return countersStore.get(id) || null;
+        }
+    };
+
+    const mockJobStageItemsColl = {
+        insertMany: async (docs) => {
+            docs.forEach(d => stageItemsStore.set(d.id, { ...d }));
+            return { insertedCount: docs.length };
+        },
+        find: (filter = {}) => {
+            const list = Array.from(stageItemsStore.values()).filter(i => {
+                if (filter.jobId && i.jobId !== filter.jobId) return false;
+                return true;
+            });
+            return {
+                toArray: async () => list
+            };
+        }
+    };
+
+    const mockIdempotencyKeysColl = {
+        findOne: async (filter) => {
+            const k = filter.key;
+            return idempotencyKeysStore.get(k) || null;
+        },
+        insertOne: async (doc) => {
+            if (idempotencyKeysStore.has(doc.key)) {
+                const err = new Error('E11000 duplicate key');
+                err.code = 11000;
+                throw err;
+            }
+            idempotencyKeysStore.set(doc.key, { ...doc });
+            return { insertedId: doc.id };
+        },
+        updateOne: async (filter, update) => {
+            const k = filter.key;
+            const existing = idempotencyKeysStore.get(k);
+            if (!existing) return { matchedCount: 0, modifiedCount: 0 };
+            if (update.$set) Object.assign(existing, update.$set);
+            return { matchedCount: 1, modifiedCount: 1 };
+        },
+        findOneAndUpdate: async (filter, update) => {
+            const k = filter.key;
+            const existing = idempotencyKeysStore.get(k);
+            if (!existing) return null;
+            if (update.$set) Object.assign(existing, update.$set);
+            return { value: { ...existing } };
+        },
+        deleteOne: async (filter) => {
+            const k = filter.key;
+            const existed = idempotencyKeysStore.delete(k);
+            return { deletedCount: existed ? 1 : 0 };
+        }
+    };
+
     const mockDb = {
         collection: (name) => {
             if (name === 'jobs') return mockJobsColl;
@@ -345,12 +529,16 @@ test('Shared Contracts: Job JSON Schema, Statuses, Lifecycle and Financial Prote
             if (name === 'time-entries') return mockTimeEntriesColl;
             if (name === 'settlements') return mockSettlementsColl;
             if (name === 'employees') return mockEmployeesColl;
+            if (name === 'counters') return mockCountersColl;
+            if (name === 'jobStageItems') return mockJobStageItemsColl;
+            if (name === 'idempotency_keys') return mockIdempotencyKeysColl;
             return {
                 findOne: async () => null,
                 find: () => ({ toArray: async () => [] })
             };
         }
     };
+
 
     setDb(mockDb, true);
 
@@ -510,7 +698,8 @@ test('Shared Contracts: Job JSON Schema, Statuses, Lifecycle and Financial Prote
                 settledLaborCost: 123456,
                 revenueActualNet: 999999, // Should be stripped
                 materialsActualNet: 111111, // Should be stripped
-                priority: 'high'
+                priority: 'high',
+                expectedVersion: 1
             });
 
         assert.strictEqual(resPatch.status, 200);
@@ -526,7 +715,7 @@ test('Shared Contracts: Job JSON Schema, Statuses, Lifecycle and Financial Prote
         const resEmptyName = await request(app)
             .patch('/api/jobs/job-101')
             .set('Authorization', 'Bearer ' + adminToken)
-            .send({ name: '' });
+            .send({ name: '', expectedVersion: 1 });
         assert.strictEqual(resEmptyName.status, 400);
         assert.match(resEmptyName.body.error, /Pole name nie może być puste/);
 
@@ -534,7 +723,7 @@ test('Shared Contracts: Job JSON Schema, Statuses, Lifecycle and Financial Prote
         const resEmptyClient = await request(app)
             .patch('/api/jobs/job-101')
             .set('Authorization', 'Bearer ' + adminToken)
-            .send({ clientId: '   ' });
+            .send({ clientId: '   ', expectedVersion: 1 });
         assert.strictEqual(resEmptyClient.status, 400);
         assert.match(resEmptyClient.body.error, /Pole clientId nie może być puste/);
 
@@ -542,7 +731,7 @@ test('Shared Contracts: Job JSON Schema, Statuses, Lifecycle and Financial Prote
         const resNotFound = await request(app)
             .patch('/api/jobs/job-not-existing')
             .set('Authorization', 'Bearer ' + adminToken)
-            .send({ priority: 'low' });
+            .send({ priority: 'low', expectedVersion: 1 });
         assert.strictEqual(resNotFound.status, 404);
         assert.match(resNotFound.body.error, /Zlecenie o identyfikatorze 'job-not-existing' nie istnieje/);
 
@@ -550,7 +739,7 @@ test('Shared Contracts: Job JSON Schema, Statuses, Lifecycle and Financial Prote
         const resValid = await request(app)
             .patch('/api/jobs/job-101')
             .set('Authorization', 'Bearer ' + adminToken)
-            .send({ status: 'in_progress', priority: 'high' });
+            .send({ status: 'in_progress', priority: 'high', expectedVersion: 1 });
         assert.strictEqual(resValid.status, 200);
         assert.strictEqual(resValid.body.status, 'in_progress');
         assert.strictEqual(resValid.body.priority, 'high');
@@ -621,13 +810,14 @@ test('Shared Contracts: Job JSON Schema, Statuses, Lifecycle and Financial Prote
     });
 
 
-    await t.test('[P1] batch upsert of existing job unconditionally preserves its actual costs and stage actuals', async () => {
-        // Seed existing job with accumulated labor and stage actuals
+    await t.test('[P1] batch import strictly forbids overwriting existing jobs with 409 Conflict, closing optimistic locking bypass', async () => {
+        // Seed existing job with editVersion: 1
         jobsStore.set('job-batch-preserve', {
             id: 'job-batch-preserve',
             name: 'Stare Zlecenie',
             clientId: 'client-1',
             status: 'in_progress',
+            editVersion: 1,
             actualLaborHours: 120,
             actualLaborCost: 7500,
             settledLaborCost: 5000,
@@ -646,7 +836,7 @@ test('Shared Contracts: Job JSON Schema, Statuses, Lifecycle and Financial Prote
             ]
         });
 
-        // Client imports batch update containing existing job with zero/missing actuals
+        // Client attempts batch import containing existing job
         const resBatch = await request(app)
             .post('/api/jobs/batch-import')
             .set('Authorization', 'Bearer ' + adminToken)
@@ -657,7 +847,6 @@ test('Shared Contracts: Job JSON Schema, Statuses, Lifecycle and Financial Prote
                         name: 'Zaktualizowane Zlecenie Batch',
                         clientId: 'client-1',
                         priority: 'high',
-                        actualLaborCost: 0, // Client tries to send 0
                         stages: [
                             {
                                 id: 'stage-existing',
@@ -671,18 +860,14 @@ test('Shared Contracts: Job JSON Schema, Statuses, Lifecycle and Financial Prote
                 ]
             });
 
-        assert.strictEqual(resBatch.status, 200);
-        assert.strictEqual(resBatch.body.succeeded, 1);
+        // Must reject with 409 Conflict because batch-import cannot bypass optimistic locking
+        assert.strictEqual(resBatch.status, 409);
+        assert.strictEqual(resBatch.body.code, 'BATCH_IMPORT_VERSION_CONFLICT');
+        assert.strictEqual(resBatch.body.id, 'job-batch-preserve');
 
         const persisted = jobsStore.get('job-batch-preserve');
-        assert.strictEqual(persisted.name, 'Zaktualizowane Zlecenie Batch');
-        assert.strictEqual(persisted.priority, 'high');
-        assert.strictEqual(persisted.actualLaborHours, 120, 'Batch upsert must preserve existing actualLaborHours');
-        assert.strictEqual(persisted.actualLaborCost, 7500, 'Batch upsert must preserve existing actualLaborCost');
-        assert.strictEqual(persisted.settledLaborCost, 5000, 'Batch upsert must preserve existing settledLaborCost');
-        assert.strictEqual(persisted.materialsActualNet, 3200, 'Batch upsert must preserve existing materialsActualNet');
-        assert.strictEqual(persisted.stages[0].actualLaborCost, 7500, 'Batch upsert must preserve stage actualLaborCost');
-        assert.strictEqual(persisted.stages[0].actualLaborHours, 120, 'Batch upsert must preserve stage actualLaborHours');
+        assert.strictEqual(persisted.name, 'Stare Zlecenie', 'Existing job must remain untouched');
+        assert.strictEqual(persisted.editVersion, 1);
     });
 
     await t.test('[P2] clientName is authoritatively derived from DB and cannot be desynchronized by client on POST or PATCH', async () => {
@@ -706,7 +891,8 @@ test('Shared Contracts: Job JSON Schema, Statuses, Lifecycle and Financial Prote
             .set('Authorization', 'Bearer ' + adminToken)
             .send({
                 clientName: 'Próba Nadpisania Nazwy Klienta',
-                priority: 'high'
+                priority: 'high',
+                expectedVersion: 1
             });
         assert.strictEqual(resPatchName.status, 200);
         assert.strictEqual(resPatchName.body.clientName, 'Firma Budowlana S.A.', 'Standalone clientName is stripped from PATCH');
@@ -717,7 +903,8 @@ test('Shared Contracts: Job JSON Schema, Statuses, Lifecycle and Financial Prote
             .patch('/api/jobs/job-client-sync')
             .set('Authorization', 'Bearer ' + adminToken)
             .send({
-                clientId: 'client-2'
+                clientId: 'client-2',
+                expectedVersion: 2
             });
         assert.strictEqual(resPatchClient.status, 200);
         assert.strictEqual(resPatchClient.body.clientName, 'Anna Kowalska', 'Changing clientId refreshes clientName from DB');
@@ -1570,6 +1757,345 @@ test('Shared Contracts: Job JSON Schema, Statuses, Lifecycle and Financial Prote
         // Verify the job was pre-marked with aggregationPending: true (or handled in recovery)
         const failJobInStore = jobsStore.get(failJobId);
         assert.ok(failJobInStore !== null);
+    });
+
+    await t.test('[P1 CAS DELETE] DELETE /api/jobs/:id strictly requires expectedVersion (428), rejects version conflict (409), and atomowo increments version on soft-delete', async () => {
+        const jobId = 'job-delete-cas-' + Date.now();
+        jobsStore.set(jobId, {
+            id: jobId,
+            name: 'Zlecenie do Archiwizacji CAS',
+            clientId: 'client-1',
+            status: 'planned',
+            isActive: true,
+            editVersion: 1
+        });
+
+        // 1. Missing expectedVersion / If-Match returns 428 PRECONDITION_REQUIRED
+        const resMissing = await request(app)
+            .delete('/api/jobs/' + jobId)
+            .set('Authorization', 'Bearer ' + adminToken);
+        assert.strictEqual(resMissing.status, 428);
+        assert.strictEqual(resMissing.body.code, 'PRECONDITION_REQUIRED');
+
+        // 2. Version conflict: client provides expectedVersion: 2, but DB has editVersion: 1 -> 409
+        const resConflict = await request(app)
+            .delete('/api/jobs/' + jobId + '?expectedVersion=2')
+            .set('Authorization', 'Bearer ' + adminToken);
+        assert.strictEqual(resConflict.status, 409);
+        assert.strictEqual(resConflict.body.code, 'VERSION_CONFLICT');
+        assert.strictEqual(resConflict.body.currentVersion, 1);
+        assert.strictEqual(resConflict.body.expectedVersion, 2);
+
+        // 3. Valid expectedVersion via If-Match header -> 200, isActive: false, editVersion increments to 2
+        const resOk = await request(app)
+            .delete('/api/jobs/' + jobId)
+            .set('Authorization', 'Bearer ' + adminToken)
+            .set('If-Match', '"1"');
+        assert.strictEqual(resOk.status, 200);
+        assert.strictEqual(resOk.body.success, true);
+        assert.strictEqual(resOk.body.message, 'Item archived');
+        assert.strictEqual(resOk.body.editVersion, 2);
+
+        const inDb = jobsStore.get(jobId);
+        assert.strictEqual(inDb.isActive, false);
+        assert.strictEqual(inDb.editVersion, 2);
+
+        // 4. Repeated DELETE on already archived job -> 404
+        const resRepeat = await request(app)
+            .delete('/api/jobs/' + jobId + '?expectedVersion=2')
+            .set('Authorization', 'Bearer ' + adminToken);
+        assert.strictEqual(resRepeat.status, 404);
+        assert.match(resRepeat.body.error, /zostało już zarchiwizowane/);
+
+        // 5. DELETE on non-existent job -> 404
+        const resNonExistent = await request(app)
+            .delete('/api/jobs/job-does-not-exist?expectedVersion=1')
+            .set('Authorization', 'Bearer ' + adminToken);
+        assert.strictEqual(resNonExistent.status, 404);
+    });
+
+    await t.test('[P1 ATOMIC] POST /api/jobs/create-atomic creates sequence code, Job, and stageItems in one atomic domain operation', async () => {
+        const idempKey = 'idemp-job-create-' + Date.now();
+        const year = new Date().getFullYear();
+
+        const payload = {
+            job: {
+                name: 'Kompleksowe Zlecenie Szklane',
+                clientId: 'client-1',
+                status: 'planned',
+                revenuePlannedNet: 25000,
+                stages: [
+                    { id: 'stage-1', name: 'Projekt', plannedRevenueNet: 5000, plannedCostNet: 2000 },
+                    { id: 'stage-2', name: 'Montaż', plannedRevenueNet: 20000, plannedCostNet: 10000 }
+                ]
+            },
+            stageItems: [
+                { id: 'item-1', stageId: 'stage-2', constructionName: 'Witryna W1', quantityInStage: 4 },
+                { id: 'item-2', stageId: 'stage-2', constructionName: 'Drzwi D1', quantityInStage: 2 }
+            ],
+            idempotencyKey: idempKey
+        };
+
+        // 1. Initial creation
+        const res = await request(app)
+            .post('/api/jobs/create-atomic')
+            .set('Authorization', 'Bearer ' + adminToken)
+            .set('Idempotency-Key', idempKey)
+            .send(payload);
+
+        assert.strictEqual(res.status, 201);
+        assert.strictEqual(res.body.success, true);
+        assert.ok(res.body.job);
+        assert.strictEqual(res.body.job.name, 'Kompleksowe Zlecenie Szklane');
+        assert.strictEqual(res.body.job.editVersion, 1);
+        assert.strictEqual(res.body.job.isActive, true);
+        assert.strictEqual(res.body.job.actualLaborHours, 0);
+        assert.strictEqual(res.body.job.actualLaborCost, 0);
+        assert.match(res.body.job.jobCode, new RegExp('^CF-' + year + '-\\d{3}$'));
+        assert.strictEqual(res.body.stageItemsCount, 2);
+
+        const createdJobId = res.body.job.id;
+        assert.ok(jobsStore.has(createdJobId), 'Job must exist in jobs store');
+        assert.ok(stageItemsStore.has('item-1'), 'item-1 must exist in stageItems store');
+        assert.ok(stageItemsStore.has('item-2'), 'item-2 must exist in stageItems store');
+        assert.strictEqual(stageItemsStore.get('item-1').jobId, createdJobId);
+
+        // 2. Replay with identical payload and same Idempotency-Key -> 201 replay from cache
+        const resReplay = await request(app)
+            .post('/api/jobs/create-atomic')
+            .set('Authorization', 'Bearer ' + adminToken)
+            .set('Idempotency-Key', idempKey)
+            .send(payload);
+
+        assert.strictEqual(resReplay.status, 201);
+        assert.strictEqual(resReplay.body.job.id, createdJobId);
+        assert.strictEqual(resReplay.body.job.jobCode, res.body.job.jobCode);
+
+        // 3. Replay with different payload and same Idempotency-Key -> 409 conflict
+        const resConflict = await request(app)
+            .post('/api/jobs/create-atomic')
+            .set('Authorization', 'Bearer ' + adminToken)
+            .set('Idempotency-Key', idempKey)
+            .send({
+                ...payload,
+                job: { ...payload.job, name: 'Zmieniona Inna Nazwa Zlecenia' }
+            });
+
+        assert.strictEqual(resConflict.status, 409);
+        assert.match(resConflict.body.error, /Klucz idempotencji został już użyty dla żądania o innym payloadzie/);
+
+        // 4. Missing required name or clientId rejects with 400
+        const resInvalid = await request(app)
+            .post('/api/jobs/create-atomic')
+            .set('Authorization', 'Bearer ' + adminToken)
+            .set('Idempotency-Key', 'idemp-invalid-' + Date.now())
+            .send({
+                job: { clientId: 'client-1' } // missing name
+            });
+        assert.strictEqual(resInvalid.status, 400);
+        assert.match(resInvalid.body.error, /name jest wymagane/);
+    });
+
+
+    await t.test('[P1 CAS CONCURRENCY] Concurrent PATCH updates on same Job: Request A wins (200), Request B fails CAS version check (409 VERSION_CONFLICT)', async () => {
+        const testJobId = 'job-patch-cas-concurrency-test';
+        jobsStore.set(testJobId, {
+            id: testJobId,
+            name: 'Zlecenie Przed Wyścigiem',
+            clientId: 'client-1',
+            status: 'planned',
+            editVersion: 1,
+            actualLaborCost: 0
+        });
+
+        // Synchronization barrier:
+        // Request B starts with expectedVersion: 1, pauses right before atomic updateOne.
+        // Request A executes with expectedVersion: 1 and commits (editVersion becomes 2).
+        // Request B is released and executes updateOne with stale expectedVersion: 1, failing CAS.
+        let releaseB = null;
+        let bReachedBarrier = null;
+        const bArrivedPromise = new Promise(resolve => { bReachedBarrier = resolve; });
+        const releaseBPromise = new Promise(resolve => { releaseB = resolve; });
+
+        let isRequestB = false;
+        setTestBarrierHook(async ({ id, stage }) => {
+            if (id === testJobId && stage === 'before-cas-update' && isRequestB) {
+                bReachedBarrier();
+                await releaseBPromise;
+            }
+        });
+
+        try {
+            // Start Request B with expectedVersion: 1
+            isRequestB = true;
+            const reqBPromise = (async () => request(app)
+                .patch(`/api/jobs/${testJobId}`)
+                .set('Authorization', 'Bearer ' + adminToken)
+                .send({ expectedVersion: 1, name: 'Zlecenie Zaktualizowane przez B', priority: 'high' }))();
+
+            // Wait for Request B to reach the barrier before CAS update
+            await bArrivedPromise;
+
+            // Run Request A with expectedVersion: 1 while B is paused
+            isRequestB = false;
+            const resA = await request(app)
+                .patch(`/api/jobs/${testJobId}`)
+                .set('Authorization', 'Bearer ' + adminToken)
+                .send({ expectedVersion: 1, name: 'Zlecenie Zaktualizowane przez A', priority: 'low' });
+
+            assert.strictEqual(resA.status, 200, 'Request A must succeed with 200');
+            assert.strictEqual(resA.body.editVersion, 2, 'Request A must bump editVersion to 2');
+
+            // Release Request B so it attempts updateOne with stale expectedVersion: 1
+            releaseB();
+            const resB = await reqBPromise;
+
+            assert.strictEqual(resB.status, 409, 'Request B must be rejected with 409 VERSION_CONFLICT');
+            assert.strictEqual(resB.body.code, 'VERSION_CONFLICT');
+            assert.strictEqual(resB.body.expectedVersion, 1);
+            assert.strictEqual(resB.body.currentVersion, 2);
+
+            // Verify database state: winning update persisted, editVersion is 2
+            const finalDoc = jobsStore.get(testJobId);
+            assert.strictEqual(finalDoc.editVersion, 2, 'Final job document must have editVersion: 2');
+            assert.strictEqual(finalDoc.name, 'Zlecenie Zaktualizowane przez A', 'Winning change must be preserved');
+
+            // Subsequent third request with expectedVersion: 2 succeeds and bumps to 3
+            const resC = await request(app)
+                .patch(`/api/jobs/${testJobId}`)
+                .set('Authorization', 'Bearer ' + adminToken)
+                .send({ expectedVersion: 2, status: 'in_progress' });
+            assert.strictEqual(resC.status, 200);
+            assert.strictEqual(resC.body.editVersion, 3);
+            assert.strictEqual(jobsStore.get(testJobId).editVersion, 3);
+        } finally {
+            setTestBarrierHook(null);
+        }
+    });
+
+    await t.test('[P1 CAS CONCURRENCY] Batch import race: duplicate ID conflict triggers all-or-nothing rollback (409 BATCH_IMPORT_VERSION_CONFLICT, succeeded: 0)', async () => {
+        const item1Id = 'job-batch-race-item1';
+        const item2Id = 'job-batch-race-item2';
+
+        // Pre-condition: neither item1 nor item2 exist in jobsStore at start
+        jobsStore.delete(item1Id);
+        jobsStore.delete(item2Id);
+
+        // Synchronization hook:
+        // When batch-import reaches 'before-batch-bulkwrite', simulate another client concurrently creating item2
+        setTestBarrierHook(async ({ items, stage }) => {
+            if (stage === 'before-batch-bulkwrite' && items?.some(i => i.id === item1Id)) {
+                jobsStore.set(item2Id, {
+                    id: item2Id,
+                    name: 'Zlecenie Utworzone Równolegle przez Innego Klienta',
+                    clientId: 'client-1',
+                    editVersion: 1
+                });
+            }
+        });
+
+        try {
+            const res = await request(app)
+                .post('/api/jobs/batch-import')
+                .set('Authorization', 'Bearer ' + adminToken)
+                .send({
+                    items: [
+                        { id: item1Id, name: 'Zlecenie Nowe 1', clientId: 'client-1' },
+                        { id: item2Id, name: 'Zlecenie Konfliktujące 2', clientId: 'client-1' }
+                    ]
+                });
+
+            // In transactional all-or-nothing semantics, any conflict aborts withTransaction and rolls back all writes!
+            assert.strictEqual(res.status, 409, 'Batch write with duplicate conflict must fail with 409 (all-or-nothing rollback)');
+            assert.strictEqual(res.body.code, 'BATCH_IMPORT_VERSION_CONFLICT');
+            assert.strictEqual(res.body.succeeded, 0, 'Zero items must succeed due to all-or-nothing transaction rollback');
+            assert.strictEqual(res.body.failed, 2, 'All items marked failed');
+            assert.deepStrictEqual(res.body.succeededIds, []);
+            assert.deepStrictEqual(res.body.failedIds, [item1Id, item2Id]);
+
+            // Database assertions:
+            // 1. item1 was NOT persisted due to transaction rollback!
+            const item1InDb = jobsStore.get(item1Id);
+            assert.strictEqual(item1InDb, undefined, 'item1 must NOT be persisted in database after rollback');
+
+            // 2. item2 was NOT overwritten by batch payload; retains the concurrent winner's data
+            const item2InDb = jobsStore.get(item2Id);
+            assert.ok(item2InDb);
+            assert.strictEqual(item2InDb.name, 'Zlecenie Utworzone Równolegle przez Innego Klienta', 'Concurrent job must not be overwritten');
+            assert.strictEqual(item2InDb.editVersion, 1);
+        } finally {
+            setTestBarrierHook(null);
+        }
+    });
+
+    await t.test('[P1 PRODUCTION FAIL-CLOSED] POST /api/jobs/batch-import strictly fails closed with 503 TRANSACTIONS_REQUIRED in production when Replica Set is not available', async () => {
+        const prevEnv = process.env.NODE_ENV;
+        const prevAllow = process.env.ALLOW_NON_TRANSACTIONAL;
+        delete process.env.ALLOW_NON_TRANSACTIONAL;
+        process.env.NODE_ENV = 'production';
+
+        try {
+            const res = await request(app)
+                .post('/api/jobs/batch-import')
+                .set('Authorization', 'Bearer ' + adminToken)
+                .send({
+                    items: [
+                        { id: 'job-prod-fail-1', name: 'Zlecenie Produkcyjne Batch Bez RS 1', clientId: 'client-1' },
+                        { id: 'job-prod-fail-2', name: 'Zlecenie Produkcyjne Batch Bez RS 2', clientId: 'client-1' }
+                    ]
+                });
+
+            assert.strictEqual(res.status, 503, 'Must reject with 503 in production without replica set');
+            assert.strictEqual(res.body.code, 'TRANSACTIONS_REQUIRED');
+            assert.match(res.body.error, /wymaga włączonego Replica Set/);
+        } finally {
+            process.env.NODE_ENV = prevEnv;
+            if (prevAllow !== undefined) process.env.ALLOW_NON_TRANSACTIONAL = prevAllow;
+        }
+    });
+
+    await t.test('[P1 PRODUCTION FAIL-CLOSED] POST /api/jobs strictly fails closed with 503 TRANSACTIONS_REQUIRED in production when Replica Set is not available', async () => {
+        const prevEnv = process.env.NODE_ENV;
+        const prevAllow = process.env.ALLOW_NON_TRANSACTIONAL;
+        delete process.env.ALLOW_NON_TRANSACTIONAL;
+        process.env.NODE_ENV = 'production';
+
+        try {
+            const res = await request(app)
+                .post('/api/jobs')
+                .set('Authorization', 'Bearer ' + adminToken)
+                .send({
+                    name: 'Zlecenie Produkcyjne Bez Replica Set',
+                    clientId: 'client-1',
+                    status: 'planned'
+                });
+
+            assert.strictEqual(res.status, 503, 'Must reject with 503 in production without replica set');
+            assert.strictEqual(res.body.code, 'TRANSACTIONS_REQUIRED');
+            assert.match(res.body.error, /wymaga włączonego Replica Set/);
+        } finally {
+            process.env.NODE_ENV = prevEnv;
+            if (prevAllow !== undefined) process.env.ALLOW_NON_TRANSACTIONAL = prevAllow;
+        }
+    });
+
+    await t.test('[P1 BATCH IMPORT] POST /api/jobs/batch-import does not swallow counter update failure (fails closed with 500)', async () => {
+        setTestFailpoint('batch_job_counter_failure');
+        try {
+            const res = await request(app)
+                .post('/api/jobs/batch-import')
+                .set('Authorization', 'Bearer ' + adminToken)
+                .send({
+                    items: [
+                        { id: 'job-counter-fail-mock', name: 'Zlecenie Mock Counter Fail', clientId: 'client-1', jobCode: 'CF-2026-777' }
+                    ]
+                });
+
+            assert.strictEqual(res.status, 500, 'Must return 500 when counter update fails');
+            assert.match(res.body.errors ? res.body.errors.join(' ') : (res.body.error || ''), /Simulated counter update failure/);
+        } finally {
+            setTestFailpoint(null);
+        }
     });
 
     await t.test('automated generation guard: verifies job.generated.ts is strictly up to date with job.schema.json', () => {

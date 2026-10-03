@@ -150,6 +150,82 @@ function getTestBarrierHook() {
     return _testBarrierHook;
 }
 
+function canonicalJsonStringify(val) {
+    if (val === null || val === undefined) {
+        return 'null';
+    }
+    if (typeof val === 'number' || typeof val === 'boolean') {
+        return JSON.stringify(val);
+    }
+    if (typeof val === 'string') {
+        return JSON.stringify(val);
+    }
+    if (Array.isArray(val)) {
+        return '[' + val.map(item => canonicalJsonStringify(item)).join(',') + ']';
+    }
+    if (typeof val === 'object') {
+        const sortedKeys = Object.keys(val).sort();
+        const parts = [];
+        for (const k of sortedKeys) {
+            if (val[k] !== undefined) {
+                parts.push(JSON.stringify(k) + ':' + canonicalJsonStringify(val[k]));
+            }
+        }
+        return '{' + parts.join(',') + '}';
+    }
+    return JSON.stringify(val);
+}
+
+async function syncJobCountersFromExistingData(database) {
+    if (!database) return;
+    try {
+        const jobsCol = database.collection('jobs');
+        const countersCol = database.collection('counters');
+        if (!jobsCol || !countersCol || typeof jobsCol.find !== 'function') return;
+
+        const allJobs = await jobsCol.find({
+            jobCode: { $type: 'string', $regex: /^CF-\d{4}-\d+$/ }
+        }).toArray();
+
+        const maxSeqByYear = new Map();
+        const currentYear = new Date().getFullYear();
+        maxSeqByYear.set(currentYear, 0);
+
+        for (const j of allJobs) {
+            const m = (j.jobCode || '').match(/^CF-(\d{4})-(\d+)$/);
+            if (m) {
+                const year = parseInt(m[1], 10);
+                const seq = parseInt(m[2], 10);
+                if (!Number.isNaN(year) && !Number.isNaN(seq)) {
+                    const curMax = maxSeqByYear.get(year) || 0;
+                    if (seq > curMax) {
+                        maxSeqByYear.set(year, seq);
+                    }
+                }
+            }
+        }
+
+        for (const [year, maxSeq] of maxSeqByYear.entries()) {
+            const counterId = `job_${year}`;
+            await countersCol.updateOne(
+                { _id: counterId },
+                { $max: { seq: maxSeq } },
+                { upsert: true }
+            );
+
+            // Fail-closed verification
+            const verifyCounter = await countersCol.findOne({ _id: counterId });
+            if (!verifyCounter || typeof verifyCounter.seq !== 'number' || verifyCounter.seq < maxSeq) {
+                throw new Error(`[CRITICAL COUNTER ERROR] Nie udało się zainicjalizować licznika '${counterId}' (oczekiwano minimum seq=${maxSeq}).`);
+            }
+            console.log(`[COUNTER SYNC] Synchronized counter '${counterId}' to seq=${verifyCounter.seq} (max existing: ${maxSeq}).`);
+        }
+    } catch (err) {
+        console.error('[CRITICAL COUNTER MIGRATION ERROR]', err);
+        throw err;
+    }
+}
+
 async function checkReplicaSetTopology(targetClient) {
     if (!targetClient) return false;
     try {
@@ -385,10 +461,13 @@ async function reconcileDuplicatesAndEnsureIndexes(database) {
             // 2. Create unique sparse index
             if (typeof collection.createIndex === 'function') {
                 await collection.createIndex({ id: 1 }, { unique: true, sparse: true });
-            if (col === 'idempotency_keys') {
-                await collection.createIndex({ endpoint: 1, key: 1 }, { unique: true });
-                await collection.createIndex({ expiresAt: 1 }, { expireAfterSeconds: 0 });
-            }
+                if (col === 'idempotency_keys') {
+                    await collection.createIndex({ endpoint: 1, key: 1 }, { unique: true });
+                    await collection.createIndex({ expiresAt: 1 }, { expireAfterSeconds: 0 });
+                }
+                if (col === 'jobs') {
+                    await collection.createIndex({ jobCode: 1 }, { unique: true, sparse: true });
+                }
             }
 
             // 3. Verify index exists with uniqueness
@@ -397,6 +476,12 @@ async function reconcileDuplicatesAndEnsureIndexes(database) {
                 const verified = indexes.some(idx => idx.key && idx.key.id === 1 && idx.unique === true);
                 if (!verified) {
                     throw new Error(`Indeks unikalny { id: 1 } nie został zweryfikowany w kolekcji '${col}'.`);
+                }
+                if (col === 'jobs') {
+                    const verifiedJobCode = indexes.some(idx => idx.key && idx.key.jobCode === 1 && idx.unique === true);
+                    if (!verifiedJobCode) {
+                        throw new Error(`Indeks unikalny { jobCode: 1 } nie został zweryfikowany w kolekcji 'jobs'.`);
+                    }
                 }
             }
         } catch (err) {
@@ -410,6 +495,9 @@ async function reconcileDuplicatesAndEnsureIndexes(database) {
             failures.map(f => `${f.collection} (${f.error})`).join('; ');
         throw new Error(errorMsg);
     }
+
+    // Fail-closed initialization and synchronization of atomic job counters
+    await syncJobCountersFromExistingData(database);
 }
 
 
@@ -712,6 +800,49 @@ async function backfillTimeEntriesWorkerType(targetDb) {
     }
 
     return { totalScanned, resolvedCount, unresolvedCount, status };
+}
+
+async function backfillJobsEditVersion(targetDb) {
+    if (!targetDb) return { updatedCount: 0, status: 'no_db' };
+    const migrationsColl = targetDb.collection('system_migrations');
+    const migrationId = 'backfill_jobs_edit_version_v1';
+
+    const existingMigration = await migrationsColl.findOne({ id: migrationId });
+    if (existingMigration && existingMigration.status === 'completed') {
+        return { updatedCount: 0, status: 'already_completed' };
+    }
+
+    const jobsColl = targetDb.collection('jobs');
+    const filter = {
+        $or: [
+            { editVersion: { $exists: false } },
+            { editVersion: null },
+            { editVersion: { $lt: 1 } }
+        ]
+    };
+
+    const result = await jobsColl.updateMany(filter, { $set: { editVersion: 1 } });
+    const updatedCount = result.modifiedCount !== undefined ? result.modifiedCount : 0;
+
+    await migrationsColl.updateOne(
+        { id: migrationId },
+        {
+            $set: {
+                id: migrationId,
+                status: 'completed',
+                appliedAt: new Date().toISOString(),
+                version: 1,
+                updatedCount
+            }
+        },
+        { upsert: true }
+    );
+
+    if (updatedCount > 0) {
+        console.log(`[MIGRATION] Job editVersion backfill finished: ${updatedCount} jobs initialized to editVersion: 1.`);
+    }
+
+    return { updatedCount, status: 'completed' };
 }
 
 
@@ -1023,6 +1154,7 @@ async function connectDB() {
         await reconcileDuplicatesAndEnsureIndexes(db);
         await seedInitialDataIfEmpty(db);
         await backfillTimeEntriesWorkerType(db);
+        await backfillJobsEditVersion(db);
         await reconcilePendingJobAggregates();
         dbReady = true;
         console.log('Successfully reconciled duplicates, verified all unique indexes, and reconciled pending job aggregates.');
@@ -1401,6 +1533,15 @@ const createRouter = (collectionName, options = {}) => {
     router.post('/', async (req, res) => {
         try {
             if (!db) return res.status(503).json({ error: 'Database not connected' });
+            if (collectionName === 'jobs') {
+                if (!isReplicaSet && process.env.ALLOW_NON_TRANSACTIONAL !== 'true' && process.env.NODE_ENV !== 'test') {
+                    return res.status(503).json({
+                        code: 'TRANSACTIONS_REQUIRED',
+                        error: "Operacja domenowa tworzenia zlecenia wymaga włączonego Replica Set w MongoDB (ACID transactions required). Skonfiguruj 'replication.replSet' w konfiguracji bazy danych."
+                    });
+                }
+                return await handleCreateJobAtomic(req, res, { returnJobDocOnly: true });
+            }
             const newItem = req.body;
             if (!newItem.id) {
                 newItem.id = new ObjectId().toString();
@@ -1457,38 +1598,6 @@ const createRouter = (collectionName, options = {}) => {
                     });
                 }
 
-                const isWorker = req.user && (req.user.role === 'worker' || req.user.role === 'foreman');
-                const userEmpId = req.user?.id || req.user?._id;
-
-                const now = new Date().toISOString();
-                const operations = items.map(item => {
-                    const itemId = item.id || new ObjectId().toString();
-                    const { _id, createdAt, ...rest } = item;
-
-                    // Atomic ownership filter: for worker/foreman on time-entries, include employeeId in filter
-                    // so that an existing entry owned by someone else can never be matched or updated by this worker
-                    const filter = (isWorker && collectionName === 'time-entries' && userEmpId)
-                        ? { id: itemId, employeeId: userEmpId }
-                        : { id: itemId };
-
-                    return {
-                        updateOne: {
-                            filter,
-                            update: {
-                                $set: {
-                                    ...rest,
-                                    id: itemId,
-                                    updatedAt: now
-                                },
-                                $setOnInsert: {
-                                    createdAt: createdAt || now
-                                }
-                            },
-                            upsert: true
-                        }
-                    };
-                });
-
                 // [P1 FIX] Fail-closed pre-fetch of existing documents to track old state for mutations
                 const itemIds = items.map(i => i.id).filter(Boolean);
                 const oldDocsMap = new Map();
@@ -1512,12 +1621,183 @@ const createRouter = (collectionName, options = {}) => {
                     }
                 }
 
-                try {
-                    const result = await db.collection(collectionName).bulkWrite(operations, { ordered: false });
+                // [P1 FIX] Optimistic Locking guard for jobs: batch-import cannot silently overwrite existing jobs
+                if (collectionName === 'jobs') {
+                    for (const item of items) {
+                        if (item && item.id && oldDocsMap.has(item.id)) {
+                            return res.status(409).json({
+                                code: 'BATCH_IMPORT_VERSION_CONFLICT',
+                                error: `Zlecenie o identyfikatorze '${item.id}' już istnieje w bazie danych. Nadpisywanie istniejących zleceń przez import wsadowy jest zabronione (wymóg Optimistic Locking). Użyj jednostkowego endpointu PATCH /api/jobs/:id z tokenem expectedVersion.`,
+                                id: item.id
+                            });
+                        }
+                    }
+                }
+
+                const isWorker = req.user && (req.user.role === 'worker' || req.user.role === 'foreman');
+                const userEmpId = req.user?.id || req.user?._id;
+
+                const now = new Date().toISOString();
+                const operations = items.map(item => {
+                    const itemId = item.id || new ObjectId().toString();
+                    const { _id, createdAt, ...rest } = item;
+
+                    if (collectionName === 'jobs') {
+                        // For jobs: strictly generate insertOne. It CANNOT overwrite an existing job!
+                        // If job exists, unique index on id rejects insertion.
+                        return {
+                            insertOne: {
+                                document: {
+                                    ...rest,
+                                    id: itemId,
+                                    editVersion: 1,
+                                    createdAt: createdAt || now,
+                                    updatedAt: now
+                                }
+                            }
+                        };
+                    }
+
+                    // Atomic ownership filter: for worker/foreman on time-entries, include employeeId in filter
+                    // so that an existing entry owned by someone else can never be matched or updated by this worker
+                    const filter = (isWorker && collectionName === 'time-entries' && userEmpId)
+                        ? { id: itemId, employeeId: userEmpId }
+                        : { id: itemId };
+
+                    const setFields = {
+                        ...rest,
+                        id: itemId,
+                        updatedAt: now
+                    };
+
+                    return {
+                        updateOne: {
+                            filter,
+                            update: {
+                                $set: setFields,
+                                $setOnInsert: {
+                                    createdAt: createdAt || now
+                                }
+                            },
+                            upsert: true
+                        }
+                    };
+                });
+
+                // Test barrier hook for batch concurrency simulation
+                const batchBarrierHook = getTestBarrierHook();
+                if (typeof batchBarrierHook === 'function' && collectionName === 'jobs') {
+                    await batchBarrierHook({ req, items, stage: 'before-batch-bulkwrite' });
+                }
+
+                const clientToUse = client || (db && db.client);
+                const replicaSetActive = isReplicaSet || (clientToUse && (await checkReplicaSetTopology(clientToUse)));
+
+                // [P1 FIX] Strict fail-closed check: Jobs batch-import requires active Replica Set in production
+                if (collectionName === 'jobs') {
+                    if ((!replicaSetActive || _testFailpoint === 'force_session_failure' || _testFailpoint === 'session_returns_null') &&
+                        process.env.ALLOW_NON_TRANSACTIONAL !== 'true' &&
+                        process.env.NODE_ENV !== 'test') {
+                        return res.status(503).json({
+                            code: 'TRANSACTIONS_REQUIRED',
+                            error: "Operacja wsadowego importu zleceń wymaga włączonego Replica Set w MongoDB (ACID transactions required). Skonfiguruj 'replication.replSet' w konfiguracji bazy danych."
+                        });
+                    }
+                }
+
+                const useTransaction = collectionName === 'jobs' && replicaSetActive && clientToUse && typeof clientToUse.startSession === 'function';
+
+                const executeBatchWrite = async (sess) => {
+                    const opt = sess ? { session: sess } : {};
+                    const result = await db.collection(collectionName).bulkWrite(operations, { ordered: false, ...opt });
                     const upsertedCount = result.upsertedCount || 0;
                     const modifiedCount = result.modifiedCount || 0;
                     const matchedCount = result.matchedCount || 0;
-                    const succeeded = upsertedCount + matchedCount;
+                    const insertedCount = result.insertedCount || (result.getInsertedIds ? Object.keys(result.getInsertedIds()).length : 0);
+                    const succeeded = upsertedCount + matchedCount + insertedCount;
+
+                    // Synchronize counter sequence for imported jobs
+                    if (collectionName === 'jobs' && Array.isArray(items)) {
+                        const maxSeqByYear = new Map();
+                        for (const it of items) {
+                            if (it && it.jobCode) {
+                                const m = String(it.jobCode).match(/^CF-(\d{4})-(\d+)$/);
+                                if (m) {
+                                    const y = parseInt(m[1], 10);
+                                    const s = parseInt(m[2], 10);
+                                    if (!Number.isNaN(y) && !Number.isNaN(s)) {
+                                        const cur = maxSeqByYear.get(y) || 0;
+                                        if (s > cur) maxSeqByYear.set(y, s);
+                                    }
+                                }
+                            }
+                        }
+                        for (const [y, maxSeq] of maxSeqByYear.entries()) {
+                            if (process.env.NODE_ENV === 'test' && getTestFailpoint() === 'batch_job_counter_failure') {
+                                throw new Error('FAILPOINT: Simulated counter update failure during job batch import');
+                            }
+                            await db.collection('counters').updateOne(
+                                { _id: `job_${y}` },
+                                { $max: { seq: maxSeq } },
+                                { upsert: true, ...opt }
+                            );
+                        }
+                    }
+
+                    return { result, upsertedCount, modifiedCount, matchedCount, insertedCount, succeeded };
+                };
+
+                try {
+                    let batchData = null;
+                    if (useTransaction) {
+                        let session = null;
+                        try {
+                            if (_testFailpoint === 'force_session_failure') {
+                                throw new Error('Simulated startSession failure');
+                            }
+                            if (_testFailpoint === 'session_returns_null') {
+                                session = null;
+                            } else {
+                                session = clientToUse.startSession();
+                            }
+                        } catch (sessErr) {
+                            console.error('[batch-import jobs] Failed to start MongoDB session:', sessErr.message);
+                            if (process.env.ALLOW_NON_TRANSACTIONAL !== 'true' && process.env.NODE_ENV !== 'test') {
+                                return res.status(503).json({
+                                    code: 'TRANSACTIONS_REQUIRED',
+                                    error: `Nie udało się zainicjalizować sesji transakcyjnej MongoDB: ${sessErr.message}`
+                                });
+                            }
+                        }
+
+                        if (session) {
+                            try {
+                                await session.withTransaction(async () => {
+                                    batchData = await executeBatchWrite(session);
+                                });
+                            } finally {
+                                await session.endSession();
+                            }
+                        } else {
+                            if (process.env.ALLOW_NON_TRANSACTIONAL !== 'true' && process.env.NODE_ENV !== 'test') {
+                                return res.status(503).json({
+                                    code: 'TRANSACTIONS_REQUIRED',
+                                    error: "Operacja wsadowego importu zleceń wymaga włączonego Replica Set w MongoDB (ACID transactions required). Skonfiguruj 'replication.replSet' w konfiguracji bazy danych."
+                                });
+                            }
+                            batchData = await executeBatchWrite(null);
+                        }
+                    } else {
+                        if (collectionName === 'jobs' && process.env.ALLOW_NON_TRANSACTIONAL !== 'true' && process.env.NODE_ENV !== 'test') {
+                            return res.status(503).json({
+                                code: 'TRANSACTIONS_REQUIRED',
+                                error: "Operacja wsadowego importu zleceń wymaga włączonego Replica Set w MongoDB (ACID transactions required). Skonfiguruj 'replication.replSet' w konfiguracji bazy danych."
+                            });
+                        }
+                        batchData = await executeBatchWrite(null);
+                    }
+
+                    const { upsertedCount, modifiedCount, matchedCount, succeeded } = batchData;
 
                     if (typeof options.afterMutation === 'function') {
                         try {
@@ -1538,6 +1818,40 @@ const createRouter = (collectionName, options = {}) => {
                         errors: []
                     });
                 } catch (bulkErr) {
+                    if (collectionName === 'jobs') {
+                        // [P1 FIX] All-or-nothing rollback semantics for jobs batch import.
+                        // In MongoDB transactions, any error aborts withTransaction and rolls back all writes.
+                        // Returning 207 claiming items were saved would be a false representation of database state.
+                        const writeErrors = bulkErr.writeErrors || [];
+                        const isConflict = bulkErr.code === 11000 ||
+                            (bulkErr.message && bulkErr.message.includes('11000')) ||
+                            writeErrors.some(e => e.code === 11000);
+
+                        const specificConflictId = (writeErrors[0] && items[writeErrors[0].index]?.id) || 'nieznany';
+                        const errorMessages = writeErrors.map(e => {
+                            if (e.code === 11000) {
+                                return `Zlecenie o ID '${items[e.index]?.id || 'nieznany'}' już istnieje w bazie danych. Nadpisywanie przez import wsadowy jest zabronione (wymóg Optimistic Locking).`;
+                            }
+                            return e.errmsg || e.message || String(e);
+                        });
+                        if (errorMessages.length === 0 && bulkErr.message) {
+                            errorMessages.push(bulkErr.message);
+                        }
+
+                        return res.status(isConflict ? 409 : 500).json({
+                            code: isConflict ? 'BATCH_IMPORT_VERSION_CONFLICT' : 'BATCH_IMPORT_FAILED',
+                            error: isConflict
+                                ? `Jedno lub więcej zleceń spowodowało konflikt unikalności klucza (11000). Zgodnie z gwarancją ACID transakcja importu zleceń została wycofana w całości (all-or-nothing rollback).`
+                                : `Błąd transakcyjnego zapisu wsadowego zleceń: ${bulkErr.message}`,
+                            status: 'failed',
+                            succeeded: 0,
+                            succeededIds: [],
+                            failed: items.length,
+                            failedIds: items.map(i => i.id),
+                            errors: errorMessages
+                        });
+                    }
+
                     if (bulkErr.name === 'MongoBulkWriteError' || bulkErr.result || bulkErr.writeErrors) {
                         const writeResult = bulkErr.result || {};
                         const upsertedCount = writeResult.upsertedCount || (writeResult.nUpserted || 0);
@@ -1560,6 +1874,34 @@ const createRouter = (collectionName, options = {}) => {
                             }
                         }
 
+                        // Synchronize counter sequence for partially succeeded jobs
+                        if (collectionName === 'jobs' && succeededItems.length > 0) {
+                            const maxSeqByYear = new Map();
+                            for (const it of succeededItems) {
+                                if (it && it.jobCode) {
+                                    const m = String(it.jobCode).match(/^CF-(\d{4})-(\d+)$/);
+                                    if (m) {
+                                        const y = parseInt(m[1], 10);
+                                        const s = parseInt(m[2], 10);
+                                        if (!Number.isNaN(y) && !Number.isNaN(s)) {
+                                            const cur = maxSeqByYear.get(y) || 0;
+                                            if (s > cur) maxSeqByYear.set(y, s);
+                                        }
+                                    }
+                                }
+                            }
+                            for (const [y, maxSeq] of maxSeqByYear.entries()) {
+                                if (process.env.NODE_ENV === 'test' && getTestFailpoint() === 'batch_job_counter_failure') {
+                                    throw new Error('FAILPOINT: Simulated counter update failure during job batch import');
+                                }
+                                await db.collection('counters').updateOne(
+                                    { _id: `job_${y}` },
+                                    { $max: { seq: maxSeq } },
+                                    { upsert: true }
+                                );
+                            }
+                        }
+
                         // [P1 FIX] Call afterMutation for succeeded items in partial 207 response
                         if (succeededItems.length > 0 && typeof options.afterMutation === 'function') {
                             try {
@@ -1569,9 +1911,25 @@ const createRouter = (collectionName, options = {}) => {
                             }
                         }
 
-                        const errorMessages = writeErrors.map(e => e.errmsg || e.message || String(e));
+                        const errorMessages = writeErrors.map(e => {
+                            if (e.code === 11000) {
+                                return `Zlecenie/dokument o ID '${items[e.index]?.id || 'nieznany'}' już istnieje w bazie danych. Nadpisywanie przez import wsadowy jest zabronione (wymóg Optimistic Locking).`;
+                            }
+                            return e.errmsg || e.message || String(e);
+                        });
                         if (errorMessages.length === 0 && bulkErr.message) {
                             errorMessages.push(bulkErr.message);
+                        }
+
+                        // If all items failed due to conflict on jobs, return 409
+                        if (succeededIds.length === 0 && collectionName === 'jobs' && (bulkErr.code === 11000 || writeErrors.some(e => e.code === 11000))) {
+                            return res.status(409).json({
+                                code: 'BATCH_IMPORT_VERSION_CONFLICT',
+                                error: 'Zlecenie już istnieje w bazie danych. Nadpisywanie istniejących zleceń przez import wsadowy jest zabronione (wymóg Optimistic Locking). Użyj jednostkowego endpointu PATCH /api/jobs/:id z tokenem expectedVersion.',
+                                failed: failedIds.length,
+                                failedIds,
+                                errors: errorMessages
+                            });
                         }
 
                         return res.status(207).json({
@@ -1636,28 +1994,45 @@ const createRouter = (collectionName, options = {}) => {
                 }
             }
 
-            // [P1 FIX] Fail-closed snapshot document before update to detect job transfers and state changes
+            // [P1 FIX] Fail-closed snapshot document before update to detect job transfers, optimistic locking conflicts, and state changes
             let beforeDoc = null;
-            if (typeof options.afterMutation === 'function') {
-                try {
-                    const rawBefore = await db.collection(collectionName).findOne(filter);
-                    if (!rawBefore) {
-                        return res.status(404).json({ error: 'Item not found' });
-                    }
-                    beforeDoc = { ...rawBefore };
-                } catch (snapErr) {
-                    console.error(`[PATCH snapshot ${collectionName} ERROR]`, snapErr.message);
-                    return res.status(500).json({
-                        error: `Błąd pobierania stanu początkowego rekordu przed aktualizacją: ${snapErr.message}`
+            const docLookupFilter = { id: id };
+            try {
+                const rawBefore = await db.collection(collectionName).findOne(docLookupFilter);
+                if (!rawBefore) {
+                    return res.status(404).json({
+                        error: collectionName === 'jobs'
+                            ? `Zlecenie o identyfikatorze '${id}' nie istnieje.`
+                            : 'Item not found'
                     });
                 }
-            } else {
-                try {
-                    const rawBefore = await db.collection(collectionName).findOne(filter);
-                    if (rawBefore) beforeDoc = { ...rawBefore };
-                } catch (snapErr) {
-                    console.warn(`[PATCH snapshot ${collectionName}]`, snapErr.message);
+                beforeDoc = { ...rawBefore };
+
+                // [P1 FIX] Optimistic Locking Precondition & Version check for jobs
+                if (collectionName === 'jobs') {
+                    if (beforeDoc.editVersion === undefined || beforeDoc.editVersion === null) {
+                        return res.status(500).json({
+                            code: 'CORRUPT_DOCUMENT_VERSION',
+                            error: "Zlecenie w bazie danych nie posiada wymaganego pola 'editVersion'. Skontaktuj się z administratorem lub uruchom migrację.",
+                            id
+                        });
+                    }
+                    if (req.expectedVersion !== undefined && beforeDoc.editVersion !== req.expectedVersion) {
+                        return res.status(409).json({
+                            code: 'VERSION_CONFLICT',
+                            error: 'Zlecenie zostało zmodyfikowane przez innego użytkownika. Pobierz aktualne dane przed ponowną próbą zapisu.',
+                            id,
+                            entity: collectionName,
+                            currentVersion: beforeDoc.editVersion,
+                            expectedVersion: req.expectedVersion
+                        });
+                    }
                 }
+            } catch (snapErr) {
+                console.error(`[PATCH snapshot ${collectionName} ERROR]`, snapErr.message);
+                return res.status(500).json({
+                    error: `Błąd pobierania stanu początkowego rekordu przed aktualizacją: ${snapErr.message}`
+                });
             }
 
             // Always stamp updatedAt on every PATCH
@@ -1677,14 +2052,63 @@ const createRouter = (collectionName, options = {}) => {
                 }
             }
 
-            const result = await db.collection(collectionName).updateOne(filter, updateDoc);
+            // [P1 FIX] Atomic CAS update for jobs: filter by id AND expectedVersion, increment editVersion by 1
+            const casFilter = (collectionName === 'jobs' && req.expectedVersion !== undefined)
+                ? { id: id, editVersion: req.expectedVersion }
+                : { id: id };
 
-            const patchMatched = result.matchedCount !== undefined ? result.matchedCount : (result.modifiedCount !== undefined ? result.modifiedCount : 1);
-            if (patchMatched === 0) {
-                return res.status(404).json({ error: 'Item not found' });
+            if (collectionName === 'jobs' && req.expectedVersion !== undefined) {
+                updateDoc.$inc = { editVersion: 1 };
             }
 
-            const updated = await db.collection(collectionName).findOne(filter);
+            // Test barrier hook for real concurrency simulation
+            const barrierHook = getTestBarrierHook();
+            if (typeof barrierHook === 'function' && collectionName === 'jobs') {
+                await barrierHook({ id, req, stage: 'before-cas-update' });
+            }
+
+            let updated = null;
+            if (typeof db.collection(collectionName).findOneAndUpdate === 'function') {
+                const findAndModifyResult = await db.collection(collectionName).findOneAndUpdate(
+                    casFilter,
+                    updateDoc,
+                    { returnDocument: 'after' }
+                );
+                updated = (findAndModifyResult && findAndModifyResult.value !== undefined)
+                    ? findAndModifyResult.value
+                    : findAndModifyResult;
+            } else {
+                const result = await db.collection(collectionName).updateOne(casFilter, updateDoc);
+                const patchMatched = result.matchedCount !== undefined ? result.matchedCount : (result.modifiedCount !== undefined ? result.modifiedCount : 1);
+                if (patchMatched > 0) {
+                    updated = await db.collection(collectionName).findOne({ id: id });
+                }
+            }
+
+            if (!updated) {
+                if (collectionName === 'jobs') {
+                    const latest = await db.collection(collectionName).findOne({ id: id });
+                    if (!latest) {
+                        return res.status(404).json({ error: `Zlecenie o identyfikatorze '${id}' nie istnieje.` });
+                    }
+                    if (latest.editVersion === undefined || latest.editVersion === null) {
+                        return res.status(500).json({
+                            code: 'CORRUPT_DOCUMENT_VERSION',
+                            error: "Zlecenie w bazie danych nie posiada wymaganego pola 'editVersion'.",
+                            id
+                        });
+                    }
+                    return res.status(409).json({
+                        code: 'VERSION_CONFLICT',
+                        error: 'Zlecenie zostało zmodyfikowane przez innego użytkownika. Pobierz aktualne dane przed ponowną próbą zapisu.',
+                        id,
+                        entity: collectionName,
+                        currentVersion: latest.editVersion,
+                        expectedVersion: req.expectedVersion
+                    });
+                }
+                return res.status(404).json({ error: 'Item not found' });
+            }
             if (typeof options.afterMutation === 'function') {
                 try {
                     await options.afterMutation('update', { id, updates, doc: updated, oldDoc: beforeDoc, req });
@@ -1706,13 +2130,67 @@ const createRouter = (collectionName, options = {}) => {
             const { id } = req.params;
             const filter = { id: id };
 
-            // [P1 FIX] Fail-closed fetch document before delete so afterMutation knows affected jobId/project_id
+            // [P1 FIX] Optimistic Locking token extraction for DELETE
+            let expectedVersion = undefined;
+            if (req.headers['if-match']) {
+                const ifMatchRaw = req.headers['if-match'].replace(/^W\//, '').replace(/"/g, '').trim();
+                const parsed = parseInt(ifMatchRaw, 10);
+                if (!isNaN(parsed) && parsed > 0) expectedVersion = parsed;
+            }
+            if (expectedVersion === undefined && req.query && req.query.expectedVersion !== undefined) {
+                const parsed = parseInt(req.query.expectedVersion, 10);
+                if (!isNaN(parsed) && parsed > 0) expectedVersion = parsed;
+            }
+            if (expectedVersion === undefined && req.body && req.body.expectedVersion !== undefined) {
+                const parsed = parseInt(req.body.expectedVersion, 10);
+                if (!isNaN(parsed) && parsed > 0) expectedVersion = parsed;
+            }
+
+            // Precondition requirement for versioned collections (jobs)
+            if (collectionName === 'jobs') {
+                if (expectedVersion === undefined) {
+                    return res.status(428).json({
+                        code: 'PRECONDITION_REQUIRED',
+                        error: "Wymagany nagłówek 'If-Match' lub parametr 'expectedVersion' do bezpiecznej archiwizacji zlecenia (Optimistic Locking)."
+                    });
+                }
+            }
+
+            // [P1 FIX] Fail-closed fetch document before delete so afterMutation knows affected jobId/project_id and CAS can verify version
             let beforeDoc = null;
-            if (typeof options.afterMutation === 'function') {
+            if (collectionName === 'jobs' || typeof options.afterMutation === 'function') {
                 try {
                     const rawDeleteBefore = await db.collection(collectionName).findOne(filter);
                     if (!rawDeleteBefore) {
-                        return res.status(404).json({ error: 'Item not found' });
+                        return res.status(404).json({
+                            error: collectionName === 'jobs'
+                                ? `Zlecenie o identyfikatorze '${id}' nie istnieje.`
+                                : 'Item not found'
+                        });
+                    }
+                    if (collectionName === 'jobs') {
+                        if (rawDeleteBefore.isActive === false) {
+                            return res.status(404).json({
+                                error: `Zlecenie o identyfikatorze '${id}' zostało już zarchiwizowane.`
+                            });
+                        }
+                        if (rawDeleteBefore.editVersion === undefined || rawDeleteBefore.editVersion === null) {
+                            return res.status(500).json({
+                                code: 'CORRUPT_DOCUMENT_VERSION',
+                                error: "Zlecenie w bazie danych nie posiada wymaganego pola 'editVersion'.",
+                                id
+                            });
+                        }
+                        if (rawDeleteBefore.editVersion !== expectedVersion) {
+                            return res.status(409).json({
+                                code: 'VERSION_CONFLICT',
+                                error: 'Zlecenie zostało zmodyfikowane przez innego użytkownika. Pobierz aktualne dane przed ponowną próbą archiwizacji.',
+                                id,
+                                entity: collectionName,
+                                currentVersion: rawDeleteBefore.editVersion,
+                                expectedVersion
+                            });
+                        }
                     }
                     beforeDoc = { ...rawDeleteBefore };
                 } catch (snapErr) {
@@ -1734,23 +2212,55 @@ const createRouter = (collectionName, options = {}) => {
             const softDeleteCollections = ['jobs', 'offers', 'clients', 'employees', 'subcontractors'];
 
             if (softDeleteCollections.includes(collectionName)) {
-                const result = await db.collection(collectionName).updateOne(
-                    filter,
-                    { $set: { isActive: false, updatedAt: new Date().toISOString() } }
-                );
+                const casFilter = (collectionName === 'jobs' && expectedVersion !== undefined)
+                    ? { id: id, editVersion: expectedVersion, isActive: { $ne: false } }
+                    : filter;
+
+                const updateDoc = {
+                    $set: { isActive: false, updatedAt: new Date().toISOString() }
+                };
+                if (collectionName === 'jobs') {
+                    updateDoc.$inc = { editVersion: 1 };
+                }
+
+                const result = await db.collection(collectionName).updateOne(casFilter, updateDoc);
 
                 const delMatched = result.matchedCount !== undefined ? result.matchedCount : (result.modifiedCount !== undefined ? result.modifiedCount : 1);
                 if (delMatched === 0) {
+                    if (collectionName === 'jobs') {
+                        const latest = await db.collection(collectionName).findOne(filter);
+                        if (!latest || latest.isActive === false) {
+                            return res.status(404).json({ error: `Zlecenie o identyfikatorze '${id}' nie istnieje lub zostało już zarchiwizowane.` });
+                        }
+                        return res.status(409).json({
+                            code: 'VERSION_CONFLICT',
+                            error: 'Zlecenie zostało zmodyfikowane przez innego użytkownika współbieżnie.',
+                            id,
+                            entity: collectionName,
+                            currentVersion: latest.editVersion,
+                            expectedVersion
+                        });
+                    }
                     return res.status(404).json({ error: 'Item not found' });
                 }
                 if (typeof options.afterMutation === 'function') {
                     try {
-                        await options.afterMutation('delete', { id, doc: beforeDoc ? { ...beforeDoc, isActive: false } : null, oldDoc: beforeDoc, req });
+                        await options.afterMutation('delete', {
+                            id,
+                            doc: beforeDoc ? { ...beforeDoc, isActive: false, editVersion: (beforeDoc.editVersion || 0) + 1 } : null,
+                            oldDoc: beforeDoc,
+                            req
+                        });
                     } catch (mErr) {
                         console.warn(`[afterMutation ${collectionName} delete soft]`, mErr.message);
                     }
                 }
-                return res.status(200).json({ success: true, message: 'Item archived' });
+                return res.status(200).json({
+                    success: true,
+                    message: 'Item archived',
+                    id,
+                    editVersion: expectedVersion !== undefined ? expectedVersion + 1 : undefined
+                });
             } else {
                 // Hard delete branch (e.g. time-entries, settlements, site-logs)
                 const result = await db.collection(collectionName).deleteOne(filter);
@@ -2440,6 +2950,7 @@ const validateJobPostSchema = ajv.getSchema('job#/definitions/JobPostPayload');
 const validateJobPatchSchema = ajv.getSchema('job#/definitions/JobPatchPayload');
 const validateJobBatchSchema = ajv.getSchema('job#/definitions/JobBatchImportPayload');
 const validateJobPaginatedSchema = ajv.getSchema('job#/definitions/JobPaginatedResponse');
+const validateJobSchema = ajv.getSchema('job#/definitions/Job');
 
 // Shared validation & normalization for time entries (used by single POST/PATCH and batch-import)
 async function validateAndNormalizeTimeEntryDoc(doc, { db, user, isBatch = false, isPatch = false, existingEntry = null, session = null }) {
@@ -5814,6 +6325,21 @@ async function validateAndNormalizeJobDoc(doc, { db, user, isBatch = false, isPa
         delete doc.marginActualPercent;
     }
 
+    // Enforce expectedVersion precondition on PATCH (Phase 4 Optimistic Locking)
+    if (isPatch && (doc.expectedVersion === undefined || doc.expectedVersion === null)) {
+        return {
+            error: "Aktualizacja zlecenia wymaga podania 'expectedVersion' w celu ochrony przed nadpisaniem współbieżnych zmian.",
+            code: 'PRECONDITION_REQUIRED',
+            status: 428
+        };
+    }
+
+    // Clean server-assigned metadata before schema validation to ensure idempotency of validator
+    if (!isPatch && !isBatch) {
+        delete doc.editVersion;
+        delete doc.isActive;
+    }
+
     // Validate against JSON schema
     const schemaValidator = isPatch ? validateJobPatchSchema : validateJobPostSchema;
     const isValid = schemaValidator(doc);
@@ -5828,7 +6354,19 @@ async function validateAndNormalizeJobDoc(doc, { db, user, isBatch = false, isPa
         };
     }
 
-    return { data: doc };
+    let expectedVersion;
+    if (isPatch) {
+        expectedVersion = doc.expectedVersion;
+        // expectedVersion is a request token, never persisted in MongoDB
+        delete doc.expectedVersion;
+    } else if (isBatch) {
+        doc.editVersion = (existingJob && existingJob.editVersion) ? existingJob.editVersion : 1;
+    } else {
+        // New job created on server always starts at editVersion: 1
+        doc.editVersion = 1;
+    }
+
+    return { data: doc, expectedVersion };
 }
 
 async function validateJobBatch(req, res, next) {
@@ -5916,8 +6454,12 @@ async function validateJob(req, res, next) {
         }
         const validation = await validateAndNormalizeJobDoc(req.body, { db, user: req.user, isPatch: true, existingJob });
         if (validation.error) {
-            return res.status(validation.status || 400).json({ error: validation.error });
+            return res.status(validation.status || 400).json({
+                error: validation.error,
+                code: validation.code
+            });
         }
+        req.expectedVersion = validation.expectedVersion;
         req.body = validation.data;
         return next();
     }
@@ -5951,6 +6493,505 @@ app.post('/api/jobs/reconcile-aggregates', verifyToken, requireRole('admin', 'ma
     } catch (err) {
         res.status(500).json({ error: `Błąd rekonsyliacji agregatów: ${err.message}` });
     }
+});
+
+// ==========================================
+// FAZA 4: DOMAIN TRANSACTIONAL JOB ENDPOINT
+// Atomically generates atomic job code from counters collection,
+// validates Job and stageItems, inserts Job (editVersion: 1),
+// inserts stageItems in jobStageItems collection, and records
+// idempotency key in a single MongoDB transaction.
+// ==========================================
+async function handleCreateJobAtomic(req, res, options = {}) {
+    const returnJobDocOnly = options.returnJobDocOnly === true;
+
+    const clientToUse = client || (db && db.client);
+    const replicaSetActive = isReplicaSet || (clientToUse && (await checkReplicaSetTopology(clientToUse)));
+
+    // Fail closed with 503 if transactions are required and replica set is unavailable in production
+    if (!replicaSetActive && process.env.ALLOW_NON_TRANSACTIONAL !== 'true' && process.env.NODE_ENV !== 'test') {
+        return res.status(503).json({
+            code: 'TRANSACTIONS_REQUIRED',
+            error: "Operacja domenowa wymaga włączonego Replica Set w MongoDB (ACID transactions required). Skonfiguruj 'replication.replSet' w konfiguracji bazy danych."
+        });
+    }
+    const providedKey = req.headers['idempotency-key'] || req.body?.idempotencyKey;
+
+    if (!returnJobDocOnly) {
+        if (!providedKey || typeof providedKey !== 'string' || providedKey.trim() === '' || providedKey.trim().length > 128) {
+            return res.status(400).json({
+                error: "Nagłówek Idempotency-Key (lub właściwość idempotencyKey w payloadzie) jest wymagany dla transakcyjnego tworzenia zlecenia i musi być niepustym ciągiem znaków o długości maksymalnie 128 znaków."
+            });
+        }
+    }
+
+    const idempotencyKey = (providedKey && typeof providedKey === 'string' && providedKey.trim().length > 0)
+        ? providedKey.trim()
+        : (returnJobDocOnly ? `job_internal_${crypto.randomUUID()}` : null);
+
+    const ownerToken = crypto.randomUUID();
+    let requestHash = null;
+    let reservedKey = false;
+    let leaseHeartbeat = null;
+
+    try {
+        if (!req.body || typeof req.body !== 'object' || Array.isArray(req.body)) {
+            return res.status(400).json({ error: 'Payload żądania musi być poprawnym obiektem JSON.' });
+        }
+
+        // Support both { job: {...}, stageItems: [...] } and flat {...jobFields, stageItems: [...]}
+        let rawJobData = null;
+        let rawStageItems = [];
+        if (req.body.job && typeof req.body.job === 'object' && !Array.isArray(req.body.job)) {
+            rawJobData = { ...req.body.job };
+            rawStageItems = Array.isArray(req.body.stageItems) ? req.body.stageItems : [];
+        } else {
+            const { stageItems = [], idempotencyKey: _ik, ...jobFields } = req.body;
+            rawJobData = jobFields;
+            rawStageItems = Array.isArray(stageItems) ? stageItems : [];
+        }
+
+        // Validate Job doc using domain validator
+        const jobValidation = await validateAndNormalizeJobDoc(rawJobData, { db, user: req.user });
+        if (jobValidation.error) {
+            return res.status(jobValidation.status || 400).json({
+                error: jobValidation.error,
+                code: jobValidation.code
+            });
+        }
+
+        const candidateJob = jobValidation.data;
+
+        // Full canonical payload hash covering the complete normalized job domain payload and all stageItems
+        const canonicalPayload = {
+            job: candidateJob,
+            stageItems: rawStageItems
+        };
+        requestHash = crypto.createHash('sha256').update(canonicalJsonStringify(canonicalPayload)).digest('hex');
+
+        // Idempotency lease reservation protocol
+        if (idempotencyKey && db && typeof db.collection === 'function') {
+            const existingIdemp = await db.collection('idempotency_keys').findOne({
+                endpoint: '/api/jobs/create-atomic',
+                key: idempotencyKey
+            });
+
+            if (existingIdemp) {
+                if (existingIdemp.status === 'completed' || (!existingIdemp.status && existingIdemp.responseBody)) {
+                    if (existingIdemp.requestHash === requestHash) {
+                        const bodyToReturn = returnJobDocOnly && existingIdemp.responseBody?.job
+                            ? existingIdemp.responseBody.job
+                            : existingIdemp.responseBody;
+                        return res.status(existingIdemp.statusCode || 201).json(bodyToReturn);
+                    } else {
+                        return res.status(409).json({
+                            error: 'Klucz idempotencji został już użyty dla żądania o innym payloadzie (Idempotency Key Conflict).'
+                        });
+                    }
+                } else if (existingIdemp.status === 'pending') {
+                    const isExpired = existingIdemp.expiresAt && new Date(existingIdemp.expiresAt) < new Date();
+                    if (!isExpired && existingIdemp.requestHash && existingIdemp.requestHash !== requestHash) {
+                        return res.status(409).json({
+                            error: 'Klucz idempotencji został już użyty dla żądania o innym payloadzie (Idempotency Key Conflict).'
+                        });
+                    }
+                }
+            }
+
+            const now = new Date();
+            const leaseExpiresAt = new Date(now.getTime() + 30000);
+
+            try {
+                await db.collection('idempotency_keys').insertOne({
+                    id: new ObjectId().toString(),
+                    key: idempotencyKey,
+                    endpoint: '/api/jobs/create-atomic',
+                    requestHash,
+                    status: 'pending',
+                    ownerToken,
+                    createdAt: now,
+                    expiresAt: leaseExpiresAt
+                });
+                reservedKey = true;
+            } catch (insertErr) {
+                if (insertErr.code === 11000 || (insertErr.message && insertErr.message.includes('11000'))) {
+                    let acquired = false;
+                    for (let attempt = 0; attempt < 50; attempt++) {
+                        await new Promise(r => setTimeout(r, 100));
+                        const check = await db.collection('idempotency_keys').findOne({
+                            endpoint: '/api/jobs/create-atomic',
+                            key: idempotencyKey
+                        });
+
+                        if (!check) {
+                            try {
+                                await db.collection('idempotency_keys').insertOne({
+                                    id: new ObjectId().toString(),
+                                    key: idempotencyKey,
+                                    endpoint: '/api/jobs/create-atomic',
+                                    requestHash,
+                                    status: 'pending',
+                                    ownerToken,
+                                    createdAt: new Date(),
+                                    expiresAt: new Date(Date.now() + 30000)
+                                });
+                                reservedKey = true;
+                                acquired = true;
+                                break;
+                            } catch (_) {
+                                continue;
+                            }
+                        }
+
+                        if (check.status === 'completed' || (!check.status && check.responseBody)) {
+                            if (check.requestHash === requestHash) {
+                                const bodyToReturn = returnJobDocOnly && check.responseBody?.job
+                                    ? check.responseBody.job
+                                    : check.responseBody;
+                                return res.status(check.statusCode || 201).json(bodyToReturn);
+                            } else {
+                                return res.status(409).json({
+                                    error: 'Klucz idempotencji został już użyty dla żądania o innym payloadzie (Idempotency Key Conflict).'
+                                });
+                            }
+                        }
+
+                        const isExpired = check.status === 'pending' && check.expiresAt && new Date(check.expiresAt) < new Date();
+                        if (check.status === 'failed' || isExpired) {
+                            const takeover = await db.collection('idempotency_keys').findOneAndUpdate(
+                                {
+                                    endpoint: '/api/jobs/create-atomic',
+                                    key: idempotencyKey,
+                                    $or: [
+                                        { status: 'failed' },
+                                        { status: 'pending', expiresAt: { $lt: new Date() } }
+                                    ]
+                                },
+                                {
+                                    $set: {
+                                        status: 'pending',
+                                        ownerToken,
+                                        requestHash,
+                                        updatedAt: new Date(),
+                                        expiresAt: new Date(Date.now() + 30000)
+                                    }
+                                },
+                                { returnDocument: 'after' }
+                            );
+                            if (takeover && (takeover.value || takeover._id || takeover.key)) {
+                                reservedKey = true;
+                                acquired = true;
+                                break;
+                            }
+                        }
+                    }
+
+                    if (!acquired && !reservedKey) {
+                        return res.status(409).json({
+                            error: 'Operacja jest w trakcie wykonywania przez inne żądanie lub nie została ukończona (Idempotency Key In Progress).'
+                        });
+                    }
+                } else {
+                    throw insertErr;
+                }
+            }
+
+            if (reservedKey) {
+                leaseHeartbeat = setInterval(async () => {
+                    try {
+                        await db.collection('idempotency_keys').updateOne(
+                            { endpoint: '/api/jobs/create-atomic', key: idempotencyKey, ownerToken, status: 'pending' },
+                            { $set: { expiresAt: new Date(Date.now() + 30000), updatedAt: new Date() } }
+                        );
+                    } catch (_) {}
+                }, 10000);
+                if (leaseHeartbeat.unref) leaseHeartbeat.unref();
+            }
+        }
+
+        // Setup execution inside MongoDB session
+        const clientToUse = client || (db && db.client);
+        const replicaSetActive = isReplicaSet || (clientToUse && (await checkReplicaSetTopology(clientToUse)));
+        let responsePayload = null;
+
+        const executeOperations = async (sess) => {
+            const opt = sess ? { session: sess } : {};
+            const nowIso = new Date().toISOString();
+            const year = new Date().getFullYear();
+
+            // 1. Atomic Counter Increment with fail-safe check against existing jobs
+            const counterKey = `job_${year}`;
+            let seq = 1;
+
+            const existingCounter = await db.collection('counters').findOne({ _id: counterKey }, opt);
+            if (!existingCounter || typeof existingCounter.seq !== 'number') {
+                const existingJobs = await db.collection('jobs').find(
+                    { jobCode: { $type: 'string', $regex: new RegExp(`^CF-${year}-\\d+$`) } },
+                    opt
+                ).toArray();
+                let maxExistingSeq = 0;
+                for (const j of existingJobs) {
+                    const m = (j.jobCode || '').match(new RegExp(`^CF-${year}-(\\d+)$`));
+                    if (m) {
+                        const parsed = parseInt(m[1], 10);
+                        if (parsed > maxExistingSeq) maxExistingSeq = parsed;
+                    }
+                }
+                if (maxExistingSeq > 0) {
+                    await db.collection('counters').updateOne(
+                        { _id: counterKey },
+                        { $max: { seq: maxExistingSeq } },
+                        { upsert: true, ...opt }
+                    );
+                }
+            }
+
+            if (typeof db.collection('counters').findOneAndUpdate === 'function') {
+                const counterRes = await db.collection('counters').findOneAndUpdate(
+                    { _id: counterKey },
+                    { $inc: { seq: 1 } },
+                    { upsert: true, returnDocument: 'after', ...opt }
+                );
+                const counterDoc = (counterRes && counterRes.value !== undefined) ? counterRes.value : counterRes;
+                seq = (counterDoc && typeof counterDoc.seq === 'number') ? counterDoc.seq : 1;
+            } else {
+                await db.collection('counters').updateOne(
+                    { _id: counterKey },
+                    { $inc: { seq: 1 } },
+                    { upsert: true, ...opt }
+                );
+                const counterDoc = await db.collection('counters').findOne({ _id: counterKey }, opt);
+                seq = counterDoc ? counterDoc.seq : 1;
+            }
+
+            const authoritativeJobCode = `CF-${year}-${String(seq).padStart(3, '0')}`;
+
+            if (process.env.NODE_ENV === 'test' && _testFailpoint === 'after_job_counter') {
+                throw new Error('FAILPOINT: Simulated crash after atomic job counter increment');
+            }
+
+            // 2. Prepare and Insert Job
+            const finalJobId = candidateJob.id || new ObjectId().toString();
+            const finalJob = {
+                ...candidateJob,
+                id: finalJobId,
+                jobCode: authoritativeJobCode,
+                createdAt: candidateJob.createdAt || nowIso,
+                updatedAt: nowIso,
+                isActive: true,
+                editVersion: 1,
+
+                // Reset authoritative actuals to 0 on new job creation
+                actualLaborHours: 0,
+                actualLaborCost: 0,
+                settledLaborCost: 0,
+                timeEntriesCount: 0,
+                revenueActualNet: 0,
+                revenueActualGross: 0,
+                actualMaterialCost: 0,
+                actualTotalCost: 0,
+                marginActualPercent: 0,
+                marginActualAmount: 0,
+                marginActualGross: 0,
+                aggregationPending: false
+            };
+
+            // Denormalize clientName if clientId provided
+            if (finalJob.clientId && (!finalJob.clientName || finalJob.clientName === 'Unknown Client')) {
+                const clientDoc = await db.collection('clients').findOne(
+                    { $or: [{ id: finalJob.clientId }, { _id: finalJob.clientId }] },
+                    opt
+                );
+                if (clientDoc) {
+                    finalJob.clientName = clientDoc.type === 'company' && clientDoc.company
+                        ? clientDoc.company
+                        : (`${clientDoc.name || ''} ${clientDoc.lastName || ''}`.trim() || 'Client');
+                }
+            }
+
+            // Ensure stages have correct jobId
+            if (Array.isArray(finalJob.stages)) {
+                finalJob.stages = finalJob.stages.map(stage => ({
+                    ...stage,
+                    jobId: finalJobId,
+                    id: stage.id || new ObjectId().toString()
+                }));
+            }
+
+            const insertJobResult = await db.collection('jobs').insertOne(finalJob, opt);
+            if (!insertJobResult.acknowledged && !insertJobResult.insertedId) {
+                throw new Error("Nie udało się zapisać zlecenia w bazie danych.");
+            }
+
+            if (process.env.NODE_ENV === 'test' && _testFailpoint === 'after_job_insert') {
+                throw new Error('FAILPOINT: Simulated crash after job insert');
+            }
+
+            // 3. Prepare and Insert Stage Items in jobStageItems collection
+            const finalStageItems = [];
+            if (Array.isArray(rawStageItems) && rawStageItems.length > 0) {
+                for (const item of rawStageItems) {
+                    const normItem = {
+                        ...item,
+                        id: item.id || new ObjectId().toString(),
+                        jobId: finalJobId,
+                        createdAt: item.createdAt || nowIso,
+                        updatedAt: nowIso
+                    };
+                    finalStageItems.push(normItem);
+                }
+
+                if (finalStageItems.length > 0) {
+                    await db.collection('jobStageItems').insertMany(finalStageItems, opt);
+                }
+            }
+
+            if (process.env.NODE_ENV === 'test' && _testFailpoint === 'after_stage_items_insert') {
+                throw new Error('FAILPOINT: Simulated crash after stage items insert');
+            }
+
+            // 4. Finalize Idempotency Key in session
+            if (idempotencyKey && db && typeof db.collection === 'function') {
+                const idempUpdateRes = await db.collection('idempotency_keys').updateOne(
+                    { endpoint: '/api/jobs/create-atomic', key: idempotencyKey, ownerToken, status: 'pending' },
+                    {
+                        $set: {
+                            status: 'completed',
+                            statusCode: 201,
+                            responseBody: {
+                                success: true,
+                                job: finalJob,
+                                stageItemsCount: finalStageItems.length,
+                                jobCode: authoritativeJobCode
+                            },
+                            completedAt: new Date(),
+                            expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000)
+                        }
+                    },
+                    { ...opt, upsert: false }
+                );
+
+                if (idempUpdateRes.matchedCount !== 1) {
+                    const err = new Error(`Utrata dzierżawy idempotencji dla klucza '${idempotencyKey}'. Transakcja została wycofana.`);
+                    err.status = 409;
+                    throw err;
+                }
+            }
+
+            responsePayload = {
+                success: true,
+                job: finalJob,
+                stageItemsCount: finalStageItems.length,
+                jobCode: authoritativeJobCode
+            };
+        };
+
+        if (leaseHeartbeat) {
+            clearInterval(leaseHeartbeat);
+            leaseHeartbeat = null;
+        }
+        if (idempotencyKey && reservedKey && db && typeof db.collection === 'function') {
+            try {
+                await db.collection('idempotency_keys').updateOne(
+                    { endpoint: '/api/jobs/create-atomic', key: idempotencyKey, ownerToken, status: 'pending' },
+                    { $set: { expiresAt: new Date(Date.now() + 60000), updatedAt: new Date() } }
+                );
+            } catch (_) {}
+        }
+
+        let session = null;
+        if (replicaSetActive && clientToUse && typeof clientToUse.startSession === 'function') {
+            try {
+                session = clientToUse.startSession();
+            } catch (sessErr) {
+                console.error('[JOB-CREATE-ATOMIC] Failed to start MongoDB session:', sessErr.message);
+                if (process.env.ALLOW_NON_TRANSACTIONAL !== 'true' && process.env.NODE_ENV !== 'test') {
+                    return res.status(503).json({
+                        code: 'TRANSACTIONS_REQUIRED',
+                        error: `Nie udało się otworzyć sesji transakcyjnej MongoDB: ${sessErr.message}`
+                    });
+                }
+            }
+        }
+
+        if (session) {
+            try {
+                await session.withTransaction(async () => {
+                    await executeOperations(session);
+                });
+            } finally {
+                await session.endSession();
+            }
+        } else {
+            if (process.env.ALLOW_NON_TRANSACTIONAL !== 'true' && process.env.NODE_ENV !== 'test') {
+                return res.status(503).json({
+                    code: 'TRANSACTIONS_REQUIRED',
+                    error: "Operacja domenowa tworzenia zlecenia wymaga włączonego Replica Set w MongoDB (ACID transactions required). Skonfiguruj 'replication.replSet' w konfiguracji bazy danych."
+                });
+            }
+            await executeOperations(null);
+        }
+
+        if (returnJobDocOnly) {
+            return res.status(201).json(responsePayload.job);
+        }
+        return res.status(201).json(responsePayload);
+    } catch (err) {
+        console.error('[JOB-CREATE-ATOMIC ERROR]', err);
+        if (reservedKey && idempotencyKey && ownerToken && db && typeof db.collection === 'function') {
+            try {
+                await db.collection('idempotency_keys').deleteOne({
+                    endpoint: '/api/jobs/create-atomic',
+                    key: idempotencyKey,
+                    ownerToken,
+                    status: 'pending'
+                });
+            } catch (_) {}
+        }
+
+        if (idempotencyKey && db && typeof db.collection === 'function') {
+            const isConflictOrRace = err.code === 11000 ||
+                (err.message && err.message.includes('11000')) ||
+                err.status === 409;
+
+            if (isConflictOrRace) {
+                for (let attempt = 0; attempt < 50; attempt++) {
+                    const committed = await db.collection('idempotency_keys').findOne({
+                        endpoint: '/api/jobs/create-atomic',
+                        key: idempotencyKey
+                    });
+                    if (committed && (committed.status === 'completed' || (!committed.status && committed.responseBody))) {
+                        if (committed.requestHash === requestHash) {
+                            const bodyToReturn = returnJobDocOnly && committed.responseBody?.job
+                                ? committed.responseBody.job
+                                : committed.responseBody;
+                            return res.status(committed.statusCode || 201).json(bodyToReturn);
+                        } else {
+                            return res.status(409).json({
+                                error: 'Klucz idempotencji został już użyty dla żądania o innym payloadzie (Idempotency Key Conflict).'
+                            });
+                        }
+                    }
+                    if (!committed || committed.status === 'failed') break;
+                    await new Promise(r => setTimeout(r, 100));
+                }
+            }
+        }
+        if (err.code === 11000 || (err.message && err.message.includes('11000'))) {
+            return res.status(409).json({
+                error: 'Wykryto konflikt unikalności klucza (np. jobCode lub id zlecenia już istnieje w bazie danych).'
+            });
+        }
+        return res.status(err.status || 500).json({ error: err.message });
+    } finally {
+        if (leaseHeartbeat) {
+            clearInterval(leaseHeartbeat);
+        }
+    }
+}
+
+app.post('/api/jobs/create-atomic', verifyToken, requireRole('admin', 'manager'), requireTransactions, async (req, res) => {
+    return await handleCreateJobAtomic(req, res, { returnJobDocOnly: false });
 });
 
 app.use('/api/jobs', verifyToken, requireRoleOrSafeGet, validateJob, createRouter('jobs'));
@@ -6492,6 +7533,7 @@ module.exports = {
     repairLegacyC4c2ac3Standards,
     repairIncompleteStandards,
     backfillTimeEntriesWorkerType,
+    backfillJobsEditVersion,
     VALID_TIME_ENTRY_STATUSES,
     WORKER_ALLOWED_TIME_ENTRY_STATUSES,
     FOREMAN_ALLOWED_TIME_ENTRY_STATUSES,
@@ -6520,6 +7562,7 @@ module.exports = {
     validateJobPatchSchema,
     validateJobBatchSchema,
     validateJobPaginatedSchema,
+    validateJobSchema,
     recalculateJobLaborCosts,
     reconcilePendingJobAggregates,
     calculateHourlySettlementTotals,

@@ -1,3 +1,4 @@
+import type { JobPostPayload } from '../../../shared/contracts/job.generated';
 import { v4 as uuidv4 } from 'uuid';
 import type {
     Job,
@@ -19,7 +20,7 @@ interface JobCreationContext {
 }
 
 interface JobSnapshot {
-    job: Job;
+    job: JobPostPayload;
     stageItems: JobStageItem[];
 }
 
@@ -222,7 +223,7 @@ export class OfferToJobAdapter {
             ? ((frozenRevenue - frozenTotalCost) / frozenRevenue) * 100
             : 0;
 
-        const newJob: Job = {
+        const newJob: JobPostPayload = ({
             ...jobData,
             id: jobId,
             jobCode,
@@ -260,7 +261,7 @@ export class OfferToJobAdapter {
             offerId: offer?.id,
             offerNumber: offer?.number,
             sourceOfferId: offer?.id
-        };
+        }) as unknown as JobPostPayload;
 
         // 6. Create JobStageItems (BOM Snapshots)
         // These are critical for tracking exactly what "Window X" means in "Stage Y"
