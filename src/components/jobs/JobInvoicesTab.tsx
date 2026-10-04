@@ -1,26 +1,16 @@
-import React, { useState, useEffect, useCallback } from 'react';
-import { Plus, FileText, CheckCircle, Clock, Trash2, CreditCard, RefreshCw, TrendingDown, TrendingUp, Edit2 } from 'lucide-react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
+import { Plus, FileText, CheckCircle, Clock, Trash2, CreditCard, RefreshCw, TrendingDown, TrendingUp, Edit2, Send, Ban, History, RotateCcw } from 'lucide-react';
 import type { Job, JobExpense, ExtraWork } from '../../models/types';
 import { useJobs } from '../../context/JobsContext';
 import { v4 as uuidv4 } from 'uuid';
+import { toast } from 'sonner';
+import { Modal } from '../ui/Modal';
+import type { InvoiceDocument, InvoicePaymentDocument, InvoicePaymentMethod, InvoiceVatRate } from '../../../shared/contracts/invoice.generated';
+import { createInvoiceMutationKey, InvoiceApiError, invoiceService, minorToPln, plnToMinor } from '../../services/data/invoiceService';
 
 const API_BASE = (import.meta as any).env?.VITE_API_URL || 'http://localhost:3000/api';
 
-interface InvoiceIncome {
-    id: string;
-    jobId: string;
-    invoiceNumber: string;
-    description?: string;
-    amountNet: number;
-    amountGross: number;
-    vatRate: number;
-    status: 'pending' | 'paid';
-    issueDate: string;
-    dueDate?: string;
-    paidDate?: string;
-    createdAt: string;
-    updatedAt: string;
-}
+type InvoiceIncome = InvoiceDocument;
 
 interface InvoiceCost {
     id: string;
@@ -69,6 +59,9 @@ const CATEGORY_COLORS: Record<InvoiceCost['category'], string> = {
 
 const vatOptions = [23, 8, 5, 0];
 const fmt = (val: number) => val.toLocaleString('pl-PL', { style: 'currency', currency: 'PLN' });
+const todayInWarsaw = () => new Intl.DateTimeFormat('sv-SE', {
+    timeZone: 'Europe/Warsaw', year: 'numeric', month: '2-digit', day: '2-digit'
+}).format(new Date());
 const statusBadge = (status: string) =>
     status === 'paid' ? (
         <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-medium bg-green-100 text-green-800">
@@ -80,14 +73,49 @@ const statusBadge = (status: string) =>
         </span>
     );
 
+const documentStatusBadge = (status: InvoiceIncome['documentStatus']) => {
+    const styles = status === 'draft'
+        ? 'bg-gray-100 text-gray-700'
+        : status === 'issued'
+            ? 'bg-blue-100 text-blue-800'
+            : 'bg-red-100 text-red-800';
+    const label = status === 'draft' ? 'Szkic' : status === 'issued' ? 'Wystawiona' : 'Anulowana';
+    return <span className={`inline-flex px-2 py-1 rounded-full text-xs font-medium ${styles}`}>{label}</span>;
+};
+
+const paymentStatusBadge = (invoice: InvoiceIncome) => {
+    const today = todayInWarsaw();
+    const overdue = invoice.documentStatus === 'issued'
+        && invoice.paymentStatus !== 'paid'
+        && !!invoice.dueDate
+        && invoice.dueDate < today;
+    const label = overdue ? 'Przeterminowana' : invoice.paymentStatus === 'paid'
+        ? 'Opłacona'
+        : invoice.paymentStatus === 'partial' ? 'Częściowa' : 'Nieopłacona';
+    const styles = overdue ? 'bg-red-100 text-red-800' : invoice.paymentStatus === 'paid'
+        ? 'bg-green-100 text-green-800'
+        : invoice.paymentStatus === 'partial' ? 'bg-amber-100 text-amber-800' : 'bg-gray-100 text-gray-700';
+    return <span className={`inline-flex px-2 py-1 rounded-full text-xs font-medium ${styles}`}>{label}</span>;
+};
+
+type IncomeAction = 'edit' | 'issue' | 'payment' | 'refund' | 'cancel' | 'history';
+
 export default function JobInvoicesTab({ job }: JobInvoicesTabProps) {
-    const { updateJob } = useJobs();
+    const { updateJob, refreshJobs } = useJobs();
     const [activeTab, setActiveTab] = useState<'income' | 'cost'>('cost');
 
     // ─── INCOME ────────────────────────────────────────────────────────────────
     const [incomeInvoices, setIncomeInvoices] = useState<InvoiceIncome[]>([]);
     const [incomeLoading, setIncomeLoading] = useState(true);
+    const [incomeError, setIncomeError] = useState<string | null>(null);
+    const [incomeConflict, setIncomeConflict] = useState(false);
+    const [incomeSubmitting, setIncomeSubmitting] = useState(false);
     const [extraWorks, setExtraWorks] = useState<ExtraWork[]>([]);
+    const [selectedIncome, setSelectedIncome] = useState<InvoiceIncome | null>(null);
+    const [incomeAction, setIncomeAction] = useState<IncomeAction | null>(null);
+    const [incomePayments, setIncomePayments] = useState<InvoicePaymentDocument[]>([]);
+    const [paymentsLoading, setPaymentsLoading] = useState(false);
+    const operationKeys = useRef(new Map<string, string>());
 
     const fetchExtraWorks = useCallback(async () => {
         try {
@@ -106,60 +134,180 @@ export default function JobInvoicesTab({ job }: JobInvoicesTabProps) {
         fetchExtraWorks();
     }, [fetchExtraWorks]);
     const [showIncomeForm, setShowIncomeForm] = useState(false);
+    const [createIncomeKey, setCreateIncomeKey] = useState<string | null>(null);
     const [newIncome, setNewIncome] = useState({
-        invoiceNumber: '', description: '',
-        amountNet: job.revenuePlannedNet || 0,
-        vatRate: 23,
-        issueDate: new Date().toISOString().split('T')[0],
+        description: '',
+        amountNet: String(job.revenuePlannedNet || 0),
+        vatRate: 23 as InvoiceVatRate,
         dueDate: ''
+    });
+    const [actionForm, setActionForm] = useState({
+        description: '', amountNet: '0', vatRate: 23 as InvoiceVatRate,
+        issueDate: todayInWarsaw(), dueDate: '',
+        paymentAmount: '0', paymentDate: todayInWarsaw(),
+        paymentMethod: 'transfer' as InvoicePaymentMethod, reason: '', reversesPaymentId: ''
     });
 
     const fetchIncome = useCallback(async () => {
         setIncomeLoading(true);
+        setIncomeError(null);
         try {
-            const res = await fetch(`${API_BASE}/invoices?jobId=${job.id}`, { headers: getAuthHeaders() });
-            if (res.ok) {
-                const raw = await res.json();
-                const arr: InvoiceIncome[] = Array.isArray(raw) ? raw : (raw?.data ?? raw?.invoices ?? []);
-                setIncomeInvoices(arr.filter((inv: InvoiceIncome) => inv.jobId === job.id));
-            }
-        } catch (e) { console.error(e); }
+            setIncomeInvoices(await invoiceService.getJobInvoices(job.id));
+            setIncomeConflict(false);
+        } catch (error) {
+            const message = error instanceof Error ? error.message : 'Nie udało się pobrać faktur.';
+            setIncomeError(message);
+        }
         finally { setIncomeLoading(false); }
     }, [job.id]);
 
     useEffect(() => { fetchIncome(); }, [fetchIncome]);
 
+    const reportIncomeError = useCallback((error: unknown) => {
+        const apiError = error instanceof InvoiceApiError ? error : null;
+        const message = error instanceof Error ? error.message : 'Operacja faktury nie powiodła się.';
+        setIncomeError(message);
+        if (apiError?.isConflict) setIncomeConflict(true);
+        toast.error(apiError?.isConflict ? 'Faktura została zmieniona. Odśwież dane przed ponowną próbą.' : message);
+    }, []);
+
+    const refreshIncomeAndJob = useCallback(async () => {
+        await Promise.all([fetchIncome(), refreshJobs()]);
+    }, [fetchIncome, refreshJobs]);
+
+    const getOperationKey = (scope: string) => {
+        const existing = operationKeys.current.get(scope);
+        if (existing) return existing;
+        const key = createInvoiceMutationKey();
+        operationKeys.current.set(scope, key);
+        return key;
+    };
+
+    const completeOperation = (scope: string) => operationKeys.current.delete(scope);
+
     const handleCreateIncome = async () => {
-        if (!newIncome.invoiceNumber || newIncome.amountNet <= 0) return;
-        const gross = parseFloat((newIncome.amountNet * (1 + newIncome.vatRate / 100)).toFixed(2));
-        const inv: InvoiceIncome = {
-            id: uuidv4(), jobId: job.id,
-            invoiceNumber: newIncome.invoiceNumber,
-            description: newIncome.description || undefined,
-            amountNet: newIncome.amountNet, amountGross: gross,
-            vatRate: newIncome.vatRate, status: 'pending',
-            issueDate: newIncome.issueDate, dueDate: newIncome.dueDate || undefined,
-            createdAt: new Date().toISOString(), updatedAt: new Date().toISOString()
-        };
-        await fetch(`${API_BASE}/invoices`, { method: 'POST', headers: getAuthHeaders(), body: JSON.stringify(inv) });
-        await fetchIncome();
-        setShowIncomeForm(false);
-        setNewIncome({ invoiceNumber: '', description: '', amountNet: 0, vatRate: 23, issueDate: new Date().toISOString().split('T')[0], dueDate: '' });
+        const key = createIncomeKey || createInvoiceMutationKey();
+        if (!createIncomeKey) setCreateIncomeKey(key);
+        setIncomeSubmitting(true);
+        try {
+            const amountNetMinor = plnToMinor(newIncome.amountNet);
+            if (amountNetMinor <= 0) throw new Error('Kwota netto musi być większa od zera.');
+            await invoiceService.createInvoiceDraft({
+                jobId: job.id,
+                amountNetMinor,
+                vatRate: newIncome.vatRate,
+                description: newIncome.description || undefined,
+                dueDate: newIncome.dueDate || undefined,
+            }, key);
+            setCreateIncomeKey(null);
+            setShowIncomeForm(false);
+            setNewIncome({ description: '', amountNet: '0', vatRate: 23, dueDate: '' });
+            toast.success('Szkic faktury został utworzony.');
+            await refreshIncomeAndJob();
+        } catch (error) {
+            reportIncomeError(error);
+        } finally {
+            setIncomeSubmitting(false);
+        }
     };
 
-    const handleMarkIncomePaid = async (id: string) => {
-        await fetch(`${API_BASE}/invoices/${id}/pay`, { method: 'PATCH', headers: getAuthHeaders() });
-        await fetchIncome();
+    const openIncomeAction = async (action: IncomeAction, invoice: InvoiceIncome, payment?: InvoicePaymentDocument) => {
+        setSelectedIncome(invoice);
+        setIncomeAction(action);
+        setIncomeError(null);
+        setActionForm({
+            description: invoice.description || '',
+            amountNet: String(minorToPln(invoice.amountNetMinor)),
+            vatRate: (invoice.vatRate ?? 23) as InvoiceVatRate,
+            issueDate: action === 'cancel' ? todayInWarsaw() : (invoice.issueDate || todayInWarsaw()),
+            dueDate: invoice.dueDate || '',
+            paymentAmount: String(minorToPln(payment?.amountMinor ?? invoice.remainingAmountMinor)),
+            paymentDate: todayInWarsaw(),
+            paymentMethod: payment?.paymentMethod || 'transfer',
+            reason: '',
+            reversesPaymentId: payment?.id || '',
+        });
+        if (action === 'history') {
+            setPaymentsLoading(true);
+            try {
+                setIncomePayments(await invoiceService.getInvoicePayments(invoice.id));
+            } catch (error) {
+                reportIncomeError(error);
+            } finally {
+                setPaymentsLoading(false);
+            }
+        }
     };
 
-    const handleDeleteIncome = async (id: string) => {
-        if (!window.confirm('Usunąć fakturę przychodową?')) return;
-        await fetch(`${API_BASE}/invoices/${id}`, { method: 'DELETE', headers: getAuthHeaders() });
-        await fetchIncome();
+    const closeIncomeAction = () => {
+        setIncomeAction(null);
+        setSelectedIncome(null);
+        setIncomePayments([]);
     };
 
-    const incomeNet = incomeInvoices.reduce((s, i) => s + i.amountNet, 0);
-    const incomePaid = incomeInvoices.filter(i => i.status === 'paid').reduce((s, i) => s + i.amountNet, 0);
+    const handleIncomeAction = async () => {
+        if (!selectedIncome || !incomeAction || incomeAction === 'history') return;
+        const scope = `${incomeAction}:${selectedIncome.id}:${selectedIncome.editVersion}`;
+        setIncomeSubmitting(true);
+        try {
+            if (incomeAction === 'edit') {
+                await invoiceService.updateInvoiceDraft(selectedIncome.id, {
+                    description: actionForm.description,
+                    dueDate: actionForm.dueDate || undefined,
+                    amountNetMinor: plnToMinor(actionForm.amountNet),
+                    vatRate: actionForm.vatRate,
+                }, selectedIncome.editVersion);
+            } else if (incomeAction === 'issue') {
+                await invoiceService.issueInvoice(selectedIncome.id, {
+                    issueDate: actionForm.issueDate,
+                    dueDate: actionForm.dueDate || undefined,
+                }, selectedIncome.editVersion, getOperationKey(scope));
+            } else if (incomeAction === 'payment' || incomeAction === 'refund') {
+                await invoiceService.registerPayment(selectedIncome.id, {
+                    type: incomeAction === 'refund' ? 'refund' : 'payment',
+                    amountMinor: plnToMinor(actionForm.paymentAmount),
+                    paymentDate: actionForm.paymentDate,
+                    paymentMethod: actionForm.paymentMethod,
+                    ...(incomeAction === 'refund' ? { reversesPaymentId: actionForm.reversesPaymentId } : {}),
+                }, selectedIncome.editVersion, getOperationKey(scope));
+            } else if (incomeAction === 'cancel') {
+                if (!actionForm.reason.trim()) throw new Error('Podaj powód anulowania faktury.');
+                await invoiceService.cancelInvoice(selectedIncome.id, {
+                    reason: actionForm.reason.trim(),
+                    cancellationDate: actionForm.issueDate,
+                }, selectedIncome.editVersion, getOperationKey(scope));
+            }
+            completeOperation(scope);
+            closeIncomeAction();
+            toast.success('Operacja została zapisana.');
+            await refreshIncomeAndJob();
+        } catch (error) {
+            reportIncomeError(error);
+        } finally {
+            setIncomeSubmitting(false);
+        }
+    };
+
+    const handleDeleteIncome = async (invoice: InvoiceIncome) => {
+        if (!window.confirm('Usunąć szkic faktury przychodowej?')) return;
+        setIncomeSubmitting(true);
+        try {
+            await invoiceService.deleteInvoiceDraft(invoice.id, invoice.editVersion);
+            toast.success('Szkic faktury został usunięty.');
+            await refreshIncomeAndJob();
+        } catch (error) {
+            reportIncomeError(error);
+        } finally {
+            setIncomeSubmitting(false);
+        }
+    };
+
+    const issuedIncomeInvoices = incomeInvoices.filter(i => i.documentStatus === 'issued');
+    const incomeNet = issuedIncomeInvoices.reduce((s, i) => s + minorToPln(i.amountNetMinor), 0);
+    const incomePaid = issuedIncomeInvoices.reduce((sum, invoice) => {
+        if (invoice.amountGrossMinor <= 0) return sum;
+        return sum + minorToPln(Math.round(invoice.paidAmountMinor * invoice.amountNetMinor / invoice.amountGrossMinor));
+    }, 0);
     const revenueFromOffer = job.revenuePlannedNet || job.totalPlannedRevenueNet || 0;
     const extraWorksRevenue = (job.extraWorks || []).filter(e => e.status === 'zaakceptowana').reduce((s, e) => s + (e.plannedRevenueNet || 0), 0);
     const totalContractRevenue = revenueFromOffer + extraWorksRevenue;
@@ -355,7 +503,13 @@ export default function JobInvoicesTab({ job }: JobInvoicesTabProps) {
                                     <RefreshCw className="w-4 h-4" />
                                 </button>
                                 <button
-                                    onClick={() => { setNewIncome(p => ({ ...p, amountNet: remainingToInvoice })); setShowIncomeForm(!showIncomeForm); }}
+                                    onClick={() => {
+                                        if (!showIncomeForm) {
+                                            setCreateIncomeKey(createInvoiceMutationKey());
+                                            setNewIncome(p => ({ ...p, amountNet: remainingToInvoice.toFixed(2) }));
+                                        }
+                                        setShowIncomeForm(!showIncomeForm);
+                                    }}
                                     className="flex items-center gap-1 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 text-sm font-medium"
                                 >
                                     <Plus className="w-4 h-4" />
@@ -364,32 +518,32 @@ export default function JobInvoicesTab({ job }: JobInvoicesTabProps) {
                             </div>
                         </div>
 
-                        {/* Add form */}
+                        {incomeError && (
+                            <div className={`mb-4 flex items-center justify-between rounded-lg border p-3 text-sm ${incomeConflict ? 'border-amber-300 bg-amber-50 text-amber-900' : 'border-red-200 bg-red-50 text-red-800'}`}>
+                                <span>{incomeError}</span>
+                                <button onClick={fetchIncome} className="ml-3 font-semibold underline">Odśwież dane</button>
+                            </div>
+                        )}
+
+                        {/* Draft creation form */}
                         {showIncomeForm && (
                             <div className="mb-5 p-4 bg-blue-50 rounded-lg border border-blue-200">
-                                <h4 className="text-sm font-semibold text-blue-900 mb-3">Nowa faktura przychodowa</h4>
-                                <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3">
-                                    <div>
-                                        <label className="block text-xs font-medium text-gray-600 mb-1">Nr faktury *</label>
-                                        <input type="text" value={newIncome.invoiceNumber} onChange={e => setNewIncome({ ...newIncome, invoiceNumber: e.target.value })} placeholder="FV/2026/001" className="w-full p-2 rounded-md border border-gray-300 text-sm" />
-                                    </div>
+                                <h4 className="text-sm font-semibold text-blue-900 mb-1">Nowy szkic faktury przychodowej</h4>
+                                <p className="text-xs text-blue-700 mb-3">Numer FV zostanie nadany atomowo przez serwer podczas wystawienia.</p>
+                                <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
                                     <div>
                                         <label className="block text-xs font-medium text-gray-600 mb-1">Opis</label>
                                         <input type="text" value={newIncome.description} onChange={e => setNewIncome({ ...newIncome, description: e.target.value })} placeholder="Za montaż etap 1" className="w-full p-2 rounded-md border border-gray-300 text-sm" />
                                     </div>
                                     <div>
                                         <label className="block text-xs font-medium text-gray-600 mb-1">Kwota netto *</label>
-                                        <input type="number" min="0" step="0.01" value={newIncome.amountNet} onChange={e => setNewIncome({ ...newIncome, amountNet: Number(e.target.value) })} className="w-full p-2 rounded-md border border-gray-300 text-sm" />
+                                        <input type="text" inputMode="decimal" value={newIncome.amountNet} onChange={e => setNewIncome({ ...newIncome, amountNet: e.target.value })} className="w-full p-2 rounded-md border border-gray-300 text-sm" />
                                     </div>
                                     <div>
                                         <label className="block text-xs font-medium text-gray-600 mb-1">VAT %</label>
-                                        <select value={newIncome.vatRate} onChange={e => setNewIncome({ ...newIncome, vatRate: Number(e.target.value) })} className="w-full p-2 rounded-md border border-gray-300 text-sm">
+                                        <select value={newIncome.vatRate} onChange={e => setNewIncome({ ...newIncome, vatRate: Number(e.target.value) as InvoiceVatRate })} className="w-full p-2 rounded-md border border-gray-300 text-sm">
                                             {vatOptions.map(v => <option key={v} value={v}>{v === 0 ? '0% (zw.)' : `${v}%`}</option>)}
                                         </select>
-                                    </div>
-                                    <div>
-                                        <label className="block text-xs font-medium text-gray-600 mb-1">Data wystawienia</label>
-                                        <input type="date" value={newIncome.issueDate} onChange={e => setNewIncome({ ...newIncome, issueDate: e.target.value })} className="w-full p-2 rounded-md border border-gray-300 text-sm" />
                                     </div>
                                     <div>
                                         <label className="block text-xs font-medium text-gray-600 mb-1">Termin płatności</label>
@@ -397,10 +551,10 @@ export default function JobInvoicesTab({ job }: JobInvoicesTabProps) {
                                     </div>
                                 </div>
                                 <div className="flex justify-between items-center mt-3">
-                                    <p className="text-xs text-gray-500">Brutto: <strong>{fmt(newIncome.amountNet * (1 + newIncome.vatRate / 100))}</strong></p>
+                                    <p className="text-xs text-gray-500">Wartości VAT i brutto zostaną przeliczone przez serwer.</p>
                                     <div className="flex gap-2">
-                                        <button onClick={() => setShowIncomeForm(false)} className="px-3 py-1.5 text-sm text-gray-600 hover:text-gray-800">Anuluj</button>
-                                        <button onClick={handleCreateIncome} disabled={!newIncome.invoiceNumber || newIncome.amountNet <= 0} className="px-4 py-1.5 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700 disabled:opacity-50">Zapisz</button>
+                                        <button onClick={() => { setShowIncomeForm(false); setCreateIncomeKey(null); }} className="px-3 py-1.5 text-sm text-gray-600 hover:text-gray-800">Anuluj</button>
+                                        <button onClick={handleCreateIncome} disabled={incomeSubmitting || !newIncome.amountNet} className="px-4 py-1.5 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700 disabled:opacity-50">Zapisz szkic</button>
                                     </div>
                                 </div>
                             </div>
@@ -417,41 +571,58 @@ export default function JobInvoicesTab({ job }: JobInvoicesTabProps) {
                                         <tr className="border-b border-gray-200 text-gray-500 text-xs uppercase tracking-wider">
                                             <th className="py-2 font-medium">Nr faktury</th>
                                             <th className="py-2 font-medium">Opis</th>
-                                            <th className="py-2 font-medium">Data wyst.</th>
+                                            <th className="py-2 font-medium">Data / termin</th>
                                             <th className="py-2 font-medium text-right">Netto</th>
                                             <th className="py-2 font-medium text-right">Brutto</th>
-                                            <th className="py-2 font-medium text-center">Status</th>
+                                            <th className="py-2 font-medium text-right">Zapłacono / pozostało</th>
+                                            <th className="py-2 font-medium text-center">Dokument</th>
+                                            <th className="py-2 font-medium text-center">Płatność</th>
                                             <th className="py-2 font-medium text-right">Akcje</th>
                                         </tr>
                                     </thead>
                                     <tbody className="divide-y divide-gray-100">
                                         {incomeInvoices.map(inv => (
                                             <tr key={inv.id} className="hover:bg-gray-50">
-                                                <td className="py-3 font-mono text-xs font-medium text-gray-900">{inv.invoiceNumber}</td>
+                                                <td className="py-3 font-mono text-xs font-medium text-gray-900">{inv.invoiceNumber || 'Numer po wystawieniu'}</td>
                                                 <td className="py-3 text-gray-600">{inv.description || '-'}</td>
-                                                <td className="py-3 text-gray-600">{new Date(inv.issueDate).toLocaleDateString('pl-PL')}</td>
-                                                <td className="py-3 text-right font-semibold text-gray-900">{fmt(inv.amountNet)}</td>
-                                                <td className="py-3 text-right text-gray-600">{fmt(inv.amountGross)}</td>
-                                                <td className="py-3 text-center">{statusBadge(inv.status)}</td>
+                                                <td className="py-3 text-gray-600 text-xs">
+                                                    <div>{inv.issueDate || 'Szkic'}</div>
+                                                    <div className="text-gray-400">termin: {inv.dueDate || '-'}</div>
+                                                </td>
+                                                <td className="py-3 text-right font-semibold text-gray-900">{fmt(minorToPln(inv.amountNetMinor))}</td>
+                                                <td className="py-3 text-right text-gray-600">{fmt(minorToPln(inv.amountGrossMinor))}</td>
+                                                <td className="py-3 text-right text-xs">
+                                                    <div className="text-green-700">{fmt(minorToPln(inv.paidAmountMinor))}</div>
+                                                    <div className="text-gray-500">{fmt(minorToPln(inv.remainingAmountMinor))}</div>
+                                                </td>
+                                                <td className="py-3 text-center">{documentStatusBadge(inv.documentStatus)}</td>
+                                                <td className="py-3 text-center">{paymentStatusBadge(inv)}</td>
                                                 <td className="py-3 text-right">
                                                     <div className="flex items-center justify-end gap-1">
-                                                        {inv.status === 'pending' && (
-                                                            <button onClick={() => handleMarkIncomePaid(inv.id)} className="p-1.5 text-green-500 hover:text-green-700 hover:bg-green-50 rounded" title="Oznacz opłaconą">
-                                                                <CreditCard className="w-4 h-4" />
-                                                            </button>
+                                                        {inv.documentStatus === 'draft' && (
+                                                            <>
+                                                                <button onClick={() => openIncomeAction('edit', inv)} className="p-1.5 text-blue-500 hover:bg-blue-50 rounded" title="Edytuj szkic"><Edit2 className="w-4 h-4" /></button>
+                                                                <button onClick={() => openIncomeAction('issue', inv)} className="p-1.5 text-indigo-500 hover:bg-indigo-50 rounded" title="Wystaw fakturę"><Send className="w-4 h-4" /></button>
+                                                                <button onClick={() => handleDeleteIncome(inv)} className="p-1.5 text-red-400 hover:bg-red-50 rounded" title="Usuń szkic"><Trash2 className="w-4 h-4" /></button>
+                                                            </>
                                                         )}
-                                                        <button onClick={() => handleDeleteIncome(inv.id)} className="p-1.5 text-red-400 hover:text-red-600 hover:bg-red-50 rounded">
-                                                            <Trash2 className="w-4 h-4" />
-                                                        </button>
+                                                        {inv.documentStatus === 'issued' && (
+                                                            <>
+                                                                {inv.remainingAmountMinor > 0 && <button onClick={() => openIncomeAction('payment', inv)} className="p-1.5 text-green-600 hover:bg-green-50 rounded" title="Zarejestruj wpłatę"><CreditCard className="w-4 h-4" /></button>}
+                                                                <button onClick={() => openIncomeAction('history', inv)} className="p-1.5 text-gray-500 hover:bg-gray-100 rounded" title="Historia wpłat"><History className="w-4 h-4" /></button>
+                                                                {inv.paidAmountMinor === 0 && <button onClick={() => openIncomeAction('cancel', inv)} className="p-1.5 text-red-500 hover:bg-red-50 rounded" title="Anuluj fakturę"><Ban className="w-4 h-4" /></button>}
+                                                            </>
+                                                        )}
+                                                        {inv.documentStatus === 'cancelled' && <button onClick={() => openIncomeAction('history', inv)} className="p-1.5 text-gray-500 hover:bg-gray-100 rounded" title="Historia"><History className="w-4 h-4" /></button>}
                                                     </div>
                                                 </td>
                                             </tr>
                                         ))}
                                         <tr className="font-bold bg-gray-50 border-t-2 border-gray-300">
-                                            <td colSpan={3} className="py-2 pl-2">SUMA</td>
+                                            <td colSpan={3} className="py-2 pl-2">SUMA WYSTAWIONYCH</td>
                                             <td className="py-2 text-right">{fmt(incomeNet)}</td>
-                                            <td className="py-2 text-right text-gray-600">{fmt(incomeInvoices.reduce((s, i) => s + i.amountGross, 0))}</td>
-                                            <td colSpan={2}></td>
+                                            <td className="py-2 text-right text-gray-600">{fmt(issuedIncomeInvoices.reduce((s, i) => s + minorToPln(i.amountGrossMinor), 0))}</td>
+                                            <td colSpan={4}></td>
                                         </tr>
                                     </tbody>
                                 </table>
@@ -687,6 +858,87 @@ export default function JobInvoicesTab({ job }: JobInvoicesTabProps) {
                     </div>
                 </div>
             )}
+
+            <Modal
+                isOpen={!!incomeAction && !!selectedIncome}
+                onClose={closeIncomeAction}
+                title={incomeAction === 'edit' ? 'Edytuj szkic faktury'
+                    : incomeAction === 'issue' ? 'Wystaw fakturę'
+                        : incomeAction === 'payment' ? 'Zarejestruj wpłatę'
+                            : incomeAction === 'refund' ? 'Zarejestruj zwrot'
+                                : incomeAction === 'cancel' ? 'Anuluj fakturę'
+                                    : 'Historia wpłat'}
+            >
+                {selectedIncome && incomeAction === 'history' && (
+                    <div className="space-y-3">
+                        {paymentsLoading ? <p className="text-sm text-gray-500">Ładowanie historii...</p>
+                            : incomePayments.length === 0 ? <p className="text-sm text-gray-500">Brak zarejestrowanych wpłat.</p>
+                                : incomePayments.map(payment => {
+                                    const refunded = incomePayments
+                                        .filter(item => item.type === 'refund' && item.reversesPaymentId === payment.id)
+                                        .reduce((sum, item) => sum + item.amountMinor, 0);
+                                    const refundable = payment.type === 'payment' ? Math.max(0, payment.amountMinor - refunded) : 0;
+                                    return (
+                                        <div key={payment.id} className="flex items-center justify-between rounded-lg border border-gray-200 p-3 text-sm">
+                                            <div>
+                                                <p className="font-medium text-gray-900">{payment.type === 'payment' ? 'Wpłata' : 'Zwrot'} · {fmt(minorToPln(payment.amountMinor))}</p>
+                                                <p className="text-xs text-gray-500">{payment.paymentDate} · {payment.paymentMethod} · sekwencja {payment.sequence}</p>
+                                            </div>
+                                            {refundable > 0 && selectedIncome.documentStatus === 'issued' && (
+                                                <button
+                                                    onClick={() => openIncomeAction('refund', selectedIncome, { ...payment, amountMinor: refundable })}
+                                                    className="inline-flex items-center gap-1 rounded-md px-3 py-1.5 text-xs font-medium text-amber-700 hover:bg-amber-50"
+                                                >
+                                                    <RotateCcw className="h-3.5 w-3.5" /> Zwrot
+                                                </button>
+                                            )}
+                                        </div>
+                                    );
+                                })}
+                        <div className="flex justify-end"><button onClick={closeIncomeAction} className="rounded-lg bg-gray-100 px-4 py-2 text-sm text-gray-700">Zamknij</button></div>
+                    </div>
+                )}
+
+                {selectedIncome && incomeAction === 'edit' && (
+                    <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                        <label className="text-sm text-gray-700">Opis<input className="mt-1 w-full rounded-md border p-2" value={actionForm.description} onChange={e => setActionForm({ ...actionForm, description: e.target.value })} /></label>
+                        <label className="text-sm text-gray-700">Kwota netto<input className="mt-1 w-full rounded-md border p-2" inputMode="decimal" value={actionForm.amountNet} onChange={e => setActionForm({ ...actionForm, amountNet: e.target.value })} /></label>
+                        <label className="text-sm text-gray-700">VAT<select className="mt-1 w-full rounded-md border p-2" value={actionForm.vatRate} onChange={e => setActionForm({ ...actionForm, vatRate: Number(e.target.value) as InvoiceVatRate })}>{vatOptions.map(v => <option key={v} value={v}>{v}%</option>)}</select></label>
+                        <label className="text-sm text-gray-700">Termin płatności<input type="date" className="mt-1 w-full rounded-md border p-2" value={actionForm.dueDate} onChange={e => setActionForm({ ...actionForm, dueDate: e.target.value })} /></label>
+                    </div>
+                )}
+
+                {selectedIncome && incomeAction === 'issue' && (
+                    <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                        <label className="text-sm text-gray-700">Data wystawienia<input type="date" className="mt-1 w-full rounded-md border p-2" value={actionForm.issueDate} onChange={e => setActionForm({ ...actionForm, issueDate: e.target.value })} /></label>
+                        <label className="text-sm text-gray-700">Termin płatności<input type="date" className="mt-1 w-full rounded-md border p-2" value={actionForm.dueDate} onChange={e => setActionForm({ ...actionForm, dueDate: e.target.value })} /></label>
+                        <p className="sm:col-span-2 rounded-md bg-blue-50 p-3 text-sm text-blue-800">Po wystawieniu serwer nada numer FV. Dokumentu nie będzie można już edytować ani usunąć.</p>
+                    </div>
+                )}
+
+                {selectedIncome && (incomeAction === 'payment' || incomeAction === 'refund') && (
+                    <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+                        <label className="text-sm text-gray-700">Kwota brutto<input className="mt-1 w-full rounded-md border p-2" inputMode="decimal" value={actionForm.paymentAmount} onChange={e => setActionForm({ ...actionForm, paymentAmount: e.target.value })} /></label>
+                        <label className="text-sm text-gray-700">Data<input type="date" className="mt-1 w-full rounded-md border p-2" value={actionForm.paymentDate} onChange={e => setActionForm({ ...actionForm, paymentDate: e.target.value })} /></label>
+                        <label className="text-sm text-gray-700">Metoda<select className="mt-1 w-full rounded-md border p-2" value={actionForm.paymentMethod} onChange={e => setActionForm({ ...actionForm, paymentMethod: e.target.value as InvoicePaymentMethod })}><option value="transfer">Przelew</option><option value="cash">Gotówka</option><option value="card">Karta</option><option value="blik">BLIK</option><option value="other">Inna</option></select></label>
+                        {incomeAction === 'refund' && <p className="sm:col-span-3 text-xs text-amber-700">Zwrot zostanie powiązany z wybraną wpłatą. Backend zablokuje przekroczenie jej nierozliczonego salda.</p>}
+                    </div>
+                )}
+
+                {selectedIncome && incomeAction === 'cancel' && (
+                    <div className="space-y-3">
+                        <label className="block text-sm text-gray-700">Data anulowania<input type="date" className="mt-1 w-full rounded-md border p-2" value={actionForm.issueDate} onChange={e => setActionForm({ ...actionForm, issueDate: e.target.value })} /></label>
+                        <label className="block text-sm text-gray-700">Powód<textarea className="mt-1 w-full rounded-md border p-2" value={actionForm.reason} onChange={e => setActionForm({ ...actionForm, reason: e.target.value })} /></label>
+                    </div>
+                )}
+
+                {selectedIncome && incomeAction && incomeAction !== 'history' && (
+                    <div className="mt-5 flex justify-end gap-2">
+                        <button onClick={closeIncomeAction} disabled={incomeSubmitting} className="rounded-lg px-4 py-2 text-sm text-gray-600">Anuluj</button>
+                        <button onClick={handleIncomeAction} disabled={incomeSubmitting} className="rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white disabled:opacity-50">{incomeSubmitting ? 'Zapisywanie...' : 'Zapisz'}</button>
+                    </div>
+                )}
+            </Modal>
         </div>
     );
 }

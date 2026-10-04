@@ -1,6 +1,8 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { Link } from 'react-router-dom';
 import { useJobs } from '../context/JobsContext';
+import type { InvoiceDocument } from '../../shared/contracts/invoice.generated';
+import { invoiceService, isInvoiceOverdue } from '../services/data/invoiceService';
 import {
     Plus, X, ChevronDown, TrendingDown, TrendingUp,
     Clock, ArrowRight, RefreshCw, Trash2, Edit2
@@ -36,12 +38,7 @@ interface CostInvoice {
     vatRate: number; status: 'pending' | 'paid'; issueDate: string; dueDate?: string;
     createdAt: string;
 }
-interface IncomeInvoice {
-    id: string; jobId: string; invoiceNumber: string; issuedTo?: string;
-    description?: string; amountNet: number; amountGross: number; vatRate?: number;
-    status: 'pending' | 'paid' | 'draft'; issueDate?: string; dueDate?: string;
-    createdAt: string; type?: string;
-}
+// Replaced by contract InvoiceDocument
 
 /* ─── Default form ───────────────────────────────────────────────────────── */
 const defaultCostForm = () => ({
@@ -130,19 +127,20 @@ export default function OrdersPage() {
         await fetchCost(); setEditingCostId(null);
     };
 
-    /* ── Income invoices ── */
-    const [incomeInvoices, setIncomeInvoices] = useState<IncomeInvoice[]>([]);
+    /* ── Income invoices (contract InvoiceDocument & invoiceService) ── */
+    const [incomeInvoices, setIncomeInvoices] = useState<InvoiceDocument[]>([]);
     const [incomeLoading, setIncomeLoading] = useState(false);
 
     const fetchIncome = useCallback(async () => {
         setIncomeLoading(true);
         try {
-            const res = await fetch(`${API_BASE}/invoices`, { headers: getH() });
-            if (res.ok) {
-                const data = await res.json();
-                setIncomeInvoices(Array.isArray(data) ? data : data?.data ?? data?.invoices ?? []);
-            }
-        } catch { /* silent */ } finally { setIncomeLoading(false); }
+            const data = await invoiceService.getAllInvoices();
+            setIncomeInvoices(data);
+        } catch (err) {
+            console.error('Failed to fetch income invoices:', err);
+        } finally {
+            setIncomeLoading(false);
+        }
     }, []);
     useEffect(() => { if (activeTab === 'income' || activeTab === 'pending') fetchIncome(); }, [activeTab, fetchIncome]);
 
@@ -152,7 +150,10 @@ export default function OrdersPage() {
     );
 
     /* ── Derived ── */
-    const pendingIncome = incomeInvoices.filter(i => i.status === 'pending' || i.status === 'draft');
+    const pendingIncome = incomeInvoices.filter(i =>
+        i.documentStatus === 'draft' ||
+        (i.documentStatus === 'issued' && (i.paymentStatus === 'unpaid' || i.paymentStatus === 'partial'))
+    );
     const jobName = (jobId: string) => {
         const j = jobs.find(x => x.id === jobId);
         return j ? `${j.jobCode} — ${j.name}` : jobId;
@@ -162,8 +163,13 @@ export default function OrdersPage() {
     const costTotal = costInvoices.reduce((s, i) => s + i.amountNet, 0)
         + allLegacyExpenses.reduce((s, e) => s + e.amountNet, 0);
     const costPaid = costInvoices.filter(i => i.status === 'paid').reduce((s, i) => s + i.amountNet, 0);
-    const incomeTotal = incomeInvoices.reduce((s, i) => s + i.amountNet, 0);
-    const incomePaid = incomeInvoices.filter(i => i.status === 'paid').reduce((s, i) => s + i.amountNet, 0);
+
+    /* ── Income Stats (calculated strictly from issued invoices minor units) ── */
+    const issuedIncome = incomeInvoices.filter(i => i.documentStatus === 'issued');
+    const incomeTotalNet = issuedIncome.reduce((s, i) => s + (i.amountNetMinor || 0) / 100, 0);
+    const incomeTotalGross = issuedIncome.reduce((s, i) => s + (i.amountGrossMinor || 0) / 100, 0);
+    const incomePaidGross = issuedIncome.reduce((s, i) => s + (i.paidAmountMinor || 0) / 100, 0);
+    const incomeRemainingGross = issuedIncome.reduce((s, i) => s + (i.remainingAmountMinor || 0) / 100, 0);
 
     /* ─── Tab header helper ─────────────────────────────────────────────── */
     const tabs: { key: Tab; label: string; icon: React.ReactNode; count: number; color: string }[] = [
@@ -410,10 +416,22 @@ export default function OrdersPage() {
                 <div className="space-y-5">
                     {/* Stats */}
                     <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-                        <div className="bg-white p-4 rounded-xl border border-gray-100 shadow-sm text-center"><p className="text-xs text-gray-500 mb-1">Łączna liczba</p><p className="text-2xl font-bold text-gray-800">{incomeInvoices.length}</p></div>
-                        <div className="bg-green-50 p-4 rounded-xl border border-green-100 shadow-sm text-center"><p className="text-xs text-green-700 mb-1">Łączny przychód netto</p><p className="text-base font-bold text-green-800">{fmt(incomeTotal)}</p></div>
-                        <div className="bg-blue-50 p-4 rounded-xl border border-blue-100 shadow-sm text-center"><p className="text-xs text-blue-700 mb-1">Opłacone</p><p className="text-base font-bold text-blue-700">{fmt(incomePaid)}</p></div>
-                        <div className={`p-4 rounded-xl border shadow-sm text-center ${incomeTotal - incomePaid > 0 ? 'bg-amber-50 border-amber-200' : 'bg-gray-50 border-gray-100'}`}><p className="text-xs text-gray-500 mb-1">Do zapłaty</p><p className={`text-base font-bold ${incomeTotal - incomePaid > 0 ? 'text-amber-700' : 'text-gray-400'}`}>{fmt(incomeTotal - incomePaid)}</p></div>
+                        <div className="bg-white p-4 rounded-xl border border-gray-100 shadow-sm text-center">
+                            <p className="text-xs text-gray-500 mb-1">Łączna liczba</p>
+                            <p className="text-2xl font-bold text-gray-800">{incomeInvoices.length}</p>
+                        </div>
+                        <div className="bg-green-50 p-4 rounded-xl border border-green-100 shadow-sm text-center">
+                            <p className="text-xs text-green-700 mb-1">Zafakturowany przychód netto</p>
+                            <p className="text-base font-bold text-green-800">{fmt(incomeTotalNet)}</p>
+                        </div>
+                        <div className="bg-blue-50 p-4 rounded-xl border border-blue-100 shadow-sm text-center">
+                            <p className="text-xs text-blue-700 mb-1">Opłacone (brutto)</p>
+                            <p className="text-base font-bold text-blue-700">{fmt(incomePaidGross)}</p>
+                        </div>
+                        <div className={`p-4 rounded-xl border shadow-sm text-center ${incomeRemainingGross > 0 ? 'bg-amber-50 border-amber-200' : 'bg-gray-50 border-gray-100'}`}>
+                            <p className="text-xs text-gray-500 mb-1">Do zapłaty (brutto)</p>
+                            <p className={`text-base font-bold ${incomeRemainingGross > 0 ? 'text-amber-700' : 'text-gray-400'}`}>{fmt(incomeRemainingGross)}</p>
+                        </div>
                     </div>
 
                     {incomeLoading ? (
@@ -427,7 +445,7 @@ export default function OrdersPage() {
                                     <tr className="border-b border-gray-200 bg-gray-50 text-gray-500 text-xs uppercase tracking-wider">
                                         <th className="py-3 px-4">Nr faktury</th>
                                         <th className="py-3 px-4">Zlecenie</th>
-                                        <th className="py-3 px-4">Wystawiona dla</th>
+                                        <th className="py-3 px-4">Klient</th>
                                         <th className="py-3 px-4">Opis</th>
                                         <th className="py-3 px-4">Data</th>
                                         <th className="py-3 px-4 text-right">Netto</th>
@@ -437,37 +455,55 @@ export default function OrdersPage() {
                                     </tr>
                                 </thead>
                                 <tbody className="divide-y divide-gray-100">
-                                    {incomeInvoices.map(inv => (
-                                        <tr key={inv.id} className="hover:bg-gray-50">
-                                            <td className="py-2.5 px-4 font-mono text-xs font-medium">{inv.invoiceNumber}</td>
-                                            <td className="py-2.5 px-4 text-xs">
-                                                <Link to={`/orders/${inv.jobId}`} className="text-blue-600 hover:underline">{jobName(inv.jobId)}</Link>
-                                            </td>
-                                            <td className="py-2.5 px-4 text-gray-600">{inv.issuedTo || '-'}</td>
-                                            <td className="py-2.5 px-4 text-gray-600 max-w-[140px] truncate">{inv.description || '-'}</td>
-                                            <td className="py-2.5 px-4 text-gray-500 text-xs">{inv.issueDate ? new Date(inv.issueDate).toLocaleDateString('pl-PL') : '-'}</td>
-                                            <td className="py-2.5 px-4 text-right font-semibold text-green-700">{fmt(inv.amountNet)}</td>
-                                            <td className="py-2.5 px-4 text-right text-gray-600">{fmt(inv.amountGross)}</td>
-                                            <td className="py-2.5 px-4 text-center">
-                                                {inv.status === 'paid'
-                                                    ? <span className="text-xs bg-green-100 text-green-800 px-2 py-0.5 rounded-full">Opłacona</span>
-                                                    : inv.status === 'draft'
-                                                        ? <span className="text-xs bg-gray-100 text-gray-600 px-2 py-0.5 rounded-full">Szkic</span>
-                                                        : <span className="text-xs bg-amber-100 text-amber-800 px-2 py-0.5 rounded-full">Oczekująca</span>}
-                                            </td>
-                                            <td className="py-2.5 px-4 text-right">
-                                                <Link to={`/orders/${inv.jobId}`} className="p-1.5 text-blue-400 hover:text-blue-600 hover:bg-blue-50 rounded inline-flex" title="Otwórz zlecenie">
-                                                    <ArrowRight className="w-4 h-4" />
-                                                </Link>
-                                            </td>
-                                        </tr>
-                                    ))}
+                                    {incomeInvoices.map(inv => {
+                                        const overdue = isInvoiceOverdue(inv);
+                                        const net = (inv.amountNetMinor || 0) / 100;
+                                        const gross = (inv.amountGrossMinor || 0) / 100;
+                                        const client = jobs.find(x => x.id === inv.jobId)?.clientName || inv.clientId || '-';
+                                        const displayDate = inv.issueDate
+                                            ? new Date(inv.issueDate).toLocaleDateString('pl-PL')
+                                            : (inv.createdAt ? new Date(inv.createdAt).toLocaleDateString('pl-PL') : '-');
+
+                                        return (
+                                            <tr key={inv.id} className="hover:bg-gray-50">
+                                                <td className="py-2.5 px-4 font-mono text-xs font-medium">{inv.invoiceNumber || '(Szkic)'}</td>
+                                                <td className="py-2.5 px-4 text-xs">
+                                                    <Link to={`/orders/${inv.jobId}`} className="text-blue-600 hover:underline">{jobName(inv.jobId)}</Link>
+                                                </td>
+                                                <td className="py-2.5 px-4 text-gray-600">{client}</td>
+                                                <td className="py-2.5 px-4 text-gray-600 max-w-[140px] truncate">{inv.description || '-'}</td>
+                                                <td className="py-2.5 px-4 text-gray-500 text-xs">{displayDate}</td>
+                                                <td className="py-2.5 px-4 text-right font-semibold text-green-700">{fmt(net)}</td>
+                                                <td className="py-2.5 px-4 text-right text-gray-600">{fmt(gross)}</td>
+                                                <td className="py-2.5 px-4 text-center">
+                                                    {inv.documentStatus === 'cancelled' ? (
+                                                        <span className="text-xs bg-red-100 text-red-800 px-2 py-0.5 rounded-full font-medium">Anulowana</span>
+                                                    ) : inv.documentStatus === 'draft' ? (
+                                                        <span className="text-xs bg-gray-100 text-gray-700 px-2 py-0.5 rounded-full font-medium">Szkic</span>
+                                                    ) : overdue ? (
+                                                        <span className="text-xs bg-red-100 text-red-800 px-2 py-0.5 rounded-full font-medium">Przeterminowana</span>
+                                                    ) : inv.paymentStatus === 'paid' ? (
+                                                        <span className="text-xs bg-green-100 text-green-800 px-2 py-0.5 rounded-full font-medium">Opłacona</span>
+                                                    ) : inv.paymentStatus === 'partial' ? (
+                                                        <span className="text-xs bg-amber-100 text-amber-800 px-2 py-0.5 rounded-full font-medium">Częściowa ({fmt((inv.paidAmountMinor || 0) / 100)})</span>
+                                                    ) : (
+                                                        <span className="text-xs bg-blue-100 text-blue-800 px-2 py-0.5 rounded-full font-medium">Wystawiona</span>
+                                                    )}
+                                                </td>
+                                                <td className="py-2.5 px-4 text-right">
+                                                    <Link to={`/orders/${inv.jobId}`} className="p-1.5 text-blue-400 hover:text-blue-600 hover:bg-blue-50 rounded inline-flex" title="Otwórz zlecenie">
+                                                        <ArrowRight className="w-4 h-4" />
+                                                    </Link>
+                                                </td>
+                                            </tr>
+                                        );
+                                    })}
                                 </tbody>
                                 <tfoot>
                                     <tr className="bg-green-50 border-t-2 border-gray-200 font-bold">
-                                        <td colSpan={5} className="py-2.5 px-4">SUMA</td>
-                                        <td className="py-2.5 px-4 text-right text-green-700">{fmt(incomeTotal)}</td>
-                                        <td className="py-2.5 px-4 text-right text-gray-600">{fmt(incomeInvoices.reduce((s, i) => s + i.amountGross, 0))}</td>
+                                        <td colSpan={5} className="py-2.5 px-4">SUMA WYSTAWIONYCH</td>
+                                        <td className="py-2.5 px-4 text-right text-green-700">{fmt(incomeTotalNet)}</td>
+                                        <td className="py-2.5 px-4 text-right text-gray-600">{fmt(incomeTotalGross)}</td>
                                         <td colSpan={2}></td>
                                     </tr>
                                 </tfoot>
@@ -477,19 +513,19 @@ export default function OrdersPage() {
                 </div>
             )}
 
-            {/* ══════════════ TAB: DO WYSTAWIENIA ══════════════════════════ */}
+            {/* ══════════════ TAB: DO WYSTAWIENIA / OCZEKUJĄCE ══════════════════ */}
             {activeTab === 'pending' && (
                 <div className="space-y-5">
                     <div className="bg-amber-50 border border-amber-200 rounded-xl px-4 py-3 text-sm text-amber-800 flex items-center gap-2">
                         <Clock className="w-4 h-4 flex-shrink-0" />
-                        Faktury przychodowe w statusie <strong>Oczekująca</strong> lub <strong>Szkic</strong> — do opłacenia lub wystawienia przez klienta.
+                        Faktury przychodowe wymagające działania: <strong>Szkice</strong> (do wystawienia) oraz <strong>Wystawione</strong> (do opłacenia / częściowo opłacone).
                     </div>
 
                     {incomeLoading ? (
                         <div className="flex items-center justify-center py-10 gap-2 text-gray-400"><RefreshCw className="w-5 h-5 animate-spin" /> Ładowanie...</div>
                     ) : pendingIncome.length === 0 ? (
                         <div className="bg-white rounded-xl border border-gray-100 p-10 text-center text-gray-500 italic">
-                            Wszystkie faktury przychodowe są opłacone. ✅
+                            Brak oczekujących faktur. Wszystkie wystawione faktury zostały opłacone i brak otwartych szkiców. ✅
                         </div>
                     ) : (
                         <div className="bg-white rounded-2xl shadow-sm border border-gray-100 overflow-hidden">
@@ -498,35 +534,47 @@ export default function OrdersPage() {
                                     <tr className="border-b border-gray-200 bg-amber-50 text-gray-500 text-xs uppercase tracking-wider">
                                         <th className="py-3 px-4">Nr faktury</th>
                                         <th className="py-3 px-4">Zlecenie</th>
-                                        <th className="py-3 px-4">Wystawiona dla</th>
-                                        <th className="py-3 px-4">Data</th>
-                                        <th className="py-3 px-4">Termin</th>
-                                        <th className="py-3 px-4 text-right">Netto</th>
+                                        <th className="py-3 px-4">Klient</th>
+                                        <th className="py-3 px-4">Data wyst.</th>
+                                        <th className="py-3 px-4">Termin płatności</th>
+                                        <th className="py-3 px-4 text-right">Do zapłaty (brutto)</th>
                                         <th className="py-3 px-4 text-center">Status</th>
                                         <th className="py-3 px-4 text-right">Działania</th>
                                     </tr>
                                 </thead>
                                 <tbody className="divide-y divide-gray-100">
                                     {pendingIncome.map(inv => {
-                                        const isOverdue = inv.dueDate && new Date(inv.dueDate) < new Date();
+                                        const overdue = isInvoiceOverdue(inv);
+                                        const isDraft = inv.documentStatus === 'draft';
+                                        const client = jobs.find(x => x.id === inv.jobId)?.clientName || inv.clientId || '-';
+                                        const dueAmount = isDraft
+                                            ? (inv.amountGrossMinor || 0) / 100
+                                            : (inv.remainingAmountMinor || 0) / 100;
+
                                         return (
-                                            <tr key={inv.id} className={isOverdue ? 'bg-red-50 hover:bg-red-100/50' : 'hover:bg-amber-50/30'}>
-                                                <td className="py-2.5 px-4 font-mono text-xs font-medium">{inv.invoiceNumber}</td>
+                                            <tr key={inv.id} className={overdue ? 'bg-red-50 hover:bg-red-100/50' : 'hover:bg-amber-50/30'}>
+                                                <td className="py-2.5 px-4 font-mono text-xs font-medium">{inv.invoiceNumber || '(Szkic)'}</td>
                                                 <td className="py-2.5 px-4 text-xs">
                                                     <Link to={`/orders/${inv.jobId}`} className="text-blue-600 hover:underline">{jobName(inv.jobId)}</Link>
                                                 </td>
-                                                <td className="py-2.5 px-4 text-gray-600">{inv.issuedTo || '-'}</td>
+                                                <td className="py-2.5 px-4 text-gray-600">{client}</td>
                                                 <td className="py-2.5 px-4 text-gray-500 text-xs">{inv.issueDate ? new Date(inv.issueDate).toLocaleDateString('pl-PL') : '-'}</td>
                                                 <td className="py-2.5 px-4 text-xs">
                                                     {inv.dueDate
-                                                        ? <span className={isOverdue ? 'text-red-600 font-bold' : 'text-gray-600'}>{new Date(inv.dueDate).toLocaleDateString('pl-PL')}{isOverdue && ' ⚠️'}</span>
+                                                        ? <span className={overdue ? 'text-red-600 font-bold' : 'text-gray-600'}>{new Date(inv.dueDate).toLocaleDateString('pl-PL')}{overdue && ' ⚠️'}</span>
                                                         : '-'}
                                                 </td>
-                                                <td className="py-2.5 px-4 text-right font-semibold text-green-700">{fmt(inv.amountNet)}</td>
+                                                <td className="py-2.5 px-4 text-right font-semibold text-amber-700">{fmt(dueAmount)}</td>
                                                 <td className="py-2.5 px-4 text-center">
-                                                    {inv.status === 'draft'
-                                                        ? <span className="text-xs bg-gray-100 text-gray-600 px-2 py-0.5 rounded-full">Szkic</span>
-                                                        : <span className="text-xs bg-amber-100 text-amber-800 px-2 py-0.5 rounded-full">Oczekująca</span>}
+                                                    {isDraft ? (
+                                                        <span className="text-xs bg-gray-100 text-gray-700 px-2 py-0.5 rounded-full font-medium">Szkic (do wystawienia)</span>
+                                                    ) : overdue ? (
+                                                        <span className="text-xs bg-red-100 text-red-800 px-2 py-0.5 rounded-full font-medium">Przeterminowana ⚠️</span>
+                                                    ) : inv.paymentStatus === 'partial' ? (
+                                                        <span className="text-xs bg-amber-100 text-amber-800 px-2 py-0.5 rounded-full font-medium">Częściowa (pozostało {fmt(dueAmount)})</span>
+                                                    ) : (
+                                                        <span className="text-xs bg-blue-100 text-blue-800 px-2 py-0.5 rounded-full font-medium">Do zapłaty</span>
+                                                    )}
                                                 </td>
                                                 <td className="py-2.5 px-4 text-right">
                                                     <Link to={`/orders/${inv.jobId}`} className="inline-flex items-center gap-1 text-xs text-blue-600 hover:text-blue-800 font-medium">
@@ -539,8 +587,10 @@ export default function OrdersPage() {
                                 </tbody>
                                 <tfoot>
                                     <tr className="bg-amber-50 border-t-2 border-amber-200 font-bold">
-                                        <td colSpan={5} className="py-2.5 px-4">SUMA OCZEKUJĄCYCH</td>
-                                        <td className="py-2.5 px-4 text-right text-amber-700">{fmt(pendingIncome.reduce((s, i) => s + i.amountNet, 0))}</td>
+                                        <td colSpan={5} className="py-2.5 px-4">SUMA OCZEKUJĄCYCH (BRUTTO)</td>
+                                        <td className="py-2.5 px-4 text-right text-amber-700">
+                                            {fmt(pendingIncome.reduce((s, i) => s + (i.documentStatus === 'draft' ? (i.amountGrossMinor || 0) / 100 : (i.remainingAmountMinor || 0) / 100), 0))}
+                                        </td>
                                         <td colSpan={2}></td>
                                     </tr>
                                 </tfoot>
