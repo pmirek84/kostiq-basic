@@ -17,6 +17,11 @@ const CONTRACTS_CONFIG = [
     schemaRelPath: 'shared/contracts/offer.schema.json',
     outputRelPath: 'shared/contracts/offer.generated.ts',
     rootTitle: 'OfferRoot'
+  },
+  {
+    schemaRelPath: 'shared/contracts/invoice.schema.json',
+    outputRelPath: 'shared/contracts/invoice.generated.ts',
+    rootTitle: 'InvoiceRoot'
   }
 ];
 

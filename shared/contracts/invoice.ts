@@ -1,17 +1,63 @@
-const timeEntrySchema = require('./timeEntry.schema.json');
-const jobSchema = require('./job.schema.json');
-const offerSchema = require('./offer.schema.json');
-const invoiceSchema = require('./invoice.schema.json');
+import schema from './invoice.schema.json';
+export * from './invoice.generated';
 
-const INVOICE_DOCUMENT_STATUSES = Object.freeze([...invoiceSchema.definitions.InvoiceDocumentStatus.enum]);
-const INVOICE_IMPORT_DOCUMENT_STATUSES = Object.freeze([...invoiceSchema.definitions.InvoiceImportDocumentStatus.enum]);
-const INVOICE_PAYMENT_STATUSES = Object.freeze([...invoiceSchema.definitions.InvoicePaymentStatus.enum]);
-const INVOICE_VAT_RATES = Object.freeze([...invoiceSchema.definitions.InvoiceVatRate.enum]);
-const INVOICE_CURRENCIES = Object.freeze([...invoiceSchema.definitions.InvoiceCurrency.enum]);
-const INVOICE_PAYMENT_METHODS = Object.freeze([...invoiceSchema.definitions.InvoicePaymentMethod.enum]);
-const INVOICE_PAYMENT_TYPES = Object.freeze([...invoiceSchema.definitions.InvoicePaymentType.enum]);
+import type {
+  InvoiceDocumentStatus,
+  InvoiceImportDocumentStatus,
+  InvoicePaymentStatus,
+  InvoiceVatRate,
+  InvoiceCurrency,
+  InvoicePaymentMethod,
+  InvoicePaymentType
+} from './invoice.generated';
 
-function getWarsawDateString(date = new Date()) {
+export const INVOICE_SCHEMA = schema;
+
+export const INVOICE_DOCUMENT_STATUSES: readonly InvoiceDocumentStatus[] = Object.freeze([
+  'draft',
+  'issued',
+  'cancelled'
+]);
+
+export const INVOICE_IMPORT_DOCUMENT_STATUSES: readonly InvoiceImportDocumentStatus[] = Object.freeze([
+  'issued',
+  'cancelled'
+]);
+
+export const INVOICE_PAYMENT_STATUSES: readonly InvoicePaymentStatus[] = Object.freeze([
+  'unpaid',
+  'partial',
+  'paid'
+]);
+
+export const INVOICE_VAT_RATES: readonly InvoiceVatRate[] = Object.freeze([
+  0,
+  5,
+  8,
+  23
+]);
+
+export const INVOICE_CURRENCIES: readonly InvoiceCurrency[] = Object.freeze([
+  'PLN'
+]);
+
+export const INVOICE_PAYMENT_METHODS: readonly InvoicePaymentMethod[] = Object.freeze([
+  'transfer',
+  'cash',
+  'card',
+  'blik',
+  'other'
+]);
+
+export const INVOICE_PAYMENT_TYPES: readonly InvoicePaymentType[] = Object.freeze([
+  'payment',
+  'refund'
+]);
+
+/**
+ * Returns YYYY-MM-DD calendar date in Europe/Warsaw timezone.
+ */
+export function getWarsawDateString(date: Date = new Date()): string {
   return new Intl.DateTimeFormat('en-CA', {
     timeZone: 'Europe/Warsaw',
     year: 'numeric',
@@ -20,7 +66,11 @@ function getWarsawDateString(date = new Date()) {
   }).format(date);
 }
 
-function isInvoiceOverdue(doc, referenceDateStr) {
+/**
+ * Calculates whether an issued invoice is currently overdue in Europe/Warsaw timezone.
+ * Note: overdue is a dynamic computed attribute based on Warsaw date, not a stored state.
+ */
+export function isInvoiceOverdue(doc: { documentStatus: string; paymentStatus: string; dueDate?: string | null }, referenceDateStr?: string): boolean {
   if (doc.documentStatus !== 'issued') return false;
   if (doc.paymentStatus === 'paid') return false;
   if (!doc.dueDate) return false;
@@ -28,11 +78,15 @@ function isInvoiceOverdue(doc, referenceDateStr) {
   return doc.dueDate < today;
 }
 
-function validateInvoiceDomainRules(doc) {
+/**
+ * Domain validator ensuring invariant relations across document statuses, number formats, VAT calculations, and amounts.
+ */
+export function validateInvoiceDomainRules(doc: any): boolean {
   if (!doc || typeof doc !== 'object') {
     throw new Error('Dokument faktury musi być obiektem.');
   }
 
+  // 1. Lifecycle status rules
   if (doc.documentStatus === 'draft') {
     if (doc.invoiceNumber !== null && doc.invoiceNumber !== undefined) {
       throw new Error(`Szkic faktury nie może posiadać przydzielonego numeru (otrzymano: '${doc.invoiceNumber}').`);
@@ -95,6 +149,7 @@ function validateInvoiceDomainRules(doc) {
     throw new Error(`Nieznany documentStatus faktury: '${doc.documentStatus}'.`);
   }
 
+  // 2. Amount and VAT parity
   if (typeof doc.amountNetMinor !== 'number' || doc.amountNetMinor < 0 || !Number.isInteger(doc.amountNetMinor)) {
     throw new Error(`Nieprawidłowa kwota netto amountNetMinor: ${doc.amountNetMinor}.`);
   }
@@ -108,6 +163,7 @@ function validateInvoiceDomainRules(doc) {
     throw new Error(`Niezgodność sumy brutto: amountGrossMinor (${doc.amountGrossMinor}) != net (${doc.amountNetMinor}) + vat (${doc.vatAmountMinor}).`);
   }
 
+  // 3. Items consistency or simplified header verification
   if (Array.isArray(doc.items) && doc.items.length > 0) {
     if (doc.vatRate !== null) {
       throw new Error(`Dla faktury pozycyjnej nagłówkowy vatRate musi wynosić null (otrzymano: ${doc.vatRate}). Stawki VAT wynikają z pozycji.`);
@@ -155,6 +211,7 @@ function validateInvoiceDomainRules(doc) {
     }
   }
 
+  // 4. Payment status, paidAmountMinor, and remainingAmountMinor parity
   if (typeof doc.paidAmountMinor !== 'number' || doc.paidAmountMinor < 0 || !Number.isInteger(doc.paidAmountMinor)) {
     throw new Error(`Nieprawidłowa kwota opłacona paidAmountMinor: ${doc.paidAmountMinor}.`);
   }
@@ -183,7 +240,12 @@ function validateInvoiceDomainRules(doc) {
   return true;
 }
 
-function validateInvoicePaymentsLedger(payments = [], options = {}) {
+/**
+ * Validates the deterministic sequence of payments/refunds in import or ledger.
+ * Enforces per-paymentId balance tracking (cannot refund more than the specific payment) and sequential ordering.
+ * Returns the final calculated paidAmountMinor (net collected cash).
+ */
+export function validateInvoicePaymentsLedger(payments: any[] = [], options: { isCancelled?: boolean; amountGrossMinor?: number } = {}): number {
   if (!Array.isArray(payments)) {
     throw new Error('Płatności muszą być tablicą zdarzeń.');
   }
@@ -192,8 +254,8 @@ function validateInvoicePaymentsLedger(payments = [], options = {}) {
   let runningBalance = 0;
   let lastSequence = 0;
   let lastDate = '';
-  const eventIds = new Set();
-  const paymentBalanceMap = new Map();
+  const eventIds = new Set<string>();
+  const paymentBalanceMap = new Map<string, number>();
 
   for (let i = 0; i < payments.length; i++) {
     const p = payments[i];
@@ -232,7 +294,7 @@ function validateInvoicePaymentsLedger(payments = [], options = {}) {
       if (!paymentBalanceMap.has(p.reversesPaymentId)) {
         throw new Error(`Zwrot #${i + 1} odwołuje się do nieznanego wcześniejszego ID wpłaty: '${p.reversesPaymentId}'.`);
       }
-      const availablePaymentBalance = paymentBalanceMap.get(p.reversesPaymentId);
+      const availablePaymentBalance = paymentBalanceMap.get(p.reversesPaymentId)!;
       if (p.amountMinor > availablePaymentBalance) {
         throw new Error(`Zwrot #${i + 1} (${p.amountMinor}) przewyższa dostępne saldo wpłaty '${p.reversesPaymentId}' (${availablePaymentBalance}).`);
       }
@@ -253,60 +315,3 @@ function validateInvoicePaymentsLedger(payments = [], options = {}) {
 
   return runningBalance;
 }
-
-const TIME_ENTRY_STATUSES = Object.freeze([...timeEntrySchema.definitions.TimeEntryStatus.enum]);
-const WORKER_ALLOWED_TIME_ENTRY_STATUSES = Object.freeze([...timeEntrySchema.definitions.WorkerAllowedStatus.enum]);
-const FOREMAN_ALLOWED_TIME_ENTRY_STATUSES = Object.freeze([...timeEntrySchema.definitions.ForemanAllowedStatus.enum]);
-const BILLING_TYPES = Object.freeze([...timeEntrySchema.definitions.BillingType.enum]);
-const TIME_ENTRY_TYPES = Object.freeze([...timeEntrySchema.definitions.TimeEntryType.enum]);
-const ACTIVITY_TYPES = Object.freeze([...timeEntrySchema.definitions.ActivityType.enum]);
-const WORKER_TYPES = Object.freeze([...timeEntrySchema.definitions.WorkerType.enum]);
-
-const JOB_STATUSES = Object.freeze([...jobSchema.definitions.JobStatus.enum]);
-const JOB_STAGE_STATUSES = Object.freeze([...jobSchema.definitions.JobStageStatus.enum]);
-const JOB_STAGE_TYPES = Object.freeze([...jobSchema.definitions.JobStageType.enum]);
-const JOB_BILLING_TYPES = Object.freeze([...jobSchema.definitions.JobBillingType.enum]);
-const JOB_RISK_FLAGS = Object.freeze([...jobSchema.definitions.JobRiskFlag.enum]);
-const JOB_PRIORITIES = Object.freeze([...jobSchema.definitions.JobPriority.enum]);
-
-const OFFER_RECORD_KINDS = Object.freeze([...offerSchema.definitions.OfferRecordKind.enum]);
-const OFFER_STATUSES = Object.freeze([...offerSchema.definitions.OfferStatus.enum]);
-const OFFER_VAT_RATES = Object.freeze([...offerSchema.definitions.OfferVatRate.enum]);
-const OFFER_DISCOUNT_TYPES = Object.freeze([...offerSchema.definitions.OfferDiscountType.enum]);
-
-module.exports = {
-  timeEntrySchema,
-  TIME_ENTRY_STATUSES,
-  WORKER_ALLOWED_TIME_ENTRY_STATUSES,
-  FOREMAN_ALLOWED_TIME_ENTRY_STATUSES,
-  BILLING_TYPES,
-  TIME_ENTRY_TYPES,
-  ACTIVITY_TYPES,
-  WORKER_TYPES,
-
-  jobSchema,
-  offerSchema,
-  OFFER_RECORD_KINDS,
-  OFFER_STATUSES,
-  OFFER_VAT_RATES,
-  OFFER_DISCOUNT_TYPES,
-  JOB_STATUSES,
-  JOB_STAGE_STATUSES,
-  JOB_STAGE_TYPES,
-  JOB_BILLING_TYPES,
-  JOB_RISK_FLAGS,
-  JOB_PRIORITIES,
-
-  invoiceSchema,
-  INVOICE_DOCUMENT_STATUSES,
-  INVOICE_IMPORT_DOCUMENT_STATUSES,
-  INVOICE_PAYMENT_STATUSES,
-  INVOICE_VAT_RATES,
-  INVOICE_CURRENCIES,
-  INVOICE_PAYMENT_METHODS,
-  INVOICE_PAYMENT_TYPES,
-  getWarsawDateString,
-  isInvoiceOverdue,
-  validateInvoiceDomainRules,
-  validateInvoicePaymentsLedger
-};
