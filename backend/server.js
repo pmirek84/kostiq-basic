@@ -260,7 +260,7 @@ const ALL_SYSTEM_COLLECTIONS = [
     'installation-rates', 'logistics-rates', 'rental-rates', 'sheet-metal',
     'custom-events', 'client-reports', 'checklists', 'checklist-templates',
     'standards', 'settings', 'jobStageItems', 'subcontractor_contracts',
-    'documents', 'equipment', 'idempotency_keys'
+    'documents', 'equipment', 'idempotency_keys', 'invoice-payments'
 ];
 
 const ALLOWED_BATCH_IMPORT_COLLECTIONS = new Set([
@@ -269,7 +269,8 @@ const ALLOWED_BATCH_IMPORT_COLLECTIONS = new Set([
     'catalog-materials',
     'materials',
     'jobs',
-    'offers'
+    'offers',
+    'invoices'
 ]);
 
 const ALLOWED_MIGRATION_COLLECTIONS = new Set([
@@ -783,6 +784,80 @@ async function generateTemplateNumber(database, session, targetYear = null) {
     };
 }
 
+function getWarsawYear(dateInput = new Date()) {
+    const d = typeof dateInput === 'string' ? new Date(dateInput) : dateInput;
+    return parseInt(new Intl.DateTimeFormat('en-US', { timeZone: 'Europe/Warsaw', year: 'numeric' }).format(d), 10);
+}
+
+async function syncInvoiceCountersFromExistingData(database) {
+    if (!database) return;
+    try {
+        const invoicesCol = database.collection('invoices');
+        const countersCol = database.collection('counters');
+        if (!invoicesCol || !countersCol || typeof invoicesCol.find !== 'function') return;
+
+        const allInvoices = await invoicesCol.find({
+            invoiceNumber: { $type: 'string' }
+        }).toArray();
+
+        const maxSeqByYear = new Map();
+        const currentYear = getWarsawYear();
+        maxSeqByYear.set(currentYear, 0);
+
+        for (const inv of allInvoices) {
+            const num = (inv.invoiceNumber || '').trim();
+            const m = num.match(/^FV\/(\d{4})\/(\d+)$/i);
+            if (m) {
+                const year = parseInt(m[1], 10);
+                const seq = parseInt(m[2], 10);
+                if (year && seq && !Number.isNaN(year) && !Number.isNaN(seq)) {
+                    const curMax = maxSeqByYear.get(year) || 0;
+                    if (seq > curMax) {
+                        maxSeqByYear.set(year, seq);
+                    }
+                }
+            }
+        }
+
+        for (const [year, maxSeq] of maxSeqByYear.entries()) {
+            const counterId = `invoice_${year}`;
+            await countersCol.updateOne(
+                { _id: counterId },
+                { $max: { seq: maxSeq } },
+                { upsert: true }
+            );
+            console.log(`[COUNTER SYNC] Synchronized counter '${counterId}' to seq=${maxSeq} (max existing: ${maxSeq}).`);
+        }
+    } catch (err) {
+        console.error('[COUNTER SYNC ERROR] Failed to synchronize invoice counters from existing invoices:', err);
+        throw err;
+    }
+}
+
+async function generateInvoiceNumber(database, session, targetYear = null) {
+    const year = targetYear || getWarsawYear();
+    const counterId = `invoice_${year}`;
+    const opt = session ? { session } : {};
+
+    const counterResult = await database.collection('counters').findOneAndUpdate(
+        { _id: counterId },
+        { $inc: { seq: 1 } },
+        { upsert: true, returnDocument: 'after', ...opt }
+    );
+
+    const doc = counterResult && (counterResult.value || counterResult);
+    if (!doc || typeof doc.seq !== 'number') {
+        throw new Error(`Nie udało się wygenerować numeru faktury dla roku ${year} (błąd licznika).`);
+    }
+
+    const paddedSeq = String(doc.seq).padStart(3, '0');
+    return {
+        invoiceNumber: `FV/${year}/${paddedSeq}`,
+        seq: doc.seq,
+        year
+    };
+}
+
 async function generateOfferNumber(database, session, targetYear = null) {
     const year = targetYear || new Date().getFullYear();
     const counterId = `offer_${year}`;
@@ -960,6 +1035,14 @@ async function reconcileDuplicatesAndEnsureIndexes(database) {
                 if (col === 'offers') {
                     await collection.createIndex({ number: 1 }, { unique: true, partialFilterExpression: { number: { $type: "string" } } });
                 }
+                if (col === 'invoices') {
+                    await collection.createIndex({ invoiceNumber: 1 }, { unique: true, partialFilterExpression: { invoiceNumber: { $type: "string" } } });
+                    await collection.createIndex({ jobId: 1, documentStatus: 1 });
+                }
+                if (col === 'invoice-payments') {
+                    await collection.createIndex({ invoiceId: 1, sequence: 1 }, { unique: true });
+                    await collection.createIndex({ jobId: 1 });
+                }
             }
 
             // 3. Verify index exists with uniqueness
@@ -981,6 +1064,18 @@ async function reconcileDuplicatesAndEnsureIndexes(database) {
                         throw new Error(`Indeks unikalny { number: 1 } nie został zweryfikowany w kolekcji 'offers'.`);
                     }
                 }
+                if (col === 'invoices') {
+                    const verifiedInvNum = indexes.some(idx => idx.key && idx.key.invoiceNumber === 1 && idx.unique === true);
+                    if (!verifiedInvNum) {
+                        throw new Error(`Indeks unikalny { invoiceNumber: 1 } nie został zweryfikowany w kolekcji 'invoices'.`);
+                    }
+                }
+                if (col === 'invoice-payments') {
+                    const verifiedPaymentSeq = indexes.some(idx => idx.key && idx.key.invoiceId === 1 && idx.key.sequence === 1 && idx.unique === true);
+                    if (!verifiedPaymentSeq) {
+                        throw new Error(`Indeks unikalny { invoiceId: 1, sequence: 1 } nie został zweryfikowany w kolekcji 'invoice-payments'.`);
+                    }
+                }
             }
         } catch (err) {
             console.error(`[CRITICAL INDEX ERROR] Failed to ensure index for collection '${col}':`, err);
@@ -997,6 +1092,7 @@ async function reconcileDuplicatesAndEnsureIndexes(database) {
     // Fail-closed initialization and synchronization of atomic job and offer counters
     await syncJobCountersFromExistingData(database);
     await syncOfferCountersFromExistingData(database);
+    await syncInvoiceCountersFromExistingData(database);
 }
 
 
@@ -1734,6 +1830,14 @@ app.use('/api', (req, res, next) => {
     next();
 });
 // Generic CRUD handlers
+function parseIfMatchVersion(headerVal) {
+    if (!headerVal || typeof headerVal !== 'string') return undefined;
+    const clean = headerVal.replace(/^W\//i, '').replace(/"/g, '').trim();
+    if (!/^\d+$/.test(clean)) return undefined;
+    const parsed = parseInt(clean, 10);
+    return (!isNaN(parsed) && parsed > 0) ? parsed : undefined;
+}
+
 const createRouter = (collectionName, options = {}) => {
     const router = express.Router();
 
@@ -2050,6 +2154,15 @@ const createRouter = (collectionName, options = {}) => {
                 }
                 return await handleCreateOfferAtomic(req, res, { returnOfferOnly: true });
             }
+            if (collectionName === 'invoices') {
+                if (!isReplicaSet && process.env.ALLOW_NON_TRANSACTIONAL !== 'true' && process.env.NODE_ENV !== 'test') {
+                    return res.status(503).json({
+                        code: 'TRANSACTIONS_REQUIRED',
+                        error: "Operacja domenowa tworzenia faktury wymaga włączonego Replica Set w MongoDB (ACID transactions required). Skonfiguruj 'replication.replSet' w konfiguracji bazy danych."
+                    });
+                }
+                return await handleCreateInvoiceDraftAtomic(req, res, { returnInvoiceOnly: true });
+            }
             const newItem = req.body;
             if (!newItem.id) {
                 newItem.id = new ObjectId().toString();
@@ -2199,6 +2312,44 @@ const createRouter = (collectionName, options = {}) => {
                         };
                     }
 
+                    if (collectionName === 'invoices') {
+                        const ALLOWED_INVOICE_IMPORT_FIELDS = new Set([
+                            'id', 'jobId', 'clientId', 'invoiceNumber', 'documentStatus',
+                            'paymentStatus', 'amountNetMinor', 'vatRate', 'vatAmountMinor',
+                            'amountGrossMinor', 'paidAmountMinor', 'remainingAmountMinor',
+                            'amountNet', 'vatAmount', 'amountGross', 'paidAmount', 'currency',
+                            'issueDate', 'dueDate', 'paidDate', 'cancellationDate', 'cancelledAt',
+                            'cancelReason', 'description', 'notes', 'items', 'isActive',
+                            'editVersion', 'createdAt', 'updatedAt'
+                        ]);
+                        const sanitizedDoc = {};
+                        for (const [k, v] of Object.entries(item)) {
+                            if (ALLOWED_INVOICE_IMPORT_FIELDS.has(k) && k !== '_id' && k !== 'payments') {
+                                sanitizedDoc[k] = v;
+                            }
+                        }
+                        return {
+                            insertOne: {
+                                document: {
+                                    ...sanitizedDoc,
+                                    id: itemId,
+                                    invoiceNumber: sanitizedDoc.invoiceNumber,
+                                    documentStatus: sanitizedDoc.documentStatus,
+                                    paymentStatus: sanitizedDoc.paymentStatus || 'unpaid',
+                                    currency: sanitizedDoc.currency || 'PLN',
+                                    amountNet: sanitizedDoc.amountNetMinor / 100,
+                                    vatAmount: sanitizedDoc.vatAmountMinor / 100,
+                                    amountGross: sanitizedDoc.amountGrossMinor / 100,
+                                    paidAmount: (sanitizedDoc.paidAmountMinor || 0) / 100,
+                                    editVersion: sanitizedDoc.editVersion || 1,
+                                    isActive: sanitizedDoc.isActive !== false,
+                                    createdAt: createdAt || now,
+                                    updatedAt: now
+                                }
+                            }
+                        };
+                    }
+
                     // Atomic ownership filter: for worker/foreman on time-entries, include employeeId in filter
                     // so that an existing entry owned by someone else can never be matched or updated by this worker
                     const filter = (isWorker && collectionName === 'time-entries' && userEmpId)
@@ -2234,9 +2385,9 @@ const createRouter = (collectionName, options = {}) => {
                 const clientToUse = client || (db && db.client);
                 const replicaSetActive = isReplicaSet || (clientToUse && (await checkReplicaSetTopology(clientToUse)));
 
-                // [P1 FIX] Strict fail-closed check: Jobs & Offers batch-import requires active Replica Set in production
-                if (collectionName === 'jobs' || collectionName === 'offers') {
-                    const entityBatchName = collectionName === 'jobs' ? 'zleceń' : 'ofert';
+                // [P1 FIX] Strict fail-closed check: Jobs, Offers & Invoices batch-import requires active Replica Set in production
+                if (collectionName === 'jobs' || collectionName === 'offers' || collectionName === 'invoices') {
+                    const entityBatchName = collectionName === 'jobs' ? 'zleceń' : (collectionName === 'offers' ? 'ofert' : 'faktur');
                     if ((!replicaSetActive || _testFailpoint === 'force_session_failure' || _testFailpoint === 'session_returns_null') &&
                         process.env.ALLOW_NON_TRANSACTIONAL !== 'true' &&
                         process.env.NODE_ENV !== 'test') {
@@ -2247,7 +2398,7 @@ const createRouter = (collectionName, options = {}) => {
                     }
                 }
 
-                const useTransaction = (collectionName === 'jobs' || collectionName === 'offers') && replicaSetActive && clientToUse && typeof clientToUse.startSession === 'function';
+                const useTransaction = (collectionName === 'jobs' || collectionName === 'offers' || collectionName === 'invoices') && replicaSetActive && clientToUse && typeof clientToUse.startSession === 'function';
 
                 const executeBatchWrite = async (sess) => {
                     const opt = sess ? { session: sess } : {};
@@ -2283,6 +2434,68 @@ const createRouter = (collectionName, options = {}) => {
                                 { $max: { seq: maxSeq } },
                                 { upsert: true, ...opt }
                             );
+                        }
+                    }
+
+                    // Synchronize counter sequence and insert payments for imported invoices
+                    if (collectionName === 'invoices' && Array.isArray(items)) {
+                        const paymentDocsToInsert = [];
+                        const maxSeqByYear = new Map();
+                        const affectedJobIds = new Set();
+
+                        for (const it of items) {
+                            if (it && it.jobId) affectedJobIds.add(it.jobId);
+                            if (it && it.invoiceNumber) {
+                                const num = String(it.invoiceNumber).trim();
+                                const m = num.match(/^FV\/(\d{4})\/(\d+)$/i);
+                                if (m) {
+                                    const y = parseInt(m[1], 10);
+                                    const s = parseInt(m[2], 10);
+                                    if (y && s && !Number.isNaN(y) && !Number.isNaN(s)) {
+                                        const cur = maxSeqByYear.get(y) || 0;
+                                        if (s > cur) maxSeqByYear.set(y, s);
+                                    }
+                                }
+                            }
+                            if (Array.isArray(it.payments) && it.payments.length > 0) {
+                                for (const p of it.payments) {
+                                    paymentDocsToInsert.push({
+                                        id: p.id,
+                                        invoiceId: it.id,
+                                        jobId: it.jobId,
+                                        type: p.type || 'payment',
+                                        amountMinor: p.amountMinor,
+                                        currency: p.currency || it.currency || 'PLN',
+                                        paymentDate: p.paymentDate,
+                                        paymentMethod: p.paymentMethod,
+                                        sequence: p.sequence,
+                                        reversesPaymentId: p.reversesPaymentId || null,
+                                        reference: p.reference || '',
+                                        notes: p.notes || '',
+                                        recordedBy: p.recordedBy || 'import',
+                                        createdAt: p.createdAt || now
+                                    });
+                                }
+                            }
+                        }
+
+                        if (paymentDocsToInsert.length > 0) {
+                            await db.collection('invoice-payments').insertMany(paymentDocsToInsert, opt);
+                        }
+
+                        for (const [y, maxSeq] of maxSeqByYear.entries()) {
+                            if (process.env.NODE_ENV === 'test' && getTestFailpoint() === 'batch_invoice_counter_failure') {
+                                throw new Error('FAILPOINT: Simulated counter update failure during invoice batch import');
+                            }
+                            await db.collection('counters').updateOne(
+                                { _id: `invoice_${y}` },
+                                { $max: { seq: maxSeq } },
+                                { upsert: true, ...opt }
+                            );
+                        }
+
+                        for (const jId of affectedJobIds) {
+                            await recalculateJobInvoiceAggregates(jId, sess);
                         }
                     }
 
@@ -2397,9 +2610,9 @@ const createRouter = (collectionName, options = {}) => {
                         errors: []
                     });
                 } catch (bulkErr) {
-                    if (collectionName === 'jobs' || collectionName === 'offers') {
-                        const entityName = collectionName === 'jobs' ? 'zleceń' : 'ofert';
-                        const entitySingular = collectionName === 'jobs' ? 'Zlecenie' : 'Oferta';
+                    if (collectionName === 'jobs' || collectionName === 'offers' || collectionName === 'invoices') {
+                        const entityName = collectionName === 'jobs' ? 'zleceń' : (collectionName === 'offers' ? 'ofert' : 'faktur');
+                        const entitySingular = collectionName === 'jobs' ? 'Zlecenie' : (collectionName === 'offers' ? 'Oferta' : 'Faktura');
                         // [P1 FIX] All-or-nothing rollback semantics for jobs batch import.
                         // In MongoDB transactions, any error aborts withTransaction and rolls back all writes.
                         // Returning 207 claiming items were saved would be a false representation of database state.
@@ -2555,6 +2768,15 @@ const createRouter = (collectionName, options = {}) => {
             const updates = { ...req.body };
             delete updates._id;
 
+            if (req.expectedVersion === undefined) {
+                if (updates.expectedVersion !== undefined) {
+                    req.expectedVersion = updates.expectedVersion;
+                } else if (req.headers['if-match']) {
+                    const parsed = parseIfMatchVersion(req.headers['if-match']);
+                    if (parsed !== undefined) req.expectedVersion = parsed;
+                }
+            }
+
             // OPTIMISTIC LOCKING: if client sends lastUpdatedAt, verify it matches DB
             const lastUpdatedAt = updates._lastUpdatedAt;
             delete updates._lastUpdatedAt; // remove sentinel before saving
@@ -2589,9 +2811,9 @@ const createRouter = (collectionName, options = {}) => {
                 }
                 beforeDoc = { ...rawBefore };
 
-                // [P1 FIX] Optimistic Locking Precondition & Version check for jobs & offers
-                if (collectionName === 'jobs' || collectionName === 'offers') {
-                    const entityLabel = collectionName === 'jobs' ? 'Zlecenie' : 'Oferta';
+                // [P1 FIX] Optimistic Locking Precondition & Version check for jobs, offers & invoices
+                if (collectionName === 'jobs' || collectionName === 'offers' || collectionName === 'invoices') {
+                    const entityLabel = collectionName === 'jobs' ? 'Zlecenie' : (collectionName === 'offers' ? 'Oferta' : 'Faktura');
                     if (beforeDoc.editVersion === undefined || beforeDoc.editVersion === null) {
                         return res.status(500).json({
                             code: 'CORRUPT_DOCUMENT_VERSION',
@@ -2615,6 +2837,94 @@ const createRouter = (collectionName, options = {}) => {
                         }
                         if (updates.recordKind !== undefined && updates.recordKind !== beforeDoc.recordKind) {
                             return res.status(400).json({ error: "Modyfikacja typu rekordu (recordKind) oferty jest zabroniona." });
+                        }
+                    }
+                    if (collectionName === 'invoices') {
+                        if (beforeDoc.documentStatus !== 'draft') {
+                            return res.status(400).json({
+                                code: 'INVALID_STATE_TRANSITION',
+                                error: `Faktury o statusie '${beforeDoc.documentStatus}' nie można modyfikować przez PATCH. Modyfikacja jest dozwolona wyłącznie dla szkiców ('draft'). Wystawioną fakturę należy skorygować lub anulować.`
+                            });
+                        }
+                        const immutableInvoiceFields = [
+                            'id', 'jobId', 'invoiceNumber', 'documentStatus', 'issueDate',
+                            'paidAmountMinor', 'remainingAmountMinor', 'paymentStatus', 'paidDate',
+                            'cancelledAt', 'cancelReason', 'paidAmount'
+                        ];
+                        for (const f of immutableInvoiceFields) {
+                            if (updates[f] !== undefined && updates[f] !== beforeDoc[f]) {
+                                return res.status(400).json({
+                                    code: 'IMMUTABLE_FIELD',
+                                    error: `Pole '${f}' jest niemutowalne na szkicu faktury.`
+                                });
+                            }
+                        }
+                        delete updates.expectedVersion;
+
+                        const isPatchValid = validateInvoicePatchSchema({ ...updates, expectedVersion: req.expectedVersion });
+                        if (!isPatchValid) {
+                            const firstErr = validateInvoicePatchSchema.errors?.[0];
+                            return res.status(400).json({
+                                code: 'VALIDATION_ERROR',
+                                error: `Błąd walidacji aktualizacji szkicu faktury: ${firstErr?.message || 'nieprawidłowe dane'} (ścieżka: ${firstErr?.instancePath || 'root'})`
+                            });
+                        }
+
+                        // Recalculate amounts if items or amountNetMinor/vatRate are present
+                        if (Array.isArray(updates.items) && updates.items.length > 0) {
+                            let computedNet = 0;
+                            let computedVat = 0;
+                            let computedGross = 0;
+                            updates.items = updates.items.map((it, idx) => {
+                                const itemId = it.id || `item-${Date.now()}-${idx + 1}`;
+                                const itNet = Math.round(it.quantity * it.unitNetMinor);
+                                const itVat = Math.round(itNet * (it.vatRate / 100));
+                                const itGross = itNet + itVat;
+                                computedNet += itNet;
+                                computedVat += itVat;
+                                computedGross += itGross;
+                                return {
+                                    id: itemId,
+                                    description: it.description,
+                                    quantity: it.quantity,
+                                    unit: it.unit || 'szt.',
+                                    unitNetMinor: it.unitNetMinor,
+                                    vatRate: it.vatRate,
+                                    amountNetMinor: itNet,
+                                    vatAmountMinor: itVat,
+                                    amountGrossMinor: itGross
+                                };
+                            });
+                            updates.amountNetMinor = computedNet;
+                            updates.vatAmountMinor = computedVat;
+                            updates.amountGrossMinor = computedGross;
+                            updates.vatRate = null;
+                        } else if (updates.amountNetMinor !== undefined || updates.vatRate !== undefined) {
+                            const net = updates.amountNetMinor !== undefined ? updates.amountNetMinor : beforeDoc.amountNetMinor;
+                            const rate = updates.vatRate !== undefined ? updates.vatRate : beforeDoc.vatRate;
+                            const vat = Math.round(net * (rate / 100));
+                            updates.amountNetMinor = net;
+                            updates.vatRate = rate;
+                            updates.vatAmountMinor = vat;
+                            updates.amountGrossMinor = net + vat;
+                            updates.items = [];
+                        }
+
+                        if (updates.amountGrossMinor !== undefined) {
+                            updates.remainingAmountMinor = updates.amountGrossMinor;
+                            updates.amountNet = updates.amountNetMinor / 100;
+                            updates.vatAmount = updates.vatAmountMinor / 100;
+                            updates.amountGross = updates.amountGrossMinor / 100;
+                        }
+
+                        const candidateDoc = { ...beforeDoc, ...updates };
+                        validateInvoiceDomainRules(candidateDoc);
+                        if (!validateInvoiceDocumentSchema(candidateDoc)) {
+                            const firstErr = validateInvoiceDocumentSchema.errors?.[0];
+                            return res.status(400).json({
+                                code: 'VALIDATION_ERROR',
+                                error: `Błąd schematu faktury po modyfikacji szkicu: ${firstErr?.message || 'nieprawidłowy dokument'}`
+                            });
                         }
                     }
                 }
@@ -2642,12 +2952,12 @@ const createRouter = (collectionName, options = {}) => {
                 }
             }
 
-            // [P1 FIX] Atomic CAS update for jobs & offers: filter by id AND expectedVersion, increment editVersion by 1
-            const casFilter = ((collectionName === 'jobs' || collectionName === 'offers') && req.expectedVersion !== undefined)
+            // [P1 FIX] Atomic CAS update for jobs, offers & invoices: filter by id AND expectedVersion, increment editVersion by 1
+            const casFilter = ((collectionName === 'jobs' || collectionName === 'offers' || collectionName === 'invoices') && req.expectedVersion !== undefined)
                 ? { id: id, editVersion: req.expectedVersion }
                 : { id: id };
 
-            if ((collectionName === 'jobs' || collectionName === 'offers') && req.expectedVersion !== undefined) {
+            if ((collectionName === 'jobs' || collectionName === 'offers' || collectionName === 'invoices') && req.expectedVersion !== undefined) {
                 updateDoc.$inc = { editVersion: 1 };
             }
 
@@ -2676,8 +2986,8 @@ const createRouter = (collectionName, options = {}) => {
             }
 
             if (!updated) {
-                if (collectionName === 'jobs' || collectionName === 'offers') {
-                    const entityLabel = collectionName === 'jobs' ? 'Zlecenie' : 'Oferta';
+                if (collectionName === 'jobs' || collectionName === 'offers' || collectionName === 'invoices') {
+                    const entityLabel = collectionName === 'jobs' ? 'Zlecenie' : (collectionName === 'offers' ? 'Oferta' : 'Faktura');
                     const latest = await db.collection(collectionName).findOne({ id: id });
                     if (!latest) {
                         return res.status(404).json({ error: `${entityLabel} o identyfikatorze '${id}' nie istnieje.` });
@@ -2724,9 +3034,8 @@ const createRouter = (collectionName, options = {}) => {
             // [P1 FIX] Optimistic Locking token extraction for DELETE
             let expectedVersion = undefined;
             if (req.headers['if-match']) {
-                const ifMatchRaw = req.headers['if-match'].replace(/^W\//, '').replace(/"/g, '').trim();
-                const parsed = parseInt(ifMatchRaw, 10);
-                if (!isNaN(parsed) && parsed > 0) expectedVersion = parsed;
+                const parsed = parseIfMatchVersion(req.headers['if-match']);
+                if (parsed !== undefined) expectedVersion = parsed;
             }
             if (expectedVersion === undefined && req.query && req.query.expectedVersion !== undefined) {
                 const parsed = parseInt(req.query.expectedVersion, 10);
@@ -2738,29 +3047,36 @@ const createRouter = (collectionName, options = {}) => {
             }
 
             // Precondition requirement for versioned collections (jobs)
-            if (collectionName === 'jobs' || collectionName === 'offers') {
+            if (collectionName === 'jobs' || collectionName === 'offers' || collectionName === 'invoices') {
                 if (expectedVersion === undefined) {
-                    const entityMsg = collectionName === 'jobs' ? 'zlecenia' : 'oferty';
+                    const entityMsg = collectionName === 'jobs' ? 'zlecenia' : (collectionName === 'offers' ? 'oferty' : 'faktury');
                     return res.status(428).json({
                         code: 'PRECONDITION_REQUIRED',
-                        error: `Wymagany nagłówek 'If-Match' lub parametr 'expectedVersion' do bezpiecznej archiwizacji ${entityMsg} (Optimistic Locking).`
+                        error: `Wymagany nagłówek 'If-Match' lub parametr 'expectedVersion' do bezpiecznej operacji na ${entityMsg} (Optimistic Locking).`
                     });
                 }
             }
 
             // [P1 FIX] Fail-closed fetch document before delete so afterMutation knows affected jobId/project_id and CAS can verify version
             let beforeDoc = null;
-            if (collectionName === 'jobs' || collectionName === 'offers' || typeof options.afterMutation === 'function') {
+            if (collectionName === 'jobs' || collectionName === 'offers' || collectionName === 'invoices' || typeof options.afterMutation === 'function') {
                 try {
                     const rawDeleteBefore = await db.collection(collectionName).findOne(filter);
                     if (!rawDeleteBefore) {
                         return res.status(404).json({
                             error: collectionName === 'jobs'
                                 ? `Zlecenie o identyfikatorze '${id}' nie istnieje.`
-                                : 'Item not found'
+                                : (collectionName === 'invoices' ? `Faktura o identyfikatorze '${id}' nie istnieje.` : 'Item not found')
                         });
                     }
-                    if (collectionName === 'jobs' || collectionName === 'offers') {
+                    if (collectionName === 'invoices') {
+                        if (rawDeleteBefore.documentStatus !== 'draft') {
+                            return res.status(400).json({
+                                error: `Faktury o statusie innym niż szkic nie można usunąć (aktualny status: '${rawDeleteBefore.documentStatus}'). Wystawioną fakturę należy anulować za pomocą POST /api/invoices/:id/cancel.`
+                            });
+                        }
+                    }
+                    if (collectionName === 'jobs' || collectionName === 'offers' || collectionName === 'invoices') {
                         const entityLabel = collectionName === 'jobs' ? 'Zlecenie' : 'Oferta';
                         if (rawDeleteBefore.isActive === false) {
                             const archivedVerb = collectionName === 'jobs' ? 'zostało już zarchiwizowane' : 'została już zarchiwizowana';
@@ -2858,9 +3174,34 @@ const createRouter = (collectionName, options = {}) => {
                     editVersion: expectedVersion !== undefined ? expectedVersion + 1 : undefined
                 });
             } else {
-                // Hard delete branch (e.g. time-entries, settlements, site-logs)
-                const result = await db.collection(collectionName).deleteOne(filter);
+                // Hard delete branch (e.g. time-entries, settlements, site-logs, invoices)
+                const deleteFilter = (collectionName === 'invoices' && expectedVersion !== undefined)
+                    ? { id: id, editVersion: expectedVersion, documentStatus: 'draft' }
+                    : filter;
+                const result = await db.collection(collectionName).deleteOne(deleteFilter);
                 if (result.deletedCount === 0) {
+                    if (collectionName === 'invoices') {
+                        const latest = await db.collection('invoices').findOne(filter);
+                        if (!latest) {
+                            return res.status(404).json({ error: `Faktura o identyfikatorze '${id}' nie istnieje.` });
+                        }
+                        if (latest.documentStatus !== 'draft') {
+                            return res.status(400).json({
+                                code: 'INVALID_STATE_TRANSITION',
+                                error: `Faktury o statusie innym niż szkic nie można usunąć (aktualny status: '${latest.documentStatus}'). Wystawioną fakturę należy anulować za pomocą POST /api/invoices/:id/cancel.`
+                            });
+                        }
+                        if (latest.editVersion !== expectedVersion) {
+                            return res.status(409).json({
+                                code: 'VERSION_CONFLICT',
+                                error: `Faktura została zmodyfikowana przez innego użytkownika. Pobierz aktualne dane przed ponowną próbą usunięcia.`,
+                                id,
+                                entity: 'invoices',
+                                currentVersion: latest.editVersion,
+                                expectedVersion
+                            });
+                        }
+                    }
                     return res.status(404).json({ error: 'Item not found' });
                 }
                 // [P1 FIX] Trigger afterMutation with oldDoc so labor aggregates are recalculated after hard delete!
@@ -3159,30 +3500,94 @@ async function recalculateJobExpenseCosts(jobId) {
 // INVOICE REVENUE TRIGGER  
 // Recalculates actualRevenue from paid invoices
 // ==========================================
-async function recalculateJobRevenue(jobId) {
-    if (!db) return;
+async function recalculateJobInvoiceAggregates(jobId, session = null) {
+    if (!db || !jobId) return;
+    const opt = session ? { session } : {};
     try {
-        const invoices = await db.collection('invoices').find({
-            jobId: jobId,
-            status: 'paid'
-        }).toArray();
+        // 1. Invoiced revenue from issued non-cancelled invoices
+        const issuedInvoices = await db.collection('invoices').find(
+            { jobId: jobId, documentStatus: 'issued' },
+            opt
+        ).toArray();
+        const invoicedRevenueNetMinor = issuedInvoices.reduce((sum, inv) => sum + (inv.amountNetMinor || 0), 0);
 
-        const totalRevenue = invoices.reduce((sum, inv) => sum + (inv.amountNet || 0), 0);
+        // 2. Cash received from invoice-payments: group gross ledger balance per invoice and compute net portion
+        const paymentEvents = await db.collection('invoice-payments').find(
+            { jobId: jobId },
+            opt
+        ).toArray();
 
-        await db.collection('jobs').updateOne(
-            { $or: [{ id: jobId }, { _id: jobId }] },
+        const paymentsByInvoice = new Map();
+        for (const p of paymentEvents) {
+            const invId = p.invoiceId;
+            if (!paymentsByInvoice.has(invId)) paymentsByInvoice.set(invId, 0);
+            const delta = (p.type === 'payment' ? (p.amountMinor || 0) : -(p.amountMinor || 0));
+            paymentsByInvoice.set(invId, paymentsByInvoice.get(invId) + delta);
+        }
+
+        let cashReceivedNetMinor = 0;
+        for (const [invId, rawPaidGross] of paymentsByInvoice.entries()) {
+            const paidGross = Math.max(0, rawPaidGross);
+            if (paidGross === 0) continue;
+
+            let inv = issuedInvoices.find(i => i.id === invId);
+            if (!inv) {
+                inv = await db.collection('invoices').findOne({ id: invId }, opt);
+            }
+            if (!inv) {
+                const orphanErr = new Error(`Błąd integralności: Zdarzenie płatności odnosi się do nieistniejącej faktury '${invId}' dla zlecenia '${jobId}'. Rekonsyliacja przerwana.`);
+                orphanErr.statusCode = 409;
+                throw orphanErr;
+            }
+            if (inv.jobId !== jobId) {
+                const mismatchErr = new Error(`Błąd integralności: Faktura '${invId}' powiązana ze zleceniem '${inv.jobId}' nie pasuje do zlecenia płatności '${jobId}'. Rekonsyliacja przerwana.`);
+                mismatchErr.statusCode = 409;
+                throw mismatchErr;
+            }
+            if (!inv.amountGrossMinor || inv.amountGrossMinor <= 0) {
+                const invalidGrossErr = new Error(`Błąd integralności: Faktura '${invId}' dla zlecenia '${jobId}' posiada nieprawidłową kwotę brutto (${inv.amountGrossMinor}). Rekonsyliacja przerwana.`);
+                invalidGrossErr.statusCode = 409;
+                throw invalidGrossErr;
+            }
+            if (paidGross >= inv.amountGrossMinor) {
+                cashReceivedNetMinor += (inv.amountNetMinor || 0);
+            } else {
+                const netPortion = Math.round(paidGross * (inv.amountNetMinor || 0) / inv.amountGrossMinor);
+                cashReceivedNetMinor += netPortion;
+            }
+        }
+
+        const actualRevenueDecimal = cashReceivedNetMinor / 100;
+
+        const updateJobRes = await db.collection('jobs').updateOne(
+            { $or: [{ id: jobId }, { _id: jobId }], isActive: { $ne: false } },
             {
                 $set: {
-                    actualRevenue: totalRevenue,
-                    revenueActualNet: totalRevenue,
+                    invoicedRevenueNetMinor,
+                    cashReceivedNetMinor,
+                    actualRevenue: actualRevenueDecimal,
+                    revenueActualNet: actualRevenueDecimal,
                     updatedAt: new Date().toISOString()
                 }
-            }
+            },
+            opt
         );
-        console.log(`[REVENUE-TRIGGER] Job ${jobId}: actualRevenue=${totalRevenue} (from ${invoices.length} paid invoices)`);
+
+        if (updateJobRes.matchedCount === 0) {
+            const missingJobErr = new Error(`Nie znaleziono aktywnego zlecenia o identyfikatorze '${jobId}' do zaktualizowania agregatów finansowych.`);
+            missingJobErr.statusCode = 404;
+            throw missingJobErr;
+        }
+
+        console.log(`[JOB INVOICE AGGREGATES] Job ${jobId}: invoicedRevenueNetMinor=${invoicedRevenueNetMinor}, cashReceivedNetMinor=${cashReceivedNetMinor}, actualRevenue=${actualRevenueDecimal}`);
     } catch (err) {
-        console.error('[REVENUE-TRIGGER] Error:', err);
+        console.error(`[JOB INVOICE AGGREGATES ERROR] Job ${jobId}:`, err);
+        throw err;
     }
+}
+
+async function recalculateJobRevenue(jobId) {
+    return await recalculateJobInvoiceAggregates(jobId);
 }
 
 // ==========================================
@@ -3533,17 +3938,44 @@ const {
     OFFER_RECORD_KINDS,
     OFFER_STATUSES,
     OFFER_VAT_RATES,
-    OFFER_DISCOUNT_TYPES
+    OFFER_DISCOUNT_TYPES,
+    invoiceSchema,
+    INVOICE_DOCUMENT_STATUSES,
+    INVOICE_IMPORT_DOCUMENT_STATUSES,
+    INVOICE_PAYMENT_STATUSES,
+    INVOICE_VAT_RATES,
+    INVOICE_CURRENCIES,
+    INVOICE_PAYMENT_METHODS,
+    INVOICE_PAYMENT_TYPES,
+    getWarsawDateString,
+    isInvoiceOverdue,
+    validateInvoiceDomainRules,
+    validateInvoicePaymentsLedger
 } = require('../shared/contracts/index.cjs');
+
+function isValidInstantString(rawInstant) {
+    if (typeof rawInstant !== 'string') return false;
+    if (!/^\d{4}-\d{2}-\d{2}T(?:[01]\d|2[0-3]):[0-5]\d:[0-5]\d(?:\.\d{1,3})?(?:Z|[+-](?:[01]\d|2[0-3]):?[0-5]\d)$/.test(rawInstant)) {
+        return false;
+    }
+    const parsed = new Date(rawInstant);
+    if (isNaN(parsed.getTime())) return false;
+    const datePart = rawInstant.slice(0, 10);
+    return isValidCalendarDate(datePart);
+}
 
 const ajv = new Ajv({ allErrors: true, coerceTypes: false });
 ajv.addKeyword('tsType');
 ajv.addFormat('kostiq-date-string', (str) => extractValidDateKey(str) !== null);
+ajv.addFormat('kostiq-calendar-date', (str) => isValidCalendarDate(str));
+ajv.addFormat('kostiq-instant-string', (str) => isValidInstantString(str));
 ajv.addFormat('date', (str) => isValidCalendarDate(str));
 ajv.addFormat('date-time', (str) => extractValidDateKey(str) !== null);
 ajv.addSchema(timeEntrySchema, 'timeEntry');
 ajv.addSchema(jobSchema, 'job');
 ajv.addSchema(offerSchema, 'offer');
+ajv.addSchema(invoiceSchema, 'invoice');
+
 const validateOfferPostSchema = ajv.getSchema('offer#/definitions/OfferPostPayload');
 const validateOfferPatchSchema = ajv.getSchema('offer#/definitions/OfferPatchPayload');
 const validateOfferBatchSchema = ajv.getSchema('offer#/definitions/OfferBatchImportPayload');
@@ -3558,6 +3990,16 @@ const validateJobPatchSchema = ajv.getSchema('job#/definitions/JobPatchPayload')
 const validateJobBatchSchema = ajv.getSchema('job#/definitions/JobBatchImportPayload');
 const validateJobPaginatedSchema = ajv.getSchema('job#/definitions/JobPaginatedResponse');
 const validateJobSchema = ajv.getSchema('job#/definitions/Job');
+
+const validateInvoicePostSchema = ajv.getSchema('invoice#/definitions/InvoicePostPayload');
+const validateInvoicePatchSchema = ajv.getSchema('invoice#/definitions/InvoicePatchPayload');
+const validateInvoiceIssueSchema = ajv.getSchema('invoice#/definitions/InvoiceIssuePayload');
+const validateInvoicePaymentSchema = ajv.getSchema('invoice#/definitions/InvoicePaymentPayload');
+const validateInvoiceCancelSchema = ajv.getSchema('invoice#/definitions/InvoiceCancelPayload');
+const validateInvoiceBatchImportSchema = ajv.getSchema('invoice#/definitions/InvoiceBatchImportPayload');
+const validateInvoiceBatchImportItemSchema = ajv.getSchema('invoice#/definitions/InvoiceBatchImportItem');
+const validateInvoiceDocumentSchema = ajv.getSchema('invoice#/definitions/InvoiceDocument');
+const validateInvoicePaymentDocumentSchema = ajv.getSchema('invoice#/definitions/InvoicePaymentDocument');
 
 // Shared validation & normalization for time entries (used by single POST/PATCH and batch-import)
 async function validateAndNormalizeTimeEntryDoc(doc, { db, user, isBatch = false, isPatch = false, existingEntry = null, session = null }) {
@@ -8162,7 +8604,970 @@ app.use('/api/jobStageItems', verifyToken, requireRole('admin', 'manager'), crea
 app.use('/api/subcontractor_contracts', verifyToken, requireRole('admin', 'manager'), createRouter('subcontractor_contracts'));
 app.use('/api/documents', verifyToken, requireRole('admin', 'manager'), createRouter('documents'));
 app.use('/api/equipment', verifyToken, requireRole('admin', 'manager'), createRouter('equipment'));
-app.use('/api/invoices', verifyToken, requireRole('admin', 'manager'), validateFinancialAmount, createRouter('invoices'));
+
+// ==========================================
+// INVOICE DOMAIN (SALES INVOICES) — ACID LIFECYCLE & LEDGER
+// ==========================================
+
+async function validateInvoice(req, res, next) {
+    if (req.method === 'POST') {
+        if (req.path.includes('/batch-import')) {
+            if (!req.body || typeof req.body !== 'object' || !Array.isArray(req.body.items)) {
+                return res.status(400).json({ error: 'Payload importu wsadowego faktur musi zawierać tablicę items.' });
+            }
+            const isValidBatch = validateInvoiceBatchImportSchema(req.body);
+            if (!isValidBatch) {
+                const firstErr = validateInvoiceBatchImportSchema.errors?.[0];
+                return res.status(400).json({
+                    error: `Błąd walidacji schematu importu faktur: ${firstErr?.message || 'nieprawidłowe dane'} (ścieżka: ${firstErr?.instancePath || 'root'})`
+                });
+            }
+            // Additional per-item domain validations: year parity, items calculation, ledger check
+            for (let i = 0; i < req.body.items.length; i++) {
+                const item = req.body.items[i];
+                // 1. Year parity between invoiceNumber and issueDate
+                const m = item.invoiceNumber.match(/^FV\/(\d{4})\/(\d+)$/);
+                if (m) {
+                    const numYear = parseInt(m[1], 10);
+                    const issueYear = parseInt(item.issueDate.slice(0, 4), 10);
+                    if (numYear !== issueYear) {
+                        return res.status(400).json({
+                            error: `Element [${i}]: Rok w numerze faktury '${item.invoiceNumber}' (${numYear}) nie zgadza się z rokiem daty wystawienia '${item.issueDate}' (${issueYear}).`
+                        });
+                    }
+                }
+                // 2. Domain rules on items or simplified
+                if (Array.isArray(item.items) && item.items.length > 0) {
+                    let sumNet = 0;
+                    let sumVat = 0;
+                    let sumGross = 0;
+                    item.items = item.items.map((it, idx) => {
+                        const amountNetMinor = Math.round(it.quantity * it.unitNetMinor);
+                        const vatAmountMinor = Math.round(amountNetMinor * (it.vatRate / 100));
+                        const amountGrossMinor = amountNetMinor + vatAmountMinor;
+                        sumNet += amountNetMinor;
+                        sumVat += vatAmountMinor;
+                        sumGross += amountGrossMinor;
+                        return {
+                            id: it.id || `item-${Date.now()}-${idx + 1}`,
+                            description: it.description,
+                            quantity: it.quantity,
+                            unit: it.unit || 'szt.',
+                            unitNetMinor: it.unitNetMinor,
+                            vatRate: it.vatRate,
+                            amountNetMinor,
+                            vatAmountMinor,
+                            amountGrossMinor
+                        };
+                    });
+                    item.amountNetMinor = sumNet;
+                    item.vatAmountMinor = sumVat;
+                    item.amountGrossMinor = sumGross;
+                    item.vatRate = null;
+                } else {
+                    item.vatAmountMinor = Math.round(item.amountNetMinor * (item.vatRate / 100));
+                    item.amountGrossMinor = item.amountNetMinor + item.vatAmountMinor;
+                }
+                // 3. Payments ledger validation if payments present
+                if (Array.isArray(item.payments) && item.payments.length > 0) {
+                    try {
+                        const paidAmount = validateInvoicePaymentsLedger(item.payments, {
+                            isCancelled: item.documentStatus === 'cancelled',
+                            amountGrossMinor: item.amountGrossMinor
+                        });
+                        item.paidAmountMinor = paidAmount;
+                        item.remainingAmountMinor = item.amountGrossMinor - paidAmount;
+                        item.paymentStatus = paidAmount === 0 ? 'unpaid' : (paidAmount < item.amountGrossMinor ? 'partial' : 'paid');
+                    } catch (ledgErr) {
+                        return res.status(400).json({
+                            error: `Element [${i}]: Błąd weryfikacji historii płatności: ${ledgErr.message}`
+                        });
+                    }
+                } else {
+                    item.paidAmountMinor = 0;
+                    item.remainingAmountMinor = item.amountGrossMinor;
+                    item.paymentStatus = 'unpaid';
+                }
+            }
+            return next();
+        }
+
+        // Single draft POST
+        const isValid = validateInvoicePostSchema(req.body);
+        if (!isValid) {
+            const firstErr = validateInvoicePostSchema.errors?.[0];
+            return res.status(400).json({
+                error: `Błąd walidacji danych faktury: ${firstErr?.message || 'nieprawidłowe dane'} (ścieżka: ${firstErr?.instancePath || 'root'})`
+            });
+        }
+        return next();
+    }
+
+    if (req.method === 'PATCH') {
+        const targetId = req.params.id || (req.path && req.path !== '/' ? req.path.split('/').filter(Boolean)[0] : null);
+        if (!targetId) return next();
+        let existingInvoice = null;
+        if (db && typeof db.collection === 'function') {
+            try {
+                existingInvoice = await db.collection('invoices').findOne({ id: targetId });
+                if (!existingInvoice) {
+                    existingInvoice = await db.collection('invoices').findOne({ _id: targetId });
+                }
+                if (!existingInvoice) {
+                    return res.status(404).json({ error: `Faktura o identyfikatorze '${targetId}' nie istnieje.` });
+                }
+            } catch (err) {
+                return res.status(500).json({ error: 'Błąd bazy danych podczas pobierania faktury: ' + err.message });
+            }
+        }
+        if (existingInvoice) {
+            if (existingInvoice.documentStatus !== 'draft') {
+                return res.status(400).json({
+                    error: `Faktura nie jest szkicem (aktualny status: '${existingInvoice.documentStatus}'). Modyfikacja wystawionej lub anulowanej faktury przez PATCH jest zabroniona. Modyfikacja jest dozwolona wyłącznie dla szkiców ('draft').`
+                });
+            }
+        }
+
+        if (req.body && req.body.expectedVersion === undefined && req.headers['if-match']) {
+            const parsed = parseIfMatchVersion(req.headers['if-match']);
+            if (parsed !== undefined) {
+                req.body.expectedVersion = parsed;
+            }
+        }
+
+        const isValid = validateInvoicePatchSchema(req.body);
+        if (!isValid) {
+            const firstErr = validateInvoicePatchSchema.errors?.[0];
+            return res.status(400).json({
+                error: `Błąd walidacji aktualizacji faktury: ${firstErr?.message || 'nieprawidłowe dane'} (ścieżka: ${firstErr?.instancePath || 'root'})`
+            });
+        }
+        req.expectedVersion = req.body.expectedVersion;
+        return next();
+    }
+
+    next();
+}
+
+async function acquireIdempotencyLease({ db, endpoint, idempotencyKey, payload, required = true }) {
+    if (!idempotencyKey || typeof idempotencyKey !== 'string' || idempotencyKey.trim().length === 0) {
+        if (required) {
+            const err = new Error("Wymagany niepusty nagłówek 'Idempotency-Key' do bezpiecznego wykonania operacji.");
+            err.statusCode = 400;
+            err.code = 'MISSING_IDEMPOTENCY_KEY';
+            throw err;
+        }
+        return { hasKey: false };
+    }
+    const cleanKey = idempotencyKey.trim();
+    if (cleanKey.length < 1 || cleanKey.length > 128 || !/^[A-Za-z0-9_\-\:\.]{1,128}$/.test(cleanKey)) {
+        const err = new Error("Klucz 'Idempotency-Key' musi zawierać od 1 do 128 znaków (dozwolone: litery, cyfry oraz znaki: _ - : .).");
+        err.statusCode = 400;
+        err.code = 'INVALID_IDEMPOTENCY_KEY';
+        throw err;
+    }
+    const canonicalPayload = { ...payload };
+    delete canonicalPayload.idempotencyKey;
+    const requestHash = crypto.createHash('sha256').update(canonicalJsonStringify(canonicalPayload)).digest('hex');
+
+    const ownerToken = crypto.randomUUID();
+    const now = new Date();
+    const expiresAt = new Date(now.getTime() + 30000);
+
+    let reservedKey = false;
+    try {
+        await db.collection('idempotency_keys').insertOne({
+            endpoint,
+            key: cleanKey,
+            ownerToken,
+            requestHash,
+            status: 'pending',
+            createdAt: now,
+            updatedAt: now,
+            expiresAt
+        });
+        reservedKey = true;
+    } catch (insertErr) {
+        if (insertErr.code === 11000 || (insertErr.message && insertErr.message.includes('11000'))) {
+            let acquired = false;
+            for (let attempt = 0; attempt < 3; attempt++) {
+                const check = await db.collection('idempotency_keys').findOne({
+                    endpoint,
+                    key: cleanKey
+                });
+
+                if (!check) {
+                    try {
+                        await db.collection('idempotency_keys').insertOne({
+                            endpoint,
+                            key: cleanKey,
+                            ownerToken,
+                            requestHash,
+                            status: 'pending',
+                            createdAt: new Date(),
+                            updatedAt: new Date(),
+                            expiresAt: new Date(Date.now() + 30000)
+                        });
+                        acquired = true;
+                        reservedKey = true;
+                        break;
+                    } catch (_) { }
+                } else if (check.status === 'completed') {
+                    if (check.requestHash && check.requestHash !== requestHash) {
+                        const hashConflictErr = new Error(`Klucz idempotencji '${cleanKey}' został już użyty z inną zawartością żądania.`);
+                        hashConflictErr.statusCode = 409;
+                        hashConflictErr.code = 'IDEMPOTENCY_CONFLICT';
+                        throw hashConflictErr;
+                    }
+                    return {
+                        hasKey: true,
+                        completed: true,
+                        statusCode: check.statusCode || 200,
+                        responseBody: check.responseBody
+                    };
+                } else if (check.status === 'pending') {
+                    const nowTime = new Date();
+                    if (check.expiresAt && check.expiresAt < nowTime) {
+                        const takeover = await db.collection('idempotency_keys').findOneAndUpdate(
+                            {
+                                endpoint,
+                                key: cleanKey,
+                                status: 'pending',
+                                expiresAt: { $lt: nowTime }
+                            },
+                            {
+                                $set: {
+                                    ownerToken,
+                                    requestHash,
+                                    updatedAt: nowTime,
+                                    expiresAt: new Date(nowTime.getTime() + 30000)
+                                }
+                            },
+                            { returnDocument: 'after' }
+                        );
+                        if (takeover && (takeover.value || takeover.key)) {
+                            acquired = true;
+                            reservedKey = true;
+                            break;
+                        }
+                    }
+                }
+                await new Promise(r => setTimeout(r, 150));
+            }
+            if (!acquired && !reservedKey) {
+                const inProgressErr = new Error(`Równoległe żądanie z kluczem '${cleanKey}' jest w trakcie przetwarzania (Idempotency In Progress).`);
+                inProgressErr.statusCode = 409;
+                inProgressErr.code = 'IDEMPOTENCY_CONFLICT';
+                throw inProgressErr;
+            }
+        } else {
+            throw insertErr;
+        }
+    }
+
+    let heartbeat = null;
+    if (reservedKey && ownerToken) {
+        heartbeat = setInterval(async () => {
+            try {
+                const nowHeartbeat = new Date();
+                await db.collection('idempotency_keys').updateOne(
+                    { endpoint, key: cleanKey, ownerToken, status: 'pending' },
+                    { $set: { expiresAt: new Date(nowHeartbeat.getTime() + 30000), updatedAt: nowHeartbeat } }
+                );
+            } catch (_) { }
+        }, 10000);
+        if (heartbeat.unref) heartbeat.unref();
+    }
+
+    return {
+        hasKey: true,
+        completed: false,
+        key: cleanKey,
+        ownerToken,
+        requestHash,
+        heartbeat
+    };
+}
+
+async function verifyIdempotencyLease({ db, lease, endpoint, session }) {
+    if (!lease || !lease.hasKey || !lease.ownerToken) return;
+    const opt = session ? { session } : {};
+    const check = await db.collection('idempotency_keys').findOne(
+        { endpoint, key: lease.key, ownerToken: lease.ownerToken, status: 'pending' },
+        opt
+    );
+    if (!check) {
+        throw new Error(`Utrata dzierżawy idempotencji dla klucza '${lease.key}'.`);
+    }
+}
+
+async function finalizeIdempotencyLease({ db, lease, endpoint, statusCode, responseBody, session }) {
+    if (!lease || !lease.hasKey || !lease.ownerToken) return;
+    const opt = session ? { session } : {};
+    const now = new Date();
+    // 7-day retention for completed idempotency records (safe against retry after network drop)
+    const retentionExpiresAt = new Date(now.getTime() + 7 * 24 * 60 * 60 * 1000);
+    const finalRes = await db.collection('idempotency_keys').updateOne(
+        { endpoint, key: lease.key, ownerToken: lease.ownerToken, status: 'pending' },
+        {
+            $set: {
+                status: 'completed',
+                statusCode: statusCode || 200,
+                responseBody,
+                updatedAt: now,
+                expiresAt: retentionExpiresAt
+            }
+        },
+        opt
+    );
+    if (finalRes.matchedCount !== 1) {
+        throw new Error(`Utrata dzierżawy idempotencji podczas finalizacji dla klucza '${lease.key}'.`);
+    }
+}
+
+async function releaseIdempotencyLease({ db, lease }) {
+    if (!lease || !lease.hasKey || lease.completed || !lease.ownerToken) return;
+    if (lease.heartbeat) clearInterval(lease.heartbeat);
+    try {
+        await db.collection('idempotency_keys').deleteOne({
+            key: lease.key,
+            ownerToken: lease.ownerToken,
+            status: 'pending'
+        });
+    } catch (_) { }
+}
+
+async function handleCreateInvoiceDraftAtomic(req, res, options = {}) {
+    const returnInvoiceOnly = options.returnInvoiceOnly !== false;
+    let lease = null;
+
+    try {
+        if (!db) return res.status(503).json({ error: 'Database not connected' });
+
+        const rawBody = req.body || {};
+        const {
+            id,
+            jobId,
+            clientId,
+            currency,
+            dueDate,
+            description,
+            notes,
+            amountNetMinor: rawNetMinor,
+            vatRate: rawVatRate,
+            items: rawItems
+        } = rawBody;
+
+        if (!jobId) {
+            return res.status(400).json({ error: "Pole 'jobId' jest wymagane dla faktury." });
+        }
+
+        const endpoint = '/api/invoices/create-atomic';
+        const idempotencyKey = req.headers['idempotency-key'] || req.headers['x-idempotency-key'] || null;
+        lease = await acquireIdempotencyLease({ db, endpoint, idempotencyKey, payload: rawBody });
+        if (lease.completed) {
+            return res.status(lease.statusCode).json(lease.responseBody);
+        }
+
+        // Amount & line items calculation
+        let computedItems = undefined;
+        let amountNetMinor = 0;
+        let vatRate = null;
+        let vatAmountMinor = 0;
+        let amountGrossMinor = 0;
+
+        if (Array.isArray(rawItems) && rawItems.length > 0) {
+            computedItems = rawItems.map((it, idx) => {
+                const itemId = it.id || `item-${Date.now()}-${idx + 1}`;
+                const itNet = Math.round(it.quantity * it.unitNetMinor);
+                const itVat = Math.round(itNet * (it.vatRate / 100));
+                const itGross = itNet + itVat;
+                amountNetMinor += itNet;
+                vatAmountMinor += itVat;
+                amountGrossMinor += itGross;
+                return {
+                    id: itemId,
+                    description: it.description,
+                    quantity: it.quantity,
+                    unit: it.unit || 'szt.',
+                    unitNetMinor: it.unitNetMinor,
+                    vatRate: it.vatRate,
+                    amountNetMinor: itNet,
+                    vatAmountMinor: itVat,
+                    amountGrossMinor: itGross
+                };
+            });
+            vatRate = null;
+        } else {
+            amountNetMinor = rawNetMinor;
+            vatRate = rawVatRate;
+            vatAmountMinor = Math.round(amountNetMinor * (vatRate / 100));
+            amountGrossMinor = amountNetMinor + vatAmountMinor;
+        }
+
+        const nowIso = new Date().toISOString();
+        const invoiceDoc = {
+            id: id || new ObjectId().toString(),
+            jobId,
+            clientId: clientId || null,
+            invoiceNumber: null,
+            documentStatus: 'draft',
+            paymentStatus: 'unpaid',
+            isActive: true,
+            amountNetMinor,
+            vatRate,
+            vatAmountMinor,
+            amountGrossMinor,
+            paidAmountMinor: 0,
+            remainingAmountMinor: amountGrossMinor,
+            amountNet: amountNetMinor / 100,
+            vatAmount: vatAmountMinor / 100,
+            amountGross: amountGrossMinor / 100,
+            paidAmount: 0,
+            currency: currency || 'PLN',
+            issueDate: null,
+            dueDate: dueDate || null,
+            paidDate: null,
+            cancellationDate: null,
+            cancelledAt: null,
+            cancelReason: null,
+            description: description || '',
+            notes: notes || '',
+            items: computedItems || [],
+            editVersion: 1,
+            createdAt: nowIso,
+            updatedAt: nowIso
+        };
+
+        validateInvoiceDomainRules(invoiceDoc);
+        if (!validateInvoiceDocumentSchema(invoiceDoc)) {
+            const firstErr = validateInvoiceDocumentSchema.errors?.[0];
+            return res.status(400).json({
+                error: `Błąd schematu tworzonego szkicu faktury: ${firstErr?.message || 'nieprawidłowy dokument'}`
+            });
+        }
+
+        const clientToUse = client || (db && db.client);
+        const replicaSetActive = isReplicaSet || (clientToUse && (await checkReplicaSetTopology(clientToUse)));
+        const useTransaction = replicaSetActive && clientToUse && typeof clientToUse.startSession === 'function';
+
+        let insertedInvoice = null;
+
+        const executeCreate = async (session) => {
+            const opt = session ? { session } : {};
+
+            // Check Job exists and is active inside transaction
+            const jobInTx = await db.collection('jobs').findOne(
+                { id: jobId, isActive: { $ne: false } },
+                opt
+            );
+            if (!jobInTx) {
+                const missingJobErr = new Error(`Zlecenie o identyfikatorze '${jobId}' nie istnieje lub zostało zarchiwizowane.`);
+                missingJobErr.statusCode = 404;
+                throw missingJobErr;
+            }
+
+            if (!invoiceDoc.clientId && jobInTx.clientId) {
+                invoiceDoc.clientId = jobInTx.clientId;
+            }
+
+            await verifyIdempotencyLease({ db, lease, endpoint, session });
+            await db.collection('invoices').insertOne(invoiceDoc, opt);
+            insertedInvoice = invoiceDoc;
+            await finalizeIdempotencyLease({ db, lease, endpoint, statusCode: 201, responseBody: invoiceDoc, session });
+        };
+
+        if (useTransaction) {
+            const session = clientToUse.startSession();
+            try {
+                await session.withTransaction(async () => {
+                    await executeCreate(session);
+                });
+            } finally {
+                await session.endSession();
+            }
+        } else {
+            await executeCreate(null);
+        }
+
+        if (lease) {
+            lease.completed = true;
+            if (lease.heartbeat) clearInterval(lease.heartbeat);
+        }
+
+        return res.status(201).json(insertedInvoice);
+    } catch (err) {
+        console.error('[handleCreateInvoiceDraftAtomic ERROR]', err);
+        if (err.code === 11000 || (err.message && err.message.includes('11000'))) {
+            return res.status(409).json({ error: `Faktura z ID '${req.body?.id}' już istnieje w bazie danych.` });
+        }
+        return res.status(err.statusCode || 500).json({
+            code: err.code || 'CREATE_FAILED',
+            error: err.message
+        });
+    } finally {
+        if (lease && lease.heartbeat) clearInterval(lease.heartbeat);
+        if (lease && lease.hasKey && !lease.completed && lease.ownerToken) {
+            await releaseIdempotencyLease({ db, lease });
+        }
+    }
+}
+
+async function handleIssueInvoiceAtomic(req, res) {
+    let lease = null;
+    try {
+        if (!db) return res.status(503).json({ error: 'Database not connected' });
+        const { id } = req.params;
+        const rawBody = req.body || {};
+
+        const isValid = validateInvoiceIssueSchema(rawBody);
+        if (!isValid) {
+            const firstErr = validateInvoiceIssueSchema.errors?.[0];
+            return res.status(400).json({
+                error: `Błąd walidacji danych wystawienia faktury: ${firstErr?.message || 'nieprawidłowe dane'} (ścieżka: ${firstErr?.instancePath || 'root'})`
+            });
+        }
+
+        const endpoint = '/api/invoices/issue';
+        const idempotencyKey = req.headers['idempotency-key'] || req.headers['x-idempotency-key'] || null;
+        lease = await acquireIdempotencyLease({ db, endpoint, idempotencyKey, payload: { id, ...rawBody } });
+        if (lease.completed) {
+            return res.status(lease.statusCode).json(lease.responseBody);
+        }
+
+        const clientToUse = client || (db && db.client);
+        const replicaSetActive = isReplicaSet || (clientToUse && (await checkReplicaSetTopology(clientToUse)));
+        const useTransaction = replicaSetActive && clientToUse && typeof clientToUse.startSession === 'function';
+
+        const executeIssue = async (session) => {
+            const opt = session ? { session } : {};
+            const invoice = await db.collection('invoices').findOne({ id }, opt);
+            if (!invoice) {
+                const notFoundErr = new Error(`Faktura o identyfikatorze '${id}' nie istnieje.`);
+                notFoundErr.statusCode = 404;
+                throw notFoundErr;
+            }
+
+            if (invoice.editVersion !== rawBody.expectedVersion) {
+                const casErr = new Error("Faktura została zmodyfikowana przez innego użytkownika. Pobierz aktualne dane przed ponowną próbą wystawienia.");
+                casErr.statusCode = 409;
+                casErr.code = 'VERSION_CONFLICT';
+                throw casErr;
+            }
+
+            if (invoice.documentStatus !== 'draft') {
+                const statusErr = new Error(`Tylko szkic faktury może zostać wystawiony (aktualny status: '${invoice.documentStatus}').`);
+                statusErr.statusCode = 400;
+                throw statusErr;
+            }
+
+            await verifyIdempotencyLease({ db, lease, endpoint, session });
+
+            const issueDate = rawBody.issueDate || getWarsawDateString();
+            const year = parseInt(issueDate.slice(0, 4), 10);
+            const numRes = await generateInvoiceNumber(db, session, year);
+            const nowIso = new Date().toISOString();
+
+            const updateFields = {
+                invoiceNumber: numRes.invoiceNumber,
+                issueDate,
+                ...(rawBody.dueDate ? { dueDate: rawBody.dueDate } : {}),
+                documentStatus: 'issued',
+                editVersion: invoice.editVersion + 1,
+                updatedAt: nowIso
+            };
+
+            const fullUpdatedDoc = { ...invoice, ...updateFields };
+            validateInvoiceDomainRules(fullUpdatedDoc);
+            if (!validateInvoiceDocumentSchema(fullUpdatedDoc)) {
+                const schemaErr = new Error(`Błąd schematu wystawionej faktury: ${validateInvoiceDocumentSchema.errors?.[0]?.message}`);
+                schemaErr.statusCode = 400;
+                throw schemaErr;
+            }
+
+            const updateResult = await db.collection('invoices').updateOne(
+                { id, editVersion: invoice.editVersion },
+                { $set: updateFields },
+                opt
+            );
+
+            if (updateResult.matchedCount === 0) {
+                const raceErr = new Error("Konflikt współbieżności podczas wystawiania faktury.");
+                raceErr.statusCode = 409;
+                raceErr.code = 'VERSION_CONFLICT';
+                throw raceErr;
+            }
+
+            await recalculateJobInvoiceAggregates(invoice.jobId, session);
+            await finalizeIdempotencyLease({ db, lease, endpoint, statusCode: 200, responseBody: fullUpdatedDoc, session });
+            return fullUpdatedDoc;
+        };
+
+        let resultDoc = null;
+        if (useTransaction) {
+            const session = clientToUse.startSession();
+            try {
+                await session.withTransaction(async () => {
+                    resultDoc = await executeIssue(session);
+                });
+            } finally {
+                await session.endSession();
+            }
+        } else {
+            resultDoc = await executeIssue(null);
+        }
+
+        if (lease) {
+            lease.completed = true;
+            if (lease.heartbeat) clearInterval(lease.heartbeat);
+        }
+
+        return res.status(200).json(resultDoc);
+    } catch (err) {
+        console.error('[handleIssueInvoiceAtomic ERROR]', err);
+        return res.status(err.statusCode || 500).json({
+            code: err.code || 'ISSUE_FAILED',
+            error: err.message
+        });
+    } finally {
+        if (lease && lease.heartbeat) clearInterval(lease.heartbeat);
+        if (lease && lease.hasKey && !lease.completed && lease.ownerToken) {
+            await releaseIdempotencyLease({ db, lease });
+        }
+    }
+}
+
+async function handlePayInvoiceAtomic(req, res) {
+    let lease = null;
+    try {
+        if (!db) return res.status(503).json({ error: 'Database not connected' });
+        const { id } = req.params;
+        const rawBody = req.body || {};
+
+        const isValid = validateInvoicePaymentSchema(rawBody);
+        if (!isValid) {
+            const firstErr = validateInvoicePaymentSchema.errors?.[0];
+            return res.status(400).json({
+                error: `Błąd walidacji danych płatności faktury: ${firstErr?.message || 'nieprawidłowe dane'} (ścieżka: ${firstErr?.instancePath || 'root'})`
+            });
+        }
+
+        const endpoint = '/api/invoices/pay';
+        const idempotencyKey = req.headers['idempotency-key'] || req.headers['x-idempotency-key'] || null;
+        lease = await acquireIdempotencyLease({ db, endpoint, idempotencyKey, payload: { id, ...rawBody } });
+        if (lease.completed) {
+            return res.status(lease.statusCode).json(lease.responseBody);
+        }
+
+        const clientToUse = client || (db && db.client);
+        const replicaSetActive = isReplicaSet || (clientToUse && (await checkReplicaSetTopology(clientToUse)));
+        const useTransaction = replicaSetActive && clientToUse && typeof clientToUse.startSession === 'function';
+
+        const executePay = async (session) => {
+            const opt = session ? { session } : {};
+            const invoice = await db.collection('invoices').findOne({ id }, opt);
+            if (!invoice) {
+                const notFoundErr = new Error(`Faktura o identyfikatorze '${id}' nie istnieje.`);
+                notFoundErr.statusCode = 404;
+                throw notFoundErr;
+            }
+
+            if (invoice.documentStatus !== 'issued') {
+                const statusErr = new Error(`Nie można zarejestrować płatności/zwrotu dla faktury o statusie '${invoice.documentStatus}'. Płatności są dozwolone wyłącznie dla faktur wystawionych ('issued').`);
+                statusErr.statusCode = 400;
+                throw statusErr;
+            }
+
+            if (invoice.editVersion !== rawBody.expectedVersion) {
+                const casErr = new Error("Faktura została zmodyfikowana przez innego użytkownika. Pobierz aktualne dane przed ponowną próbą rejestracji płatności.");
+                casErr.statusCode = 409;
+                casErr.code = 'VERSION_CONFLICT';
+                throw casErr;
+            }
+
+            await verifyIdempotencyLease({ db, lease, endpoint, session });
+
+            const existingPayments = await db.collection('invoice-payments')
+                .find({ invoiceId: id }, opt)
+                .sort({ sequence: 1 })
+                .toArray();
+
+            const nextSequence = existingPayments.length > 0
+                ? existingPayments[existingPayments.length - 1].sequence + 1
+                : 1;
+
+            const nowIso = new Date().toISOString();
+            const paymentEvent = {
+                id: rawBody.id || `pay-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+                invoiceId: id,
+                jobId: invoice.jobId,
+                type: rawBody.type || 'payment',
+                amountMinor: rawBody.amountMinor,
+                currency: invoice.currency || 'PLN',
+                paymentDate: rawBody.paymentDate || getWarsawDateString(),
+                paymentMethod: rawBody.paymentMethod,
+                sequence: nextSequence,
+                reversesPaymentId: rawBody.reversesPaymentId || null,
+                idempotencyKey: lease.hasKey ? lease.key : (req.headers['x-idempotency-key'] || req.headers['idempotency-key'] || null),
+                operationId: rawBody.operationId || null,
+                reference: rawBody.reference || '',
+                notes: rawBody.notes || '',
+                recordedBy: req.user?.name || req.user?.username || 'admin',
+                createdAt: nowIso
+            };
+
+            const candidateLedger = [...existingPayments, paymentEvent];
+            const newPaidAmountMinor = validateInvoicePaymentsLedger(candidateLedger, {
+                amountGrossMinor: invoice.amountGrossMinor
+            });
+
+            let newPaymentStatus = 'unpaid';
+            if (newPaidAmountMinor === 0) {
+                newPaymentStatus = 'unpaid';
+            } else if (newPaidAmountMinor < invoice.amountGrossMinor) {
+                newPaymentStatus = 'partial';
+            } else {
+                newPaymentStatus = 'paid';
+            }
+            const newRemainingAmountMinor = invoice.amountGrossMinor - newPaidAmountMinor;
+            const newPaidDate = newPaymentStatus === 'paid' ? paymentEvent.paymentDate : null;
+
+            const invoiceUpdates = {
+                paidAmountMinor: newPaidAmountMinor,
+                remainingAmountMinor: newRemainingAmountMinor,
+                paymentStatus: newPaymentStatus,
+                paidDate: newPaidDate,
+                paidAmount: newPaidAmountMinor / 100,
+                editVersion: invoice.editVersion + 1,
+                updatedAt: nowIso
+            };
+
+            const fullInvoiceDoc = { ...invoice, ...invoiceUpdates };
+            validateInvoiceDomainRules(fullInvoiceDoc);
+            if (!validateInvoiceDocumentSchema(fullInvoiceDoc)) {
+                const schemaErr = new Error(`Błąd schematu faktury po rejestracji płatności: ${validateInvoiceDocumentSchema.errors?.[0]?.message}`);
+                schemaErr.statusCode = 400;
+                throw schemaErr;
+            }
+
+            await db.collection('invoice-payments').insertOne(paymentEvent, opt);
+            const updateResult = await db.collection('invoices').updateOne(
+                { id, editVersion: invoice.editVersion },
+                { $set: invoiceUpdates },
+                opt
+            );
+
+            if (updateResult.matchedCount === 0) {
+                const raceErr = new Error("Konflikt współbieżności podczas aktualizacji faktury przy płatności.");
+                raceErr.statusCode = 409;
+                raceErr.code = 'VERSION_CONFLICT';
+                throw raceErr;
+            }
+
+            await recalculateJobInvoiceAggregates(invoice.jobId, session);
+            const resultPayload = { invoice: fullInvoiceDoc, payment: paymentEvent };
+            await finalizeIdempotencyLease({ db, lease, endpoint, statusCode: 200, responseBody: resultPayload, session });
+            return resultPayload;
+        };
+
+        let result = null;
+        if (useTransaction) {
+            const session = clientToUse.startSession();
+            try {
+                await session.withTransaction(async () => {
+                    result = await executePay(session);
+                });
+            } finally {
+                await session.endSession();
+            }
+        } else {
+            result = await executePay(null);
+        }
+
+        if (lease) {
+            lease.completed = true;
+            if (lease.heartbeat) clearInterval(lease.heartbeat);
+        }
+
+        return res.status(200).json(result);
+    } catch (err) {
+        console.error('[handlePayInvoiceAtomic ERROR]', err);
+        return res.status(err.statusCode || 400).json({
+            code: err.code || 'PAYMENT_FAILED',
+            error: err.message
+        });
+    } finally {
+        if (lease && lease.heartbeat) clearInterval(lease.heartbeat);
+        if (lease && lease.hasKey && !lease.completed && lease.ownerToken) {
+            await releaseIdempotencyLease({ db, lease });
+        }
+    }
+}
+
+async function handleCancelInvoiceAtomic(req, res) {
+    let lease = null;
+    try {
+        if (!db) return res.status(503).json({ error: 'Database not connected' });
+        const { id } = req.params;
+        const rawBody = req.body || {};
+
+        const isValid = validateInvoiceCancelSchema(rawBody);
+        if (!isValid) {
+            const firstErr = validateInvoiceCancelSchema.errors?.[0];
+            return res.status(400).json({
+                error: `Błąd walidacji danych anulowania faktury: ${firstErr?.message || 'nieprawidłowe dane'} (ścieżka: ${firstErr?.instancePath || 'root'})`
+            });
+        }
+
+        const endpoint = '/api/invoices/cancel';
+        const idempotencyKey = req.headers['idempotency-key'] || req.headers['x-idempotency-key'] || null;
+        lease = await acquireIdempotencyLease({ db, endpoint, idempotencyKey, payload: { id, ...rawBody } });
+        if (lease.completed) {
+            return res.status(lease.statusCode).json(lease.responseBody);
+        }
+
+        const clientToUse = client || (db && db.client);
+        const replicaSetActive = isReplicaSet || (clientToUse && (await checkReplicaSetTopology(clientToUse)));
+        const useTransaction = replicaSetActive && clientToUse && typeof clientToUse.startSession === 'function';
+
+        const executeCancel = async (session) => {
+            const opt = session ? { session } : {};
+            const invoice = await db.collection('invoices').findOne({ id }, opt);
+            if (!invoice) {
+                const notFoundErr = new Error(`Faktura o identyfikatorze '${id}' nie istnieje.`);
+                notFoundErr.statusCode = 404;
+                throw notFoundErr;
+            }
+
+            if (invoice.documentStatus === 'cancelled') {
+                const cancelledErr = new Error('Faktura została już wcześniej anulowana.');
+                cancelledErr.statusCode = 400;
+                throw cancelledErr;
+            }
+            if (invoice.documentStatus !== 'issued') {
+                const statusErr = new Error(`Tylko wystawiona faktura ('issued') może zostać anulowana (aktualny status: '${invoice.documentStatus}'). Szkic należy zmodyfikować lub usunąć.`);
+                statusErr.statusCode = 400;
+                throw statusErr;
+            }
+
+            if (invoice.editVersion !== rawBody.expectedVersion) {
+                const casErr = new Error("Faktura została zmodyfikowana przez innego użytkownika. Pobierz aktualne dane przed ponowną próbą anulowania.");
+                casErr.statusCode = 409;
+                casErr.code = 'VERSION_CONFLICT';
+                throw casErr;
+            }
+
+            if (invoice.paidAmountMinor > 0) {
+                const paidErr = new Error(`Anulowanie faktury z nierozliczonymi wpłatami jest niedozwolone. Saldo wpłat wynosi ${(invoice.paidAmountMinor / 100).toFixed(2)} PLN. Przed anulowaniem należy zarejestrować zwrot wszystkich wpłat.`);
+                paidErr.statusCode = 400;
+                throw paidErr;
+            }
+
+            await verifyIdempotencyLease({ db, lease, endpoint, session });
+
+            const nowIso = new Date().toISOString();
+            const cancellationDate = rawBody.cancellationDate || getWarsawDateString();
+            const cancelReason = rawBody.reason.trim();
+
+            const cancelUpdates = {
+                documentStatus: 'cancelled',
+                cancellationDate,
+                cancelledAt: nowIso,
+                cancelReason,
+                editVersion: invoice.editVersion + 1,
+                updatedAt: nowIso
+            };
+
+            const fullCancelDoc = { ...invoice, ...cancelUpdates };
+            validateInvoiceDomainRules(fullCancelDoc);
+            if (!validateInvoiceDocumentSchema(fullCancelDoc)) {
+                const schemaErr = new Error(`Błąd schematu anulowanej faktury: ${validateInvoiceDocumentSchema.errors?.[0]?.message}`);
+                schemaErr.statusCode = 400;
+                throw schemaErr;
+            }
+
+            const updateResult = await db.collection('invoices').updateOne(
+                { id, editVersion: invoice.editVersion },
+                { $set: cancelUpdates },
+                opt
+            );
+
+            if (updateResult.matchedCount === 0) {
+                const raceErr = new Error("Konflikt współbieżności podczas anulowania faktury.");
+                raceErr.statusCode = 409;
+                raceErr.code = 'VERSION_CONFLICT';
+                throw raceErr;
+            }
+
+            await recalculateJobInvoiceAggregates(invoice.jobId, session);
+            await finalizeIdempotencyLease({ db, lease, endpoint, statusCode: 200, responseBody: fullCancelDoc, session });
+            return fullCancelDoc;
+        };
+
+        let resultDoc = null;
+        if (useTransaction) {
+            const session = clientToUse.startSession();
+            try {
+                await session.withTransaction(async () => {
+                    resultDoc = await executeCancel(session);
+                });
+            } finally {
+                await session.endSession();
+            }
+        } else {
+            resultDoc = await executeCancel(null);
+        }
+
+        if (lease) {
+            lease.completed = true;
+            if (lease.heartbeat) clearInterval(lease.heartbeat);
+        }
+
+        return res.status(200).json(resultDoc);
+    } catch (err) {
+        console.error('[handleCancelInvoiceAtomic ERROR]', err);
+        return res.status(err.statusCode || 500).json({
+            code: err.code || 'CANCEL_FAILED',
+            error: err.message
+        });
+    } finally {
+        if (lease && lease.heartbeat) clearInterval(lease.heartbeat);
+        if (lease && lease.hasKey && !lease.completed && lease.ownerToken) {
+            await releaseIdempotencyLease({ db, lease });
+        }
+    }
+}
+
+async function handleGetInvoicePayments(req, res) {
+    try {
+        if (!db) return res.status(503).json({ error: 'Database not connected' });
+        const { id } = req.params;
+        const payments = await db.collection('invoice-payments')
+            .find({ invoiceId: id })
+            .sort({ sequence: 1 })
+            .toArray();
+        return res.status(200).json(payments);
+    } catch (err) {
+        console.error('[handleGetInvoicePayments ERROR]', err);
+        return res.status(500).json({ error: err.message });
+    }
+}
+
+app.post('/api/invoices/create-atomic', verifyToken, requireRole('admin', 'manager'), requireTransactions, validateInvoice, validateFinancialAmount, async (req, res) => handleCreateInvoiceDraftAtomic(req, res, { returnInvoiceOnly: false }));
+app.post('/api/invoices/:id/issue', verifyToken, requireRole('admin', 'manager'), requireTransactions, handleIssueInvoiceAtomic);
+app.post('/api/invoices/:id/pay', verifyToken, requireRole('admin', 'manager'), requireTransactions, handlePayInvoiceAtomic);
+app.post('/api/invoices/:id/cancel', verifyToken, requireRole('admin', 'manager'), requireTransactions, handleCancelInvoiceAtomic);
+app.get('/api/invoices/:id/payments', verifyToken, requireRole('admin', 'manager'), handleGetInvoicePayments);
+
+// [DEPRECATION P1] Legacy PATCH /api/invoices/:id/pay completely retired (returns 410 Gone)
+app.patch('/api/invoices/:id/pay', verifyToken, requireRole('admin', 'manager'), async (req, res) => {
+    return res.status(410).json({
+        code: 'ENDPOINT_DEPRECATED',
+        error: "Endpoint PATCH /api/invoices/:id/pay został wycofany. Płatności i zwroty należy rejestrować za pomocą atomowego endpointu POST /api/invoices/:id/pay z obsługą ledgeru zdarzeń 'invoice-payments' i tokenem CAS expectedVersion."
+    });
+});
+
+app.use('/api/invoices', verifyToken, requireRole('admin', 'manager'), validateInvoice, validateFinancialAmount, createRouter('invoices'));
 app.use('/api/cost-invoices', verifyToken, requireRole('admin', 'manager'), validateFinancialAmount, createRouter('cost-invoices'));
 
 // --- Catalog Collection Routes (cost base) ---
@@ -8203,7 +9608,7 @@ app.use('/api/archived-reports', verifyToken, requireRoleOrSafeGet, createRouter
 app.get('/api/analytics/employee-performance', verifyToken, requireRole('admin', 'manager'), async (req, res) => {
     try {
         if (!db) return res.status(503).json({ error: 'Database not connected' });
-        
+
         const pipeline = [
             { $match: { status: { $in: ['approved', 'admin_approved'] } } },
             { $group: {
@@ -8412,34 +9817,7 @@ app.post('/api/materials/bulk', verifyToken, requireRole('admin', 'manager'), as
     }
 });
 
-// ==========================================
-// INVOICE: Mark as Paid + Revenue Trigger
-// ==========================================
-app.patch('/api/invoices/:id/pay', verifyToken, requireRole('admin', 'manager'), async (req, res) => {
-    try {
-        if (!db) return res.status(503).json({ error: 'Database not connected' });
-        const { id } = req.params;
 
-        const result = await db.collection('invoices').updateOne(
-            { id: id },
-            { $set: { status: 'paid', paidDate: new Date().toISOString(), updatedAt: new Date().toISOString() } }
-        );
-
-        if (result.matchedCount === 0) {
-            return res.status(404).json({ error: 'Invoice not found' });
-        }
-
-        // Trigger revenue recalculation
-        const invoice = await db.collection('invoices').findOne({ id: id });
-        if (invoice?.jobId) {
-            await recalculateJobRevenue(invoice.jobId);
-        }
-
-        res.json({ success: true, message: 'Invoice marked as paid, job revenue updated' });
-    } catch (err) {
-        res.status(500).json({ error: err.message });
-    }
-});
 
 // ==========================================
 // JOB: Recalculate expense costs trigger
@@ -8742,5 +10120,17 @@ module.exports = {
     migrateOfferDomainAndReconcileConflicts,
     syncOfferCountersFromExistingData,
     generateOfferNumber,
-    generateTemplateNumber
+    generateTemplateNumber,
+    validateInvoicePostSchema,
+    validateInvoicePatchSchema,
+    validateInvoiceIssueSchema,
+    validateInvoicePaymentSchema,
+    validateInvoiceCancelSchema,
+    validateInvoiceBatchImportSchema,
+    validateInvoiceBatchImportItemSchema,
+    validateInvoiceDocumentSchema,
+    validateInvoicePaymentDocumentSchema,
+    syncInvoiceCountersFromExistingData,
+    generateInvoiceNumber,
+    recalculateJobInvoiceAggregates
 };

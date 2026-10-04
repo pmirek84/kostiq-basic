@@ -263,6 +263,9 @@
       "allOf": [
         {
           "if": {
+            "required": [
+              "type"
+            ],
             "properties": {
               "type": {
                 "const": "refund"
@@ -768,6 +771,9 @@
       "allOf": [
         {
           "if": {
+            "required": [
+              "type"
+            ],
             "properties": {
               "type": {
                 "const": "refund"
@@ -993,6 +999,9 @@
       "allOf": [
         {
           "if": {
+            "required": [
+              "type"
+            ],
             "properties": {
               "type": {
                 "const": "refund"

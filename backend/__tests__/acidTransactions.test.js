@@ -4346,4 +4346,991 @@ test('ACID Multi-Document Transactions: Real Replica Set Verification', async (t
             await testDb.collection('idempotency_keys').deleteOne({ key: idempKey });
         }
     });
+
+    // ==========================================
+    // INVOICE DOMAIN ACID TRANSACTIONS & LIFECYCLE TESTS
+    // ==========================================
+
+    await t.test('54. [ACID] Invoice Draft creation: creates draft with no number, does not consume counter or affect Job aggregates', async () => {
+        const idempKey = 'inv-draft-idemp-' + Date.now();
+        const testJobId = 'job-acid-inv-1';
+
+        await testDb.collection('jobs').insertOne({
+            id: testJobId,
+            jobCode: 'CF-2026-901',
+            clientName: 'Klient Faktura 1',
+            invoicedRevenueNetMinor: 0,
+            cashReceivedNetMinor: 0,
+            actualRevenue: 0,
+            revenueActualNet: 0,
+            isActive: true,
+            editVersion: 1
+        });
+
+        // 1. Create draft via POST /api/invoices
+        const res = await request(app)
+            .post('/api/invoices')
+            .set('Authorization', 'Bearer ' + adminToken)
+            .set('Idempotency-Key', idempKey)
+            .send({
+                jobId: testJobId,
+                amountNetMinor: 100000,
+                vatRate: 23,
+                dueDate: '2026-10-30',
+                description: 'Montaż okien'
+            });
+
+        assert.strictEqual(res.status, 201);
+        const draft = res.body;
+        assert.ok(draft.id);
+        assert.strictEqual(draft.jobId, testJobId);
+        assert.strictEqual(draft.documentStatus, 'draft');
+        assert.strictEqual(draft.paymentStatus, 'unpaid');
+        assert.strictEqual(draft.invoiceNumber, null);
+        assert.strictEqual(draft.issueDate, null);
+        assert.strictEqual(draft.amountNetMinor, 100000);
+        assert.strictEqual(draft.vatAmountMinor, 23000);
+        assert.strictEqual(draft.amountGrossMinor, 123000);
+        assert.strictEqual(draft.paidAmountMinor, 0);
+        assert.strictEqual(draft.remainingAmountMinor, 123000);
+        assert.strictEqual(draft.editVersion, 1);
+
+        // Idempotent retry returns same draft
+        const retryRes = await request(app)
+            .post('/api/invoices')
+            .set('Authorization', 'Bearer ' + adminToken)
+            .set('Idempotency-Key', idempKey)
+            .send({
+                jobId: testJobId,
+                amountNetMinor: 100000,
+                vatRate: 23,
+                dueDate: '2026-10-30',
+                description: 'Montaż okien'
+            });
+        assert.strictEqual(retryRes.status, 201);
+        assert.strictEqual(retryRes.body.id, draft.id);
+
+        // Job aggregates remain untouched
+        const job = await testDb.collection('jobs').findOne({ id: testJobId });
+        assert.strictEqual(job.invoicedRevenueNetMinor, 0);
+        assert.strictEqual(job.cashReceivedNetMinor, 0);
+    });
+
+    await t.test('55. [ACID] Atomic Invoice Issue: assigns sequential FV/YYYY/NNN, updates Job invoiced revenue in transaction, enforces CAS', async () => {
+        const testJobId = 'job-acid-inv-2';
+        await testDb.collection('jobs').insertOne({
+            id: testJobId,
+            jobCode: 'CF-2026-902',
+            invoicedRevenueNetMinor: 0,
+            cashReceivedNetMinor: 0,
+            actualRevenue: 0,
+            revenueActualNet: 0,
+            isActive: true,
+            editVersion: 1
+        });
+
+        const draftRes = await request(app)
+            .post('/api/invoices')
+            .set('Authorization', 'Bearer ' + adminToken)
+            .set('Idempotency-Key', 'idem-55-draft')
+            .send({
+                jobId: testJobId,
+                amountNetMinor: 150000,
+                vatRate: 23
+            });
+        assert.strictEqual(draftRes.status, 201);
+        const draftId = draftRes.body.id;
+
+        // 1. Issue with correct expectedVersion
+        const issueRes = await request(app)
+            .post(`/api/invoices/${draftId}/issue`)
+            .set('Authorization', 'Bearer ' + adminToken)
+            .set('Idempotency-Key', 'idem-55-issue-1')
+            .send({
+                expectedVersion: 1,
+                issueDate: '2026-10-04'
+            });
+
+        assert.strictEqual(issueRes.status, 200);
+        const issued = issueRes.body;
+        assert.strictEqual(issued.documentStatus, 'issued');
+        assert.ok(/^FV\/2026\/\d{3,}$/.test(issued.invoiceNumber));
+        assert.strictEqual(issued.issueDate, '2026-10-04');
+        assert.strictEqual(issued.editVersion, 2);
+
+        // 2. Job aggregates updated in same transaction
+        const jobAfterIssue = await testDb.collection('jobs').findOne({ id: testJobId });
+        assert.strictEqual(jobAfterIssue.invoicedRevenueNetMinor, 150000);
+
+        // 3. Stale CAS attempt rejected
+        const staleRes = await request(app)
+            .post(`/api/invoices/${draftId}/issue`)
+            .set('Authorization', 'Bearer ' + adminToken)
+            .set('Idempotency-Key', 'idem-55-issue-stale')
+            .send({
+                expectedVersion: 1,
+                issueDate: '2026-10-04'
+            });
+        assert.strictEqual(staleRes.status, 409);
+    });
+
+    await t.test('56. [ACID] Number generation enforces Warsaw year parity: 2025 date assigns FV/2025/NNN', async () => {
+        const testJobId = 'job-acid-inv-3';
+        await testDb.collection('jobs').insertOne({
+            id: testJobId,
+            jobCode: 'CF-2026-903',
+            invoicedRevenueNetMinor: 0,
+            cashReceivedNetMinor: 0,
+            isActive: true,
+            editVersion: 1
+        });
+
+        const draftRes = await request(app)
+            .post('/api/invoices')
+            .set('Authorization', 'Bearer ' + adminToken)
+            .set('Idempotency-Key', 'idem-56-draft')
+            .send({
+                jobId: testJobId,
+                amountNetMinor: 50000,
+                vatRate: 8
+            });
+        const draftId = draftRes.body.id;
+
+        const issueRes = await request(app)
+            .post(`/api/invoices/${draftId}/issue`)
+            .set('Authorization', 'Bearer ' + adminToken)
+            .set('Idempotency-Key', 'idem-56-issue')
+            .send({
+                expectedVersion: 1,
+                issueDate: '2025-11-20' // 2025 issueDate!
+            });
+
+        assert.strictEqual(issueRes.status, 200);
+        assert.ok(/^FV\/2025\/\d{3,}$/.test(issueRes.body.invoiceNumber));
+        assert.strictEqual(issueRes.body.issueDate, '2025-11-20');
+    });
+
+    await t.test('57. [ACID] Ledger payment & refund: per-payment tracking, updates cashReceived in transaction', async () => {
+        const testJobId = 'job-acid-inv-4';
+        await testDb.collection('jobs').insertOne({
+            id: testJobId,
+            jobCode: 'CF-2026-904',
+            invoicedRevenueNetMinor: 0,
+            cashReceivedNetMinor: 0,
+            actualRevenue: 0,
+            revenueActualNet: 0,
+            isActive: true,
+            editVersion: 1
+        });
+
+        // Create and issue invoice for 1000.00 PLN gross (net 813.01, vat 186.99)
+        const draftRes = await request(app)
+            .post('/api/invoices')
+            .set('Authorization', 'Bearer ' + adminToken)
+            .set('Idempotency-Key', 'idem-57-draft')
+            .send({
+                jobId: testJobId,
+                amountNetMinor: 81301,
+                vatRate: 23
+            });
+        const invId = draftRes.body.id;
+        const grossMinor = draftRes.body.amountGrossMinor; // 100000
+
+        await request(app)
+            .post(`/api/invoices/${invId}/issue`)
+            .set('Authorization', 'Bearer ' + adminToken)
+            .set('Idempotency-Key', 'idem-57-issue')
+            .send({ expectedVersion: 1, issueDate: '2026-10-01' });
+
+        // 1. Partial payment 40000 (400 PLN)
+        const payRes1 = await request(app)
+            .post(`/api/invoices/${invId}/pay`)
+            .set('Authorization', 'Bearer ' + adminToken)
+            .set('Idempotency-Key', 'idem-57-pay-1')
+            .send({
+                expectedVersion: 2,
+                amountMinor: 40000,
+                paymentMethod: 'transfer',
+                paymentDate: '2026-10-02'
+            });
+
+        assert.strictEqual(payRes1.status, 200);
+        assert.strictEqual(payRes1.body.invoice.paidAmountMinor, 40000);
+        assert.strictEqual(payRes1.body.invoice.remainingAmountMinor, 60000);
+        assert.strictEqual(payRes1.body.invoice.paymentStatus, 'partial');
+        const pay1Id = payRes1.body.payment.id;
+
+        // Job cashReceived is updated with proportional NET amount (40000 * 81301 / 100000 = 32520)
+        let job = await testDb.collection('jobs').findOne({ id: testJobId });
+        assert.strictEqual(job.cashReceivedNetMinor, 32520);
+        assert.strictEqual(job.actualRevenue, 325.2);
+
+        // 2. Excessive refund on pay1 (trying 50000 when pay1 was 40000) is REJECTED
+        const badRefundRes = await request(app)
+            .post(`/api/invoices/${invId}/pay`)
+            .set('Authorization', 'Bearer ' + adminToken)
+            .set('Idempotency-Key', 'idem-57-refund-bad')
+            .send({
+                expectedVersion: 3,
+                type: 'refund',
+                amountMinor: 50000,
+                paymentMethod: 'transfer',
+                reversesPaymentId: pay1Id,
+                paymentDate: '2026-10-03'
+            });
+        assert.strictEqual(badRefundRes.status, 400);
+
+        // 3. Valid refund of 40000 reverses payment to 0
+        const refundRes = await request(app)
+            .post(`/api/invoices/${invId}/pay`)
+            .set('Authorization', 'Bearer ' + adminToken)
+            .set('Idempotency-Key', 'idem-57-refund-good')
+            .send({
+                expectedVersion: 3,
+                type: 'refund',
+                amountMinor: 40000,
+                paymentMethod: 'transfer',
+                reversesPaymentId: pay1Id,
+                paymentDate: '2026-10-03'
+            });
+        assert.strictEqual(refundRes.status, 200);
+        assert.strictEqual(refundRes.body.invoice.paidAmountMinor, 0);
+        assert.strictEqual(refundRes.body.invoice.paymentStatus, 'unpaid');
+
+        // Job cashReceived is back to 0
+        job = await testDb.collection('jobs').findOne({ id: testJobId });
+        assert.strictEqual(job.cashReceivedNetMinor, 0);
+        assert.strictEqual(job.actualRevenue, 0);
+    });
+
+    await t.test('58. [ACID] Cancellation rule: cannot cancel with unrefunded payments, cancels at 0 balance, updates Job revenue', async () => {
+        const testJobId = 'job-acid-inv-5';
+        await testDb.collection('jobs').insertOne({
+            id: testJobId,
+            jobCode: 'CF-2026-905',
+            invoicedRevenueNetMinor: 0,
+            cashReceivedNetMinor: 0,
+            actualRevenue: 0,
+            revenueActualNet: 0,
+            isActive: true,
+            editVersion: 1
+        });
+
+        const draftRes = await request(app)
+            .post('/api/invoices')
+            .set('Authorization', 'Bearer ' + adminToken)
+            .set('Idempotency-Key', 'idem-58-draft')
+            .send({
+                jobId: testJobId,
+                amountNetMinor: 200000,
+                vatRate: 23
+            });
+        const invId = draftRes.body.id;
+
+        await request(app)
+            .post(`/api/invoices/${invId}/issue`)
+            .set('Authorization', 'Bearer ' + adminToken)
+            .set('Idempotency-Key', 'idem-58-issue')
+            .send({ expectedVersion: 1, issueDate: '2026-10-01' });
+
+        // Add payment of 50000
+        const payRes = await request(app)
+            .post(`/api/invoices/${invId}/pay`)
+            .set('Authorization', 'Bearer ' + adminToken)
+            .set('Idempotency-Key', 'idem-58-pay-1')
+            .send({
+                expectedVersion: 2,
+                amountMinor: 50000,
+                paymentMethod: 'transfer'
+            });
+        const payId = payRes.body.payment.id;
+
+        // 1. Attempt to cancel invoice with active payment -> REJECTED
+        const cancelWithPay = await request(app)
+            .post(`/api/invoices/${invId}/cancel`)
+            .set('Authorization', 'Bearer ' + adminToken)
+            .set('Idempotency-Key', 'idem-58-cancel-attempt')
+            .send({
+                expectedVersion: 3,
+                reason: 'Rezygnacja'
+            });
+        assert.strictEqual(cancelWithPay.status, 400);
+        assert.ok(cancelWithPay.body.error.includes('nierozliczonymi wpłatami'));
+
+        // 2. Refund payment
+        await request(app)
+            .post(`/api/invoices/${invId}/pay`)
+            .set('Authorization', 'Bearer ' + adminToken)
+            .set('Idempotency-Key', 'idem-58-pay-refund')
+            .send({
+                expectedVersion: 3,
+                type: 'refund',
+                amountMinor: 50000,
+                paymentMethod: 'transfer',
+                reversesPaymentId: payId
+            });
+
+        // 3. Cancel with 0 balance -> SUCCESS
+        const cancelRes = await request(app)
+            .post(`/api/invoices/${invId}/cancel`)
+            .set('Authorization', 'Bearer ' + adminToken)
+            .set('Idempotency-Key', 'idem-58-cancel-final')
+            .send({
+                expectedVersion: 4,
+                reason: 'Klient odstąpił od umowy'
+            });
+
+        assert.strictEqual(cancelRes.status, 200);
+        const cancelled = cancelRes.body;
+        assert.strictEqual(cancelled.documentStatus, 'cancelled');
+        assert.ok(cancelled.invoiceNumber);
+        assert.ok(cancelled.issueDate);
+        assert.strictEqual(cancelled.cancelReason, 'Klient odstąpił od umowy');
+        assert.ok(cancelled.cancelledAt);
+
+        // Job invoiced revenue returns to 0
+        const job = await testDb.collection('jobs').findOne({ id: testJobId });
+        assert.strictEqual(job.invoicedRevenueNetMinor, 0);
+    });
+
+    await t.test('59. [ACID] Batch import: advances counters to max seq, imports payments, recalculates Job aggregates', async () => {
+        const testJobId = 'job-acid-inv-6';
+        await testDb.collection('jobs').insertOne({
+            id: testJobId,
+            jobCode: 'CF-2026-906',
+            invoicedRevenueNetMinor: 0,
+            cashReceivedNetMinor: 0,
+            actualRevenue: 0,
+            revenueActualNet: 0,
+            isActive: true,
+            editVersion: 1
+        });
+
+        const importItem = {
+            id: 'inv-imp-acid-1',
+            jobId: testJobId,
+            invoiceNumber: 'FV/2026/850',
+            documentStatus: 'issued',
+            issueDate: '2026-09-15',
+            amountNetMinor: 100000,
+            vatRate: 23,
+            payments: [
+                {
+                    id: 'pay-imp-1',
+                    type: 'payment',
+                    amountMinor: 123000,
+                    paymentDate: '2026-09-16',
+                    paymentMethod: 'transfer',
+                    sequence: 1
+                }
+            ]
+        };
+
+        const batchRes = await request(app)
+            .post('/api/invoices/batch-import')
+            .set('Authorization', 'Bearer ' + adminToken)
+            .send({ items: [importItem] });
+
+        assert.strictEqual(batchRes.status, 200);
+
+        // 1. Counter was advanced to at least 850
+        const counter = await testDb.collection('counters').findOne({ _id: 'invoice_2026' });
+        assert.ok(counter.seq >= 850);
+
+        // 2. Next issued invoice receives sequence > 850
+        const draftRes = await request(app)
+            .post('/api/invoices')
+            .set('Authorization', 'Bearer ' + adminToken)
+            .set('Idempotency-Key', 'idem-59-draft')
+            .send({
+                jobId: testJobId,
+                amountNetMinor: 50000,
+                vatRate: 23
+            });
+        const issueRes = await request(app)
+            .post(`/api/invoices/${draftRes.body.id}/issue`)
+            .set('Authorization', 'Bearer ' + adminToken)
+            .set('Idempotency-Key', 'idem-59-issue')
+            .send({ expectedVersion: 1 });
+
+        assert.strictEqual(issueRes.status, 200);
+        assert.strictEqual(issueRes.body.invoiceNumber, 'FV/2026/851');
+
+        // 3. Job aggregates reflect imported + newly issued invoices
+        const job = await testDb.collection('jobs').findOne({ id: testJobId });
+        assert.strictEqual(job.invoicedRevenueNetMinor, 150000); // 100000 + 50000
+        assert.strictEqual(job.cashReceivedNetMinor, 100000); // 123000 gross payment -> 100000 net cash
+        assert.strictEqual(job.actualRevenue, 1000);
+    });
+
+    await t.test('60. [ACID] Draft PATCH: CAS enforcement, amount recalculation, disallow non-draft modification', async () => {
+        const testJobId = 'job-acid-inv-7';
+        await testDb.collection('jobs').insertOne({
+            id: testJobId,
+            jobCode: 'CF-2026-907',
+            invoicedRevenueNetMinor: 0,
+            cashReceivedNetMinor: 0,
+            actualRevenue: 0,
+            revenueActualNet: 0,
+            isActive: true,
+            editVersion: 1
+        });
+
+        // 1. Create draft
+        const draftRes = await request(app)
+            .post('/api/invoices')
+            .set('Authorization', 'Bearer ' + adminToken)
+            .set('Idempotency-Key', 'idem-60-draft')
+            .send({
+                jobId: testJobId,
+                amountNetMinor: 100000,
+                vatRate: 23
+            });
+        const invId = draftRes.body.id;
+        assert.strictEqual(draftRes.body.amountGrossMinor, 123000);
+        assert.strictEqual(draftRes.body.editVersion, 1);
+
+        // 2. PATCH without expectedVersion -> 400 (schema requires expectedVersion)
+        const noCasRes = await request(app)
+            .patch(`/api/invoices/${invId}`)
+            .set('Authorization', 'Bearer ' + adminToken)
+            .send({ amountNetMinor: 200000 });
+        assert.strictEqual(noCasRes.status, 400);
+        assert.ok(noCasRes.body.error.includes('walidacji') || noCasRes.body.error.includes('expectedVersion'));
+
+        // 3. PATCH with stale expectedVersion -> 409 VERSION_CONFLICT
+        const staleCasRes = await request(app)
+            .patch(`/api/invoices/${invId}`)
+            .set('Authorization', 'Bearer ' + adminToken)
+            .send({ expectedVersion: 999, amountNetMinor: 200000, vatRate: 23 });
+        assert.strictEqual(staleCasRes.status, 409);
+
+        // 4. Valid PATCH recalculates net, VAT, and gross
+        const validPatchRes = await request(app)
+            .patch(`/api/invoices/${invId}`)
+            .set('Authorization', 'Bearer ' + adminToken)
+            .send({
+                expectedVersion: 1,
+                amountNetMinor: 200000,
+                vatRate: 8
+            });
+        assert.strictEqual(validPatchRes.status, 200);
+        assert.strictEqual(validPatchRes.body.amountNetMinor, 200000);
+        assert.strictEqual(validPatchRes.body.vatAmountMinor, 16000);
+        assert.strictEqual(validPatchRes.body.amountGrossMinor, 216000);
+        assert.strictEqual(validPatchRes.body.editVersion, 2);
+
+        // 5. Issue invoice, then verify PATCH is forbidden (400)
+        await request(app)
+            .post(`/api/invoices/${invId}/issue`)
+            .set('Authorization', 'Bearer ' + adminToken)
+            .set('Idempotency-Key', 'idem-60-issue')
+            .send({ expectedVersion: 2, issueDate: '2026-10-01' });
+
+        const patchIssuedRes = await request(app)
+            .patch(`/api/invoices/${invId}`)
+            .set('Authorization', 'Bearer ' + adminToken)
+            .send({ expectedVersion: 3, amountNetMinor: 300000 });
+        assert.strictEqual(patchIssuedRes.status, 400);
+        assert.ok(patchIssuedRes.body.error.includes('wyłącznie dla szkiców'));
+    });
+
+    await t.test('61. [ACID] Draft DELETE: CAS atomicity, rejection on issued invoice', async () => {
+        const testJobId = 'job-acid-inv-8';
+        await testDb.collection('jobs').insertOne({
+            id: testJobId,
+            jobCode: 'CF-2026-908',
+            invoicedRevenueNetMinor: 0,
+            cashReceivedNetMinor: 0,
+            actualRevenue: 0,
+            revenueActualNet: 0,
+            isActive: true,
+            editVersion: 1
+        });
+
+        // 1. Create draft
+        const draftRes = await request(app)
+            .post('/api/invoices')
+            .set('Authorization', 'Bearer ' + adminToken)
+            .set('Idempotency-Key', 'idem-61-draft-1')
+            .send({
+                jobId: testJobId,
+                amountNetMinor: 50000,
+                vatRate: 23
+            });
+        const invId = draftRes.body.id;
+
+        // 2. DELETE without expectedVersion -> 428 PRECONDITION_REQUIRED
+        const noCasDel = await request(app)
+            .delete(`/api/invoices/${invId}`)
+            .set('Authorization', 'Bearer ' + adminToken);
+        assert.strictEqual(noCasDel.status, 428);
+
+        // 3. DELETE with stale version -> 409 VERSION_CONFLICT
+        const staleDel = await request(app)
+            .delete(`/api/invoices/${invId}`)
+            .set('Authorization', 'Bearer ' + adminToken)
+            .set('If-Match', '999');
+        assert.strictEqual(staleDel.status, 409);
+
+        // 4. Valid DELETE removes draft (204 No Content)
+        const validDel = await request(app)
+            .delete(`/api/invoices/${invId}`)
+            .set('Authorization', 'Bearer ' + adminToken)
+            .set('If-Match', '1');
+        assert.strictEqual(validDel.status, 204);
+
+        const checkInDb = await testDb.collection('invoices').findOne({ id: invId });
+        assert.strictEqual(checkInDb, null);
+
+        // 5. Creating and issuing invoice -> DELETE must fail with 400
+        const draft2 = await request(app)
+            .post('/api/invoices')
+            .set('Authorization', 'Bearer ' + adminToken)
+            .set('Idempotency-Key', 'idem-61-draft-2')
+            .send({
+                jobId: testJobId,
+                amountNetMinor: 50000,
+                vatRate: 23
+            });
+        const inv2Id = draft2.body.id;
+        await request(app)
+            .post(`/api/invoices/${inv2Id}/issue`)
+            .set('Authorization', 'Bearer ' + adminToken)
+            .set('Idempotency-Key', 'idem-61-issue-2')
+            .send({ expectedVersion: 1 });
+
+        const deleteIssued = await request(app)
+            .delete(`/api/invoices/${inv2Id}`)
+            .set('Authorization', 'Bearer ' + adminToken)
+            .set('If-Match', '2');
+        assert.strictEqual(deleteIssued.status, 400);
+        assert.ok(deleteIssued.body.error.includes('Wystawioną fakturę należy anulować'));
+    });
+
+    await t.test('62. [ACID] Idempotency: retry replay and payload hash conflict on issue, pay, cancel, draft', async () => {
+        const testJobId = 'job-acid-inv-9';
+        await testDb.collection('jobs').insertOne({
+            id: testJobId,
+            jobCode: 'CF-2026-909',
+            invoicedRevenueNetMinor: 0,
+            cashReceivedNetMinor: 0,
+            actualRevenue: 0,
+            revenueActualNet: 0,
+            isActive: true,
+            editVersion: 1
+        });
+
+        // 1. Draft creation idempotency
+        const keyDraft = 'idem-draft-1';
+        const resDraft1 = await request(app)
+            .post('/api/invoices')
+            .set('Authorization', 'Bearer ' + adminToken)
+            .set('Idempotency-Key', keyDraft)
+            .send({ jobId: testJobId, amountNetMinor: 100000, vatRate: 23 });
+        assert.strictEqual(resDraft1.status, 201);
+        const invId = resDraft1.body.id;
+
+        // Replay same key & body -> returns exact saved response
+        const resDraftReplay = await request(app)
+            .post('/api/invoices')
+            .set('Authorization', 'Bearer ' + adminToken)
+            .set('Idempotency-Key', keyDraft)
+            .send({ jobId: testJobId, amountNetMinor: 100000, vatRate: 23 });
+        assert.strictEqual(resDraftReplay.status, 201);
+        assert.strictEqual(resDraftReplay.body.id, invId);
+
+        // Same key, different body -> 409 IDEMPOTENCY_CONFLICT
+        const resDraftConflict = await request(app)
+            .post('/api/invoices')
+            .set('Authorization', 'Bearer ' + adminToken)
+            .set('Idempotency-Key', keyDraft)
+            .send({ jobId: testJobId, amountNetMinor: 999999, vatRate: 23 });
+        assert.strictEqual(resDraftConflict.status, 409);
+
+        // 2. Issue idempotency
+        const keyIssue = 'idem-issue-1';
+        const resIssue1 = await request(app)
+            .post(`/api/invoices/${invId}/issue`)
+            .set('Authorization', 'Bearer ' + adminToken)
+            .set('Idempotency-Key', keyIssue)
+            .send({ expectedVersion: 1, issueDate: '2026-10-01' });
+        assert.strictEqual(resIssue1.status, 200);
+        const invNum = resIssue1.body.invoiceNumber;
+
+        // Replay issue -> returns 200 with saved issued invoice
+        const resIssueReplay = await request(app)
+            .post(`/api/invoices/${invId}/issue`)
+            .set('Authorization', 'Bearer ' + adminToken)
+            .set('Idempotency-Key', keyIssue)
+            .send({ expectedVersion: 1, issueDate: '2026-10-01' });
+        assert.strictEqual(resIssueReplay.status, 200);
+        assert.strictEqual(resIssueReplay.body.invoiceNumber, invNum);
+
+        // Same key, different payload -> 409
+        const resIssueConflict = await request(app)
+            .post(`/api/invoices/${invId}/issue`)
+            .set('Authorization', 'Bearer ' + adminToken)
+            .set('Idempotency-Key', keyIssue)
+            .send({ expectedVersion: 1, issueDate: '2026-10-02' });
+        assert.strictEqual(resIssueConflict.status, 409);
+
+        // 3. Payment idempotency
+        const keyPay = 'idem-pay-1';
+        const resPay1 = await request(app)
+            .post(`/api/invoices/${invId}/pay`)
+            .set('Authorization', 'Bearer ' + adminToken)
+            .set('Idempotency-Key', keyPay)
+            .send({
+                expectedVersion: 2,
+                amountMinor: 123000,
+                paymentMethod: 'transfer',
+                paymentDate: '2026-10-02'
+            });
+        assert.strictEqual(resPay1.status, 200);
+        assert.strictEqual(resPay1.body.invoice.paymentStatus, 'paid');
+        const payId = resPay1.body.payment.id;
+
+        // Replay pay -> returns 200 without creating a duplicate payment event
+        const resPayReplay = await request(app)
+            .post(`/api/invoices/${invId}/pay`)
+            .set('Authorization', 'Bearer ' + adminToken)
+            .set('Idempotency-Key', keyPay)
+            .send({
+                expectedVersion: 2,
+                amountMinor: 123000,
+                paymentMethod: 'transfer',
+                paymentDate: '2026-10-02'
+            });
+        assert.strictEqual(resPayReplay.status, 200);
+        assert.strictEqual(resPayReplay.body.payment.id, payId);
+
+        // Ensure only ONE payment event exists in invoice-payments
+        const paymentDocs = await testDb.collection('invoice-payments').find({ invoiceId: invId }).toArray();
+        assert.strictEqual(paymentDocs.length, 1);
+
+        // 4. Refund payment to allow cancellation
+        await request(app)
+            .post(`/api/invoices/${invId}/pay`)
+            .set('Authorization', 'Bearer ' + adminToken)
+            .set('Idempotency-Key', 'idem-62-refund')
+            .send({
+                expectedVersion: 3,
+                type: 'refund',
+                amountMinor: 123000,
+                paymentMethod: 'transfer',
+                reversesPaymentId: payId,
+                paymentDate: '2026-10-03'
+            });
+
+        // 5. Cancel idempotency
+        const keyCancel = 'idem-cancel-1';
+        const resCancel1 = await request(app)
+            .post(`/api/invoices/${invId}/cancel`)
+            .set('Authorization', 'Bearer ' + adminToken)
+            .set('Idempotency-Key', keyCancel)
+            .send({ expectedVersion: 4, reason: 'Zwrot klienta' });
+        assert.strictEqual(resCancel1.status, 200);
+        assert.strictEqual(resCancel1.body.documentStatus, 'cancelled');
+
+        // Replay cancel -> returns 200 with saved cancelled doc
+        const resCancelReplay = await request(app)
+            .post(`/api/invoices/${invId}/cancel`)
+            .set('Authorization', 'Bearer ' + adminToken)
+            .set('Idempotency-Key', keyCancel)
+            .send({ expectedVersion: 4, reason: 'Zwrot klienta' });
+        assert.strictEqual(resCancelReplay.status, 200);
+        assert.strictEqual(resCancelReplay.body.documentStatus, 'cancelled');
+    });
+
+    await t.test('63. [ACID] Deterministic Net Revenue from 23% VAT Gross Payments', async () => {
+        const testJobId = 'job-acid-inv-10';
+        await testDb.collection('jobs').insertOne({
+            id: testJobId,
+            jobCode: 'CF-2026-910',
+            invoicedRevenueNetMinor: 0,
+            cashReceivedNetMinor: 0,
+            actualRevenue: 0,
+            revenueActualNet: 0,
+            isActive: true,
+            editVersion: 1
+        });
+
+        // Create and issue invoice: 1000.00 PLN net, 23% VAT -> 1230.00 PLN gross (123000 minor)
+        const draftRes = await request(app)
+            .post('/api/invoices')
+            .set('Authorization', 'Bearer ' + adminToken)
+            .set('Idempotency-Key', 'idem-63-draft')
+            .send({
+                jobId: testJobId,
+                amountNetMinor: 100000,
+                vatRate: 23
+            });
+        const invId = draftRes.body.id;
+        await request(app)
+            .post(`/api/invoices/${invId}/issue`)
+            .set('Authorization', 'Bearer ' + adminToken)
+            .set('Idempotency-Key', 'idem-63-issue')
+            .send({ expectedVersion: 1 });
+
+        // 1. Partial payment: 615.00 PLN gross (61500 minor) -> exactly 500.00 PLN net (50000 minor)
+        await request(app)
+            .post(`/api/invoices/${invId}/pay`)
+            .set('Authorization', 'Bearer ' + adminToken)
+            .set('Idempotency-Key', 'idem-63-pay-1')
+            .send({
+                expectedVersion: 2,
+                amountMinor: 61500,
+                paymentMethod: 'transfer',
+                paymentDate: '2026-10-01'
+            });
+
+        let job = await testDb.collection('jobs').findOne({ id: testJobId });
+        assert.strictEqual(job.invoicedRevenueNetMinor, 100000);
+        assert.strictEqual(job.cashReceivedNetMinor, 50000); // 500.00 PLN net
+        assert.strictEqual(job.actualRevenue, 500);
+
+        // 2. Second payment for remaining 615.00 PLN gross -> total paid is 1230.00 PLN gross -> 1000.00 PLN net (100000 minor)
+        await request(app)
+            .post(`/api/invoices/${invId}/pay`)
+            .set('Authorization', 'Bearer ' + adminToken)
+            .set('Idempotency-Key', 'idem-63-pay-2')
+            .send({
+                expectedVersion: 3,
+                amountMinor: 61500,
+                paymentMethod: 'transfer',
+                paymentDate: '2026-10-02'
+            });
+
+        job = await testDb.collection('jobs').findOne({ id: testJobId });
+        assert.strictEqual(job.cashReceivedNetMinor, 100000); // exactly 1000.00 PLN net
+        assert.strictEqual(job.actualRevenue, 1000);
+        assert.strictEqual(job.revenueActualNet, 1000);
+    });
+
+    await t.test('64. [ACID] Deprecated legacy PATCH /api/invoices/:id/pay returns 410 GONE', async () => {
+        const res = await request(app)
+            .patch('/api/invoices/inv-any-id/pay')
+            .set('Authorization', 'Bearer ' + adminToken)
+            .send({});
+        assert.strictEqual(res.status, 410);
+        assert.strictEqual(res.body.code, 'ENDPOINT_DEPRECATED');
+    });
+
+    await t.test('65. [ACID] Idempotency: Missing or invalid Idempotency-Key is rejected with 400', async () => {
+        const testJobId = 'job-acid-idem-check';
+        await testDb.collection('jobs').insertOne({
+            id: testJobId,
+            jobCode: 'CF-2026-965',
+            invoicedRevenueNetMinor: 0,
+            cashReceivedNetMinor: 0,
+            actualRevenue: 0,
+            revenueActualNet: 0,
+            isActive: true,
+            editVersion: 1
+        });
+
+        // 1. POST /api/invoices without Idempotency-Key -> 400 MISSING_IDEMPOTENCY_KEY
+        const noKeyRes = await request(app)
+            .post('/api/invoices')
+            .set('Authorization', 'Bearer ' + adminToken)
+            .send({ jobId: testJobId, amountNetMinor: 100000, vatRate: 23 });
+        assert.strictEqual(noKeyRes.status, 400);
+        assert.strictEqual(noKeyRes.body.code, 'MISSING_IDEMPOTENCY_KEY');
+
+        // 2. POST /api/invoices with empty / whitespace Idempotency-Key -> 400 MISSING_IDEMPOTENCY_KEY
+        const emptyKeyRes = await request(app)
+            .post('/api/invoices')
+            .set('Authorization', 'Bearer ' + adminToken)
+            .set('Idempotency-Key', '   ')
+            .send({ jobId: testJobId, amountNetMinor: 100000, vatRate: 23 });
+        assert.strictEqual(emptyKeyRes.status, 400);
+        assert.strictEqual(emptyKeyRes.body.code, 'MISSING_IDEMPOTENCY_KEY');
+
+        // 3. POST /api/invoices with overlong key (>128 chars) -> 400 INVALID_IDEMPOTENCY_KEY
+        const longKey = 'a'.repeat(129);
+        const longKeyRes = await request(app)
+            .post('/api/invoices')
+            .set('Authorization', 'Bearer ' + adminToken)
+            .set('Idempotency-Key', longKey)
+            .send({ jobId: testJobId, amountNetMinor: 100000, vatRate: 23 });
+        assert.strictEqual(longKeyRes.status, 400);
+        assert.strictEqual(longKeyRes.body.code, 'INVALID_IDEMPOTENCY_KEY');
+
+        // 4. POST /api/invoices with invalid special characters -> 400 INVALID_IDEMPOTENCY_KEY
+        const invalidCharRes = await request(app)
+            .post('/api/invoices')
+            .set('Authorization', 'Bearer ' + adminToken)
+            .set('Idempotency-Key', 'key with spaces;DROP TABLE')
+            .send({ jobId: testJobId, amountNetMinor: 100000, vatRate: 23 });
+        assert.strictEqual(invalidCharRes.status, 400);
+        assert.strictEqual(invalidCharRes.body.code, 'INVALID_IDEMPOTENCY_KEY');
+    });
+
+    await t.test('66. [ACID] Idempotency: Completed key retains response for 7 days (expiresAt verified)', async () => {
+        const testJobId = 'job-acid-idem-retention';
+        await testDb.collection('jobs').insertOne({
+            id: testJobId,
+            jobCode: 'CF-2026-966',
+            invoicedRevenueNetMinor: 0,
+            cashReceivedNetMinor: 0,
+            actualRevenue: 0,
+            revenueActualNet: 0,
+            isActive: true,
+            editVersion: 1
+        });
+
+        const key = 'idem-retention-test-key-1';
+        const createRes = await request(app)
+            .post('/api/invoices')
+            .set('Authorization', 'Bearer ' + adminToken)
+            .set('Idempotency-Key', key)
+            .send({ jobId: testJobId, amountNetMinor: 150000, vatRate: 23 });
+        assert.strictEqual(createRes.status, 201);
+        const invId = createRes.body.id;
+
+        // Verify MongoDB record in idempotency_keys collection
+        const record = await testDb.collection('idempotency_keys').findOne({ key });
+        assert.ok(record, 'Idempotency key record must exist');
+        assert.strictEqual(record.status, 'completed');
+        assert.strictEqual(record.statusCode, 201);
+        assert.strictEqual(record.responseBody.id, invId);
+
+        // Verify expiresAt is ~7 days in the future (minimum 6 days ahead)
+        const sixDaysAhead = new Date(Date.now() + 6 * 24 * 60 * 60 * 1000);
+        assert.ok(record.expiresAt > sixDaysAhead, 'expiresAt must be at least 6 days in the future');
+
+        // Replay request with same key returns cached 201
+        const replayRes = await request(app)
+            .post('/api/invoices')
+            .set('Authorization', 'Bearer ' + adminToken)
+            .set('Idempotency-Key', key)
+            .send({ jobId: testJobId, amountNetMinor: 150000, vatRate: 23 });
+        assert.strictEqual(replayRes.status, 201);
+        assert.strictEqual(replayRes.body.id, invId);
+    });
+
+    await t.test('67. [ACID] Net Revenue: Orphaned payment or corrupted invoice fails closed and aborts aggregation', async () => {
+        const testJobId = 'job-acid-orphan-check';
+        await testDb.collection('jobs').insertOne({
+            id: testJobId,
+            jobCode: 'CF-2026-967',
+            invoicedRevenueNetMinor: 0,
+            cashReceivedNetMinor: 0,
+            actualRevenue: 0,
+            revenueActualNet: 0,
+            isActive: true,
+            editVersion: 1
+        });
+
+        // Insert orphan payment pointing to non-existent invoice
+        await testDb.collection('invoice-payments').insertOne({
+            id: 'pay-orphan-1',
+            invoiceId: 'inv-does-not-exist',
+            jobId: testJobId,
+            type: 'payment',
+            amountMinor: 50000,
+            currency: 'PLN',
+            paymentDate: '2026-10-01',
+            paymentMethod: 'transfer',
+            sequence: 1,
+            reversesPaymentId: null,
+            createdAt: new Date().toISOString()
+        });
+
+        const { recalculateJobInvoiceAggregates } = require('../server.js');
+        await assert.rejects(
+            async () => {
+                await recalculateJobInvoiceAggregates(testJobId);
+            },
+            (err) => {
+                assert.ok(err.message.includes('nieistniejącej faktury'));
+                return true;
+            }
+        );
+
+        // Job aggregates remain unaffected at 0
+        const job = await testDb.collection('jobs').findOne({ id: testJobId });
+        assert.strictEqual(job.cashReceivedNetMinor, 0);
+    });
+
+    await t.test('68. [ACID] Draft PATCH: Supports If-Match header in addition to body expectedVersion (raw, quoted, weak ETag)', async () => {
+        const testJobId = 'job-acid-ifmatch-check';
+        await testDb.collection('jobs').insertOne({
+            id: testJobId,
+            jobCode: 'CF-2026-968',
+            invoicedRevenueNetMinor: 0,
+            cashReceivedNetMinor: 0,
+            actualRevenue: 0,
+            revenueActualNet: 0,
+            isActive: true,
+            editVersion: 1
+        });
+
+        const createRes = await request(app)
+            .post('/api/invoices')
+            .set('Authorization', 'Bearer ' + adminToken)
+            .set('Idempotency-Key', 'idem-ifmatch-draft-1')
+            .send({ jobId: testJobId, amountNetMinor: 80000, vatRate: 23 });
+        assert.strictEqual(createRes.status, 201);
+        const invId = createRes.body.id;
+        assert.strictEqual(createRes.body.editVersion, 1);
+
+        // 1. PATCH sending raw If-Match: 1 -> succeeds, increments editVersion to 2
+        const patchRawRes = await request(app)
+            .patch(`/api/invoices/${invId}`)
+            .set('Authorization', 'Bearer ' + adminToken)
+            .set('If-Match', '1')
+            .send({ amountNetMinor: 90000, vatRate: 23 });
+        assert.strictEqual(patchRawRes.status, 200);
+        assert.strictEqual(patchRawRes.body.amountNetMinor, 90000);
+        assert.strictEqual(patchRawRes.body.editVersion, 2);
+
+        // 2. PATCH sending quoted If-Match: "2" -> succeeds, increments editVersion to 3
+        const patchQuotedRes = await request(app)
+            .patch(`/api/invoices/${invId}`)
+            .set('Authorization', 'Bearer ' + adminToken)
+            .set('If-Match', '"2"')
+            .send({ amountNetMinor: 95000, vatRate: 23 });
+        assert.strictEqual(patchQuotedRes.status, 200);
+        assert.strictEqual(patchQuotedRes.body.amountNetMinor, 95000);
+        assert.strictEqual(patchQuotedRes.body.editVersion, 3);
+
+        // 3. PATCH sending weak ETag If-Match: W/"3" -> succeeds, increments editVersion to 4
+        const patchWeakRes = await request(app)
+            .patch(`/api/invoices/${invId}`)
+            .set('Authorization', 'Bearer ' + adminToken)
+            .set('If-Match', 'W/"3"')
+            .send({ amountNetMinor: 100000, vatRate: 23 });
+        assert.strictEqual(patchWeakRes.status, 200);
+        assert.strictEqual(patchWeakRes.body.amountNetMinor, 100000);
+        assert.strictEqual(patchWeakRes.body.editVersion, 4);
+
+        // 4. Stale weak ETag If-Match: W/"2" -> 409 VERSION_CONFLICT
+        const staleWeakRes = await request(app)
+            .patch(`/api/invoices/${invId}`)
+            .set('Authorization', 'Bearer ' + adminToken)
+            .set('If-Match', 'W/"2"')
+            .send({ amountNetMinor: 110000, vatRate: 23 });
+        assert.strictEqual(staleWeakRes.status, 409);
+        assert.strictEqual(staleWeakRes.body.code, 'VERSION_CONFLICT');
+
+        // 5. Stale quoted If-Match: "3" -> 409 VERSION_CONFLICT
+        const staleQuotedRes = await request(app)
+            .patch(`/api/invoices/${invId}`)
+            .set('Authorization', 'Bearer ' + adminToken)
+            .set('If-Match', '"3"')
+            .send({ amountNetMinor: 110000, vatRate: 23 });
+        assert.strictEqual(staleQuotedRes.status, 409);
+        assert.strictEqual(staleQuotedRes.body.code, 'VERSION_CONFLICT');
+
+        // 6. Malformed non-digit If-Match: "4abc" -> 400 (validation rejects missing expectedVersion)
+        const malformedRes = await request(app)
+            .patch(`/api/invoices/${invId}`)
+            .set('Authorization', 'Bearer ' + adminToken)
+            .set('If-Match', '"4abc"')
+            .send({ amountNetMinor: 110000, vatRate: 23 });
+        assert.strictEqual(malformedRes.status, 400);
+    });
+
 });
