@@ -6,7 +6,7 @@ import { offerStorage } from '../services/storage/offerStorage';
 
 interface OffersContextType {
     offers: Offer[];
-    addOffer: (offerData: Omit<Offer, 'id' | 'createdAt' | 'updatedAt' | 'number'>) => Promise<string>;
+    addOffer: (offerData: Omit<Offer, 'id' | 'createdAt' | 'updatedAt' | 'number'>, idempotencyKey?: string) => Promise<string>;
     updateOffer: (id: string, updates: Partial<Offer>) => Promise<void>;
     deleteOffer: (id: string) => Promise<void>;
     getOffer: (id: string) => Offer | undefined;
@@ -45,14 +45,9 @@ export function OffersProvider({ children }: { children: ReactNode }) {
         init();
     }, []);
 
-    const addOffer = async (offerData: Omit<Offer, 'id' | 'createdAt' | 'updatedAt' | 'number'>) => {
-        // Generate number and base structure
-        const allOffers = await offerStorage.getAllOffers();
-        const date = new Date();
-        const count = allOffers.filter(o => new Date(o.createdAt).getFullYear() === date.getFullYear()).length + 1;
-        const number = `OFERTA/${date.getFullYear()}/${String(count).padStart(3, '0')}`;
-
+    const addOffer = async (offerData: Omit<Offer, 'id' | 'createdAt' | 'updatedAt' | 'number'>, idempotencyKey?: string) => {
         const defaults: Partial<Offer> = {
+            recordKind: 'offer',
             status: 'draft',
             materialsCost: 0,
             laborCost: 0,
@@ -77,34 +72,34 @@ export function OffersProvider({ children }: { children: ReactNode }) {
             rentalItems: []
         };
 
-        const newOffer: Offer = {
-            ...defaults,
-            ...offerData,
-            id: uuidv4(),
-            number,
-            createdAt: date.toISOString(),
-            updatedAt: date.toISOString(),
-        } as Offer;
+        const result = await offerStorage.createOfferAtomic({
+            offer: {
+                ...defaults,
+                ...offerData
+            },
+            idempotencyKey: idempotencyKey || (offerData as any)?.idempotencyKey
+        });
 
-        const newOfferId = await offerStorage.saveOffer(newOffer);
         await refreshOffers();
-        return newOfferId;
+        return result.offer.id;
     };
 
     const updateOffer = async (id: string, updates: Partial<Offer>) => {
-        // Fetch existing
         const existing = await offerStorage.getOffer(id);
         if (existing) {
-            // NOTE: do NOT set updatedAt here — MongoAdapter uses item.updatedAt as
-            // _lastUpdatedAt sentinel. Backend stamps it on successful PATCH.
-            const updated = { ...existing, ...updates };
+            const updated = {
+                ...existing,
+                ...updates,
+                expectedVersion: existing.editVersion
+            };
             await offerStorage.saveOffer(updated);
             await refreshOffers();
         }
     };
 
     const deleteOffer = async (id: string) => {
-        await offerStorage.deleteOffer(id);
+        const existing = offers.find(o => o.id === id) || (await offerStorage.getOffer(id));
+        await offerStorage.deleteOffer(id, existing?.editVersion !== undefined ? { expectedVersion: existing.editVersion } : undefined);
         await refreshOffers();
     };
 

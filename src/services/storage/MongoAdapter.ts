@@ -151,8 +151,8 @@ export class MongoAdapter<T extends { id: string }> implements IStorageAdapter<T
 
     async create(item: T): Promise<string> {
         let payload: any = item;
-        // For jobs: contract strictly forbids editVersion and expectedVersion in POST payload
-        if (this.endpoint === 'jobs') {
+        // For jobs and offers: contract strictly forbids editVersion and expectedVersion in POST payload
+        if (this.endpoint === 'jobs' || this.endpoint === 'offers') {
             const { editVersion, expectedVersion, ...rest } = item as any;
             payload = rest;
         }
@@ -165,12 +165,13 @@ export class MongoAdapter<T extends { id: string }> implements IStorageAdapter<T
 
     async update(id: string, item: Partial<T>): Promise<void> {
         let payload: any = { ...item };
-        // For jobs: contract requires expectedVersion in PATCH and forbids editVersion
-        if (this.endpoint === 'jobs') {
+        // For jobs and offers: contract requires expectedVersion in PATCH and forbids editVersion
+        if (this.endpoint === 'jobs' || this.endpoint === 'offers') {
             const expectedVersion = payload.expectedVersion ?? payload.editVersion;
             delete payload.editVersion;
             if (typeof expectedVersion !== 'number') {
-                throw new Error(`[MongoAdapter] Aktualizacja zlecenia ${id} wymaga podania expectedVersion lub editVersion.`);
+                const entityName = this.endpoint === 'jobs' ? 'zlecenia' : 'oferty';
+                throw new Error(`[MongoAdapter] Aktualizacja ${entityName} ${id} wymaga podania expectedVersion lub editVersion.`);
             }
             payload.expectedVersion = expectedVersion;
         }
@@ -188,11 +189,13 @@ export class MongoAdapter<T extends { id: string }> implements IStorageAdapter<T
     }
 
     async save(item: T): Promise<string> {
-        // Dedicated handling for jobs complying with Phase 4 Optimistic Locking contract
-        if (this.endpoint === 'jobs') {
-            const jobItem = item as any;
-            const expectedVersion = jobItem.expectedVersion ?? jobItem.editVersion;
-            const { editVersion, expectedVersion: _exp, ...patchFields } = jobItem;
+        // Dedicated handling for jobs & offers complying with Phase 4 Optimistic Locking contract
+        if (this.endpoint === 'jobs' || this.endpoint === 'offers') {
+            const entityLabel = this.endpoint === 'jobs' ? 'Zlecenie' : 'Oferta';
+            const entityGenitive = this.endpoint === 'jobs' ? 'zlecenia' : 'oferty';
+            const entityItem = item as any;
+            const expectedVersion = entityItem.expectedVersion ?? entityItem.editVersion;
+            const { editVersion, expectedVersion: _exp, ...patchFields } = entityItem;
 
             // Only attempt PATCH if the item already carries an explicit version token
             if (typeof expectedVersion === 'number') {
@@ -211,7 +214,10 @@ export class MongoAdapter<T extends { id: string }> implements IStorageAdapter<T
                 }
 
                 if (res.status === 409) {
-                    let errorMsg = 'Zlecenie zostało zmodyfikowane przez innego użytkownika.';
+                    let errorMsg = `${entityLabel} została zmodyfikowana przez innego użytkownika.`;
+                    if (this.endpoint === 'jobs') {
+                        errorMsg = 'Zlecenie zostało zmodyfikowane przez innego użytkownika.';
+                    }
                     try {
                         const error = await res.json();
                         errorMsg = error.error || errorMsg;
@@ -226,14 +232,15 @@ export class MongoAdapter<T extends { id: string }> implements IStorageAdapter<T
                 }
 
                 if (res.status === 404) {
-                    const errMsg = `Zlecenie ${item.id} nie istnieje lub zostało usunięte. Nie można zapisać zmian.`;
+                    const verb = this.endpoint === 'jobs' ? 'zostało usunięte' : 'została usunięta';
+                    const errMsg = `${entityLabel} ${item.id} nie istnieje lub ${verb}. Nie można zapisać zmian.`;
                     toast.error(errMsg);
                     const err = new Error(`NOT_FOUND: ${errMsg}`);
                     (err as any).status = 404;
                     throw err;
                 }
 
-                let errorMsg = `Błąd zapisu zlecenia: ${res.status} ${res.statusText}`;
+                let errorMsg = `Błąd zapisu ${entityGenitive}: ${res.status} ${res.statusText}`;
                 try {
                     const errJson = await res.json();
                     errorMsg = errJson.error || errorMsg;

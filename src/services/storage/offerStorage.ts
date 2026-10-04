@@ -2,7 +2,6 @@ import { v4 as uuidv4 } from 'uuid';
 import type { Offer, Construction, Job } from '../../models/types';
 import { JobToOfferAdapter } from '../adapters/JobToOfferAdapter';
 import { getAdapter } from './adapterFactory';
-import { settingsStorage } from './settingsStorage';
 
 // Create generic repositories
 const offersRepo = getAdapter<Offer>('offers');
@@ -19,12 +18,66 @@ export const offerStorage = {
         return offersRepo.getById(id);
     },
 
+    async createOffer(offer: Partial<Offer>, idempotencyKey?: string): Promise<string> {
+        const result = await this.createOfferAtomic({ offer, idempotencyKey });
+        return result.offer.id;
+    },
+
+    async createOfferAtomic(data: {
+        offer: Partial<Offer>;
+        constructions?: Construction[];
+        idempotencyKey?: string;
+    }): Promise<{ status: string; offer: Offer; constructions: Construction[] }> {
+        const idempotencyKey = data.idempotencyKey || (data.offer as any)?.idempotencyKey || uuidv4();
+        const baseUrl = (import.meta as any).env?.VITE_API_URL || 'http://localhost:3000/api';
+        const token = localStorage.getItem('kostiq_token');
+        const headers: Record<string, string> = {
+            'Content-Type': 'application/json',
+            'Idempotency-Key': idempotencyKey
+        };
+        if (token) headers['Authorization'] = `Bearer ${token}`;
+
+        const offerPayload = { ...data.offer };
+        if (offerPayload.recordKind === 'offer' || !offerPayload.recordKind) {
+            delete offerPayload.number;
+        } else if (typeof offerPayload.number === 'string' && offerPayload.number.trim() === '') {
+            delete offerPayload.number;
+        }
+
+        const res = await fetch(`${baseUrl}/offers/create-atomic`, {
+            method: 'POST',
+            headers,
+            body: JSON.stringify({
+                ...offerPayload,
+                constructions: data.constructions || [],
+                idempotencyKey
+            })
+        });
+
+        if (!res.ok) {
+            let errorMsg = `Błąd atomowego tworzenia oferty: ${res.status} ${res.statusText}`;
+            try {
+                const errJson = await res.json();
+                errorMsg = errJson.error || errorMsg;
+            } catch (_) {}
+            const err = new Error(errorMsg);
+            (err as any).status = res.status;
+            throw err;
+        }
+
+        return res.json();
+    },
+
     async saveOffer(offer: Offer): Promise<string> {
         return offersRepo.save(offer);
     },
 
-    async deleteOffer(id: string): Promise<void> {
-        return offersRepo.delete(id);
+    async updateOffer(id: string, updates: Partial<Offer> & { expectedVersion?: number }): Promise<void> {
+        return offersRepo.update(id, updates);
+    },
+
+    async deleteOffer(id: string, options?: { expectedVersion?: number }): Promise<void> {
+        return offersRepo.delete(id, options);
     },
 
     async seedTemplates(): Promise<void> {
@@ -50,7 +103,8 @@ export const offerStorage = {
     createEmptyOffer(): Offer {
         return {
             id: uuidv4(),
-            number: 'DRAFT/' + new Date().getTime(),
+            number: '',
+            recordKind: 'offer',
             clientId: '',
             location: '',
             status: 'draft',
@@ -68,23 +122,15 @@ export const offerStorage = {
             discountAmount: 0,
             vatAmount: 0,
             totalGross: 0,
-            rentalItems: []
+            rentalItems: [],
+            isActive: true
         } as Offer;
     },
 
     // Adapter Pattern: Create Offer Snapshot from Job
     async createOfferFromJob(job: Job): Promise<string> {
-        // Use the Adapter to prepare the snapshot
         const { offer, constructions } = JobToOfferAdapter.prepareSnapshot(job);
-
-        // Save Header
-        await this.saveOffer(offer);
-
-        // Save Items (Constructions)
-        for (const construction of constructions) {
-            await this.saveConstruction(construction);
-        }
-
-        return offer.id;
+        const result = await this.createOfferAtomic({ offer, constructions });
+        return result.offer.id;
     }
 };

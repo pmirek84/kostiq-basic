@@ -268,7 +268,8 @@ const ALLOWED_BATCH_IMPORT_COLLECTIONS = new Set([
     'clients',
     'catalog-materials',
     'materials',
-    'jobs'
+    'jobs',
+    'offers'
 ]);
 
 const ALLOWED_MIGRATION_COLLECTIONS = new Set([
@@ -320,8 +321,496 @@ let indexInitError = null;
 
 // Reconciles duplicates safely with quarantine backup and field merging,
 // then creates and verifies unique index on { id: 1 } for all system collections
+
+// ==========================================
+// Offer Domain Hardening & Conflict Resolution Migration
+// ==========================================
+async function migrateOfferDomainAndReconcileConflicts(targetDb, client) {
+    if (!targetDb) return;
+    const migrationId = 'm2026_10_04_offer_domain_hardening_v1';
+    const now = new Date().toISOString();
+
+    const migrationsCol = targetDb.collection('_migrations');
+    if (migrationsCol && typeof migrationsCol.findOne === 'function') {
+        const existingMigration = await migrationsCol.findOne({ id: migrationId, status: 'completed' });
+        if (existingMigration) {
+            return { status: 'already_completed' };
+        }
+    }
+
+    const offersCol = targetDb.collection('offers');
+    const constructionsCol = targetDb.collection('constructions');
+    const quarantineCol = targetDb.collection('_migration_quarantine');
+    const migrationLogsCol = targetDb.collection('_migration_logs');
+    const countersCol = targetDb.collection('counters');
+
+    if (!offersCol || typeof offersCol.find !== 'function') return;
+
+    console.log('[MIGRATION] Running offer domain migration & conflict resolution (m2026_10_04_offer_domain_hardening_v1)...');
+
+    // 1. Dry-run pre-validation of all documents (fail-closed if any document is ambiguous)
+    // No DB mutations occur until every single document has been unambiguously resolved.
+    const allOffers = await offersCol.find({}).toArray();
+    const updatesToApply = [];
+
+    for (const doc of allOffers) {
+        let recordKind = doc.recordKind;
+        if (!recordKind) {
+            const isTemplateNumber = typeof doc.number === 'string' && (
+                doc.number.toUpperCase().startsWith('TPL-') ||
+                doc.number.toUpperCase().startsWith('WZÓR-') ||
+                doc.number.toUpperCase().startsWith('WZOR-')
+            );
+            const hasTemplateType = Boolean(doc.offerTemplateType);
+            const hasNoClient = doc.clientId === null || doc.clientId === undefined || doc.clientId === '';
+
+            if (hasTemplateType || isTemplateNumber || (hasNoClient && doc.title)) {
+                recordKind = 'template';
+            } else if (doc.clientId && typeof doc.clientId === 'string' && doc.clientId.trim() !== '') {
+                recordKind = 'offer';
+            } else if (doc.status && doc.status !== 'draft') {
+                recordKind = 'offer';
+            }
+
+            if (!recordKind) {
+                const err = new Error(`[CRITICAL MIGRATION] Cannot unambiguously determine recordKind for offer id='${doc.id}', number='${doc.number}'. Migration halted (fail-closed).`);
+                console.error(err.message);
+                throw err;
+            }
+        }
+
+        const editVersion = (doc.editVersion !== undefined && doc.editVersion !== null) ? doc.editVersion : 1;
+        const isActive = doc.isActive !== false;
+        if (!doc.recordKind || doc.editVersion === undefined || doc.editVersion === null || doc.isActive === undefined || doc.isActive === null) {
+            updatesToApply.push({
+                _id: doc._id,
+                recordKind,
+                editVersion,
+                isActive
+            });
+        }
+    }
+
+    // 2. Resolve WZÓR-STD-01 duplicate templates safely:
+    // Strictly verify canonical content identity (including status), child constructions graph, and absence of foreign references in ANY collection
+    const wzorDocs = await offersCol.find({ number: 'WZÓR-STD-01' }).toArray();
+    const wzorDuplicatesToDelete = [];
+    if (wzorDocs.length > 1) {
+        const primary = wzorDocs[0];
+        const duplicates = wzorDocs.slice(1);
+
+        const getCanonicalTemplatePayload = (doc) => {
+            const clone = { ...doc };
+            delete clone._id;
+            delete clone.id;
+            delete clone.createdAt;
+            delete clone.updatedAt;
+            delete clone.editVersion;
+            delete clone.isActive;
+            return canonicalJsonStringify(clone);
+        };
+        const primaryCanonical = getCanonicalTemplatePayload(primary);
+
+        const getCanonicalConstruction = (c) => {
+            const clone = { ...c };
+            delete clone._id;
+            delete clone.id;
+            delete clone.offerId;
+            delete clone.createdAt;
+            delete clone.updatedAt;
+            delete clone.editVersion;
+            delete clone.isActive;
+            return canonicalJsonStringify(clone);
+        };
+
+        const primaryConstructions = (constructionsCol && typeof constructionsCol.find === 'function')
+            ? await constructionsCol.find({ offerId: primary.id }).toArray()
+            : [];
+        const primaryConstructionsCanonical = primaryConstructions.map(getCanonicalConstruction).sort().join('||');
+
+        const candidateCols = ['jobs', 'jobStageItems', 'orders', 'invoices', 'cost-invoices', 'settlements', 'quotes', 'time-entries', 'client-reports', 'documents'];
+        const collectionsToCheck = typeof targetDb.listCollections === 'function'
+            ? (await targetDb.listCollections().toArray()).map(c => c.name).filter(n => !n.startsWith('system.') && !n.startsWith('_migration_'))
+            : candidateCols;
+
+        for (const dup of duplicates) {
+            if (getCanonicalTemplatePayload(dup) !== primaryCanonical) {
+                throw new Error(`[CRITICAL MIGRATION ERROR] Duplicate template '${dup.id}' ('${dup.number}') content does not match primary template '${primary.id}'. Manual resolution required (fail-closed).`);
+            }
+
+            const childConstructions = (constructionsCol && typeof constructionsCol.find === 'function')
+                ? await constructionsCol.find({ offerId: dup.id }).toArray()
+                : [];
+            const dupConstructionsCanonical = childConstructions.map(getCanonicalConstruction).sort().join('||');
+
+            if (dupConstructionsCanonical !== primaryConstructionsCanonical) {
+                throw new Error(`[CRITICAL MIGRATION ERROR] Duplicate template '${dup.id}' ('${dup.number}') child constructions graph does not match primary template '${primary.id}'. Manual resolution required (fail-closed).`);
+            }
+
+            for (const colName of collectionsToCheck) {
+                if (colName === 'offers' || colName === 'constructions') continue;
+                const col = targetDb.collection(colName);
+                if (!col || typeof col.countDocuments !== 'function') continue;
+                const refCount = await col.countDocuments({
+                    $or: [
+                        { offerId: dup.id },
+                        { templateId: dup.id },
+                        { 'stages.offerId': dup.id }
+                    ]
+                });
+                if (refCount > 0) {
+                    throw new Error(`[CRITICAL MIGRATION ERROR] Duplicate template '${dup.id}' has ${refCount} foreign reference(s) in collection '${colName}'! Cannot delete (fail-closed).`);
+                }
+            }
+
+            for (const cc of childConstructions) {
+                for (const colName of collectionsToCheck) {
+                    if (colName === 'offers' || colName === 'constructions') continue;
+                    const col = targetDb.collection(colName);
+                    if (!col || typeof col.countDocuments !== 'function') continue;
+                    const cRefCount = await col.countDocuments({
+                        $or: [
+                            { constructionId: cc.id },
+                            { 'stages.constructionId': cc.id }
+                        ]
+                    });
+                    if (cRefCount > 0) {
+                        throw new Error(`[CRITICAL MIGRATION ERROR] Child construction '${cc.id}' of duplicate template '${dup.id}' has ${cRefCount} foreign reference(s) in collection '${colName}'! Cannot delete (fail-closed).`);
+                    }
+                }
+            }
+
+            wzorDuplicatesToDelete.push({ dup, primary, childConstructions });
+        }
+    }
+
+    // 3. Prepare collision resolution for OF/2026/05 (Budex vs Jan)
+    // Strictly require exact IDs ('offer-2026-05-budex' and 'offer-2026-05-jan') without arbitrary index fallback
+    const of2026Docs = await offersCol.find({ number: 'OF/2026/05' }).toArray();
+    let budexOffer = null;
+    let janOffer = null;
+    if (of2026Docs.length > 1) {
+        budexOffer = of2026Docs.find(o => o.id === 'offer-2026-05-budex');
+        janOffer = of2026Docs.find(o => o.id === 'offer-2026-05-jan');
+        if (!budexOffer || !janOffer) {
+            throw new Error(`[CRITICAL MIGRATION HALT] Collision on OF/2026/05 does not match expected IDs ('offer-2026-05-budex' and 'offer-2026-05-jan'). Found: ${of2026Docs.map(o => o.id).join(', ')}. Halting migration without guessing (fail-closed).`);
+        }
+    }
+
+    // 4. Execute all mutations inside a single ACID session (fail-closed, no partial non-transactional fallback)
+    const executeMigrationMutations = async (sess) => {
+        const opt = sess ? { session: sess } : {};
+
+        // Failpoint for testing rollback
+        if (process.env.NODE_ENV === 'test' && getTestFailpoint() === 'migration_transaction_failure') {
+            throw new Error('FAILPOINT: Simulated transaction crash during migration');
+        }
+
+        // A. Apply backfill updates
+        for (const u of updatesToApply) {
+            await offersCol.updateOne(
+                { _id: u._id },
+                {
+                    $set: {
+                        recordKind: u.recordKind,
+                        editVersion: u.editVersion,
+                        isActive: u.isActive
+                    }
+                },
+                opt
+            );
+        }
+
+        // B. Template deduplication with quarantine and log
+        for (const item of wzorDuplicatesToDelete) {
+            const { dup, primary, childConstructions } = item;
+            if (quarantineCol && typeof quarantineCol.insertOne === 'function') {
+                await quarantineCol.insertOne({
+                    quarantineId: new ObjectId().toString(),
+                    migrationId,
+                    collectionName: 'offers',
+                    documentId: dup.id,
+                    originalDocId: dup._id,
+                    number: dup.number,
+                    archivedAt: now,
+                    reason: 'identical_seed_template_deduplication',
+                    duplicateDoc: cloneBsonDoc(dup)
+                }, opt);
+
+                for (const cc of childConstructions) {
+                    await quarantineCol.insertOne({
+                        quarantineId: new ObjectId().toString(),
+                        migrationId,
+                        collectionName: 'constructions',
+                        documentId: cc.id,
+                        originalDocId: cc._id,
+                        offerId: dup.id,
+                        archivedAt: now,
+                        reason: 'duplicate_template_child_construction_quarantine',
+                        duplicateDoc: cloneBsonDoc(cc)
+                    }, opt);
+                    await constructionsCol.deleteOne({ _id: cc._id }, opt);
+                }
+            }
+
+            if (migrationLogsCol && typeof migrationLogsCol.insertOne === 'function') {
+                await migrationLogsCol.insertOne({
+                    migrationId,
+                    action: 'quarantine_and_delete_duplicate_template',
+                    documentId: dup.id,
+                    survivingId: primary.id,
+                    number: dup.number,
+                    quarantinedConstructions: childConstructions.map(c => c.id),
+                    executedAt: now
+                }, opt);
+            }
+
+            await offersCol.deleteOne({ _id: dup._id }, opt);
+            console.log(`[MIGRATION] Quarantined and deleted duplicate template id='${dup.id}' and ${childConstructions.length} child construction(s).`);
+        }
+
+        // C. Collision resolution for OF/2026/05
+        if (of2026Docs.length > 1 && budexOffer && janOffer) {
+            if (quarantineCol && typeof quarantineCol.insertMany === 'function') {
+                await quarantineCol.insertMany([
+                    {
+                        quarantineId: new ObjectId().toString(),
+                        migrationId,
+                        collectionName: 'offers',
+                        documentId: budexOffer.id,
+                        originalDocId: budexOffer._id,
+                        number: budexOffer.number,
+                        clientName: 'Budex Sp. z o.o.',
+                        archivedAt: now,
+                        reason: 'offer_number_collision_pre_migration_primary_snapshot',
+                        docSnapshot: cloneBsonDoc(budexOffer)
+                    },
+                    {
+                        quarantineId: new ObjectId().toString(),
+                        migrationId,
+                        collectionName: 'offers',
+                        documentId: janOffer.id,
+                        originalDocId: janOffer._id,
+                        number: janOffer.number,
+                        clientName: 'Jan',
+                        archivedAt: now,
+                        reason: 'offer_number_collision_pre_migration_renumbered_snapshot',
+                        docSnapshot: cloneBsonDoc(janOffer)
+                    }
+                ], opt);
+            }
+
+            await offersCol.updateOne(
+                { _id: janOffer._id },
+                {
+                    $set: {
+                        number: 'OF/2026/006',
+                        updatedAt: now,
+                        editVersion: (janOffer.editVersion || 1) + 1
+                    }
+                },
+                opt
+            );
+
+            if (countersCol && typeof countersCol.updateOne === 'function') {
+                await countersCol.updateOne(
+                    { _id: 'offer_2026' },
+                    { $max: { seq: 6 } },
+                    { upsert: true, ...opt }
+                );
+            }
+
+            if (migrationLogsCol && typeof migrationLogsCol.insertOne === 'function') {
+                await migrationLogsCol.insertOne(
+                    {
+                        migrationId,
+                        action: 'renumber_conflicting_offer',
+                        documentId: janOffer.id,
+                        originalDocId: janOffer._id,
+                        originalNumber: 'OF/2026/05',
+                        newNumber: 'OF/2026/006',
+                        clientName: 'Jan',
+                        clientId: janOffer.clientId,
+                        reason: 'Resolved duplicate number collision with accepted offer OF/2026/05 (Budex Sp. z o.o.)',
+                        executedAt: now
+                    },
+                    opt
+                );
+            }
+            console.log('[MIGRATION] Successfully renumbered Jan offer to OF/2026/006 and set offer_2026 counter to >= 6.');
+        }
+
+        // D. Mark migration completed in the same transaction
+        if (migrationsCol && typeof migrationsCol.updateOne === 'function') {
+            await migrationsCol.updateOne(
+                { id: migrationId },
+                {
+                    $set: {
+                        id: migrationId,
+                        status: 'completed',
+                        appliedAt: now,
+                        version: 1
+                    }
+                },
+                { upsert: true, ...opt }
+            );
+        }
+    };
+
+    const hasSession = client && typeof client.startSession === 'function';
+    if (hasSession) {
+        const session = client.startSession();
+        try {
+            await session.withTransaction(async () => {
+                await executeMigrationMutations(session);
+            });
+        } finally {
+            await session.endSession();
+        }
+    } else {
+        if (process.env.NODE_ENV === 'production') {
+            throw new Error('[CRITICAL MIGRATION] Cannot perform migration without MongoDB session/transactions in production environment (fail-closed).');
+        }
+        await executeMigrationMutations(null);
+    }
+
+    // 5. Verify no remaining duplicate numbers
+    if (typeof offersCol.aggregate === 'function') {
+        const remainingDuplicates = await offersCol.aggregate([
+            { $match: { number: { $exists: true, $ne: null } } },
+            { $group: { _id: "$number", count: { $sum: 1 }, ids: { $push: "$id" } } },
+            { $match: { count: { $gt: 1 } } }
+        ]).toArray();
+
+        if (remainingDuplicates.length > 0) {
+            const conflictDetails = remainingDuplicates.map(d => `${d._id} (IDs: ${d.ids.join(', ')})`).join('; ');
+            if (migrationLogsCol && typeof migrationLogsCol.insertOne === 'function') {
+                await migrationLogsCol.insertOne({
+                    migrationId,
+                    action: 'unresolved_duplicate_report',
+                    conflicts: remainingDuplicates,
+                    executedAt: now
+                });
+            }
+            throw new Error(`[CRITICAL MIGRATION HALT] Unresolved duplicate offer numbers exist: ${conflictDetails}. Index creation aborted.`);
+        }
+    }
+
+    console.log(`[MIGRATION] Offer domain migration '${migrationId}' completed successfully.`);
+    return { status: 'completed' };
+}
+
+// Synchronizes atomic offer counters from existing database records
+async function syncOfferCountersFromExistingData(database) {
+    if (!database) return;
+    try {
+        const offersCol = database.collection('offers');
+        const countersCol = database.collection('counters');
+        if (!offersCol || !countersCol || typeof offersCol.find !== 'function') return;
+
+        const allOffers = await offersCol.find({
+            number: { $type: 'string' }
+        }).toArray();
+
+        const maxSeqByYear = new Map();
+        const currentYear = new Date().getFullYear();
+        maxSeqByYear.set(currentYear, 0);
+
+        for (const o of allOffers) {
+            if (o.recordKind === 'template') continue;
+            const num = (o.number || '').trim();
+            let year = null;
+            let seq = null;
+
+            let m = num.match(/^OF\/(\d{4})\/(\d+)$/i) || num.match(/^OFERTA\/(\d{4})\/(\d+)$/i);
+            if (m) {
+                year = parseInt(m[1], 10);
+                seq = parseInt(m[2], 10);
+            } else {
+                m = num.match(/^(\d+)\/(\d{4})(?:\s*\(.*\))?$/);
+                if (m) {
+                    seq = parseInt(m[1], 10);
+                    year = parseInt(m[2], 10);
+                }
+            }
+
+            if (year && seq && !Number.isNaN(year) && !Number.isNaN(seq)) {
+                const curMax = maxSeqByYear.get(year) || 0;
+                if (seq > curMax) {
+                    maxSeqByYear.set(year, seq);
+                }
+            }
+        }
+
+        for (const [year, maxSeq] of maxSeqByYear.entries()) {
+            const counterId = `offer_${year}`;
+            await countersCol.updateOne(
+                { _id: counterId },
+                { $max: { seq: maxSeq } },
+                { upsert: true }
+            );
+            console.log(`[COUNTER SYNC] Synchronized counter '${counterId}' to seq=${maxSeq} (max existing: ${maxSeq}).`);
+        }
+    } catch (err) {
+        console.error('[COUNTER SYNC ERROR] Failed to synchronize offer counters from existing offers:', err);
+        throw err;
+    }
+}
+
+// Atomically generates next sequential offer number (OF/YYYY/NNN) in transaction
+// Atomically generates next sequential template number (TPL-YYYY-NNN) in transaction using template_YYYY counter
+async function generateTemplateNumber(database, session, targetYear = null) {
+    const year = targetYear || new Date().getFullYear();
+    const counterId = `template_${year}`;
+    const opt = session ? { session } : {};
+
+    const counterResult = await database.collection('counters').findOneAndUpdate(
+        { _id: counterId },
+        { $inc: { seq: 1 } },
+        { upsert: true, returnDocument: 'after', ...opt }
+    );
+
+    const doc = counterResult && (counterResult.value || counterResult);
+    if (!doc || typeof doc.seq !== 'number') {
+        throw new Error(`Nie udało się wygenerować numeru szablonu dla roku ${year} (błąd licznika).`);
+    }
+
+    const paddedSeq = String(doc.seq).padStart(3, '0');
+    return {
+        number: `TPL-${year}-${paddedSeq}`,
+        seq: doc.seq,
+        year
+    };
+}
+
+async function generateOfferNumber(database, session, targetYear = null) {
+    const year = targetYear || new Date().getFullYear();
+    const counterId = `offer_${year}`;
+    const opt = session ? { session } : {};
+
+    const counterResult = await database.collection('counters').findOneAndUpdate(
+        { _id: counterId },
+        { $inc: { seq: 1 } },
+        { upsert: true, returnDocument: 'after', ...opt }
+    );
+
+    const doc = counterResult && (counterResult.value || counterResult);
+    if (!doc || typeof doc.seq !== 'number') {
+        throw new Error(`Nie udało się wygenerować numeru oferty dla roku ${year} (błąd licznika).`);
+    }
+
+    const paddedSeq = String(doc.seq).padStart(3, '0');
+    return {
+        number: `OF/${year}/${paddedSeq}`,
+        seq: doc.seq,
+        year
+    };
+}
+
 async function reconcileDuplicatesAndEnsureIndexes(database) {
     if (!database) return;
+    const clientToUse = typeof client !== 'undefined' ? client : (database.client || null);
+    await migrateOfferDomainAndReconcileConflicts(database, clientToUse);
     const failures = [];
 
     for (const col of ALL_SYSTEM_COLLECTIONS) {
@@ -468,6 +957,9 @@ async function reconcileDuplicatesAndEnsureIndexes(database) {
                 if (col === 'jobs') {
                     await collection.createIndex({ jobCode: 1 }, { unique: true, sparse: true });
                 }
+                if (col === 'offers') {
+                    await collection.createIndex({ number: 1 }, { unique: true, partialFilterExpression: { number: { $type: "string" } } });
+                }
             }
 
             // 3. Verify index exists with uniqueness
@@ -483,6 +975,12 @@ async function reconcileDuplicatesAndEnsureIndexes(database) {
                         throw new Error(`Indeks unikalny { jobCode: 1 } nie został zweryfikowany w kolekcji 'jobs'.`);
                     }
                 }
+                if (col === 'offers') {
+                    const verifiedOfferNumber = indexes.some(idx => idx.key && idx.key.number === 1 && idx.unique === true);
+                    if (!verifiedOfferNumber) {
+                        throw new Error(`Indeks unikalny { number: 1 } nie został zweryfikowany w kolekcji 'offers'.`);
+                    }
+                }
             }
         } catch (err) {
             console.error(`[CRITICAL INDEX ERROR] Failed to ensure index for collection '${col}':`, err);
@@ -496,8 +994,9 @@ async function reconcileDuplicatesAndEnsureIndexes(database) {
         throw new Error(errorMsg);
     }
 
-    // Fail-closed initialization and synchronization of atomic job counters
+    // Fail-closed initialization and synchronization of atomic job and offer counters
     await syncJobCountersFromExistingData(database);
+    await syncOfferCountersFromExistingData(database);
 }
 
 
@@ -1542,6 +2041,15 @@ const createRouter = (collectionName, options = {}) => {
                 }
                 return await handleCreateJobAtomic(req, res, { returnJobDocOnly: true });
             }
+            if (collectionName === 'offers') {
+                if (!isReplicaSet && process.env.ALLOW_NON_TRANSACTIONAL !== 'true' && process.env.NODE_ENV !== 'test') {
+                    return res.status(503).json({
+                        code: 'TRANSACTIONS_REQUIRED',
+                        error: "Operacja domenowa tworzenia oferty wymaga włączonego Replica Set w MongoDB (ACID transactions required). Skonfiguruj 'replication.replSet' w konfiguracji bazy danych."
+                    });
+                }
+                return await handleCreateOfferAtomic(req, res, { returnOfferOnly: true });
+            }
             const newItem = req.body;
             if (!newItem.id) {
                 newItem.id = new ObjectId().toString();
@@ -1642,15 +2150,48 @@ const createRouter = (collectionName, options = {}) => {
                     const itemId = item.id || new ObjectId().toString();
                     const { _id, createdAt, ...rest } = item;
 
+                    if (collectionName === 'offers') {
+                        // Strict server whitelist for offer batch import: prevents unvalidated fields from leaking into MongoDB
+                        const ALLOWED_OFFER_IMPORT_FIELDS = new Set([
+                            'id', 'number', 'recordKind', 'status', 'clientId', 'location',
+                            'validUntil', 'materialsCost', 'laborCost', 'totalCost', 'totalNet',
+                            'subtotalNet', 'discountAmount', 'vatAmount', 'totalGross', 'vatRate',
+                            'discountType', 'discountValue', 'rentalItems', 'costBreakdown', 'settings',
+                            'title', 'scopeOfWork', 'customMaterials', 'notes', 'printLayout', 'printMode',
+                            'offerTemplateType', 'isActive', 'editVersion', 'createdAt', 'updatedAt'
+                        ]);
+                        const sanitizedDoc = {};
+                        for (const [k, v] of Object.entries(item)) {
+                            if (ALLOWED_OFFER_IMPORT_FIELDS.has(k) && k !== '_id' && k !== 'expectedVersion') {
+                                sanitizedDoc[k] = v;
+                            }
+                        }
+                        return {
+                            insertOne: {
+                                document: {
+                                    ...sanitizedDoc,
+                                    id: itemId,
+                                    number: sanitizedDoc.number,
+                                    recordKind: sanitizedDoc.recordKind || 'offer',
+                                    status: sanitizedDoc.status || 'draft',
+                                    editVersion: sanitizedDoc.editVersion || 1,
+                                    isActive: sanitizedDoc.isActive !== false,
+                                    createdAt: createdAt || now,
+                                    updatedAt: now
+                                }
+                            }
+                        };
+                    }
+
                     if (collectionName === 'jobs') {
-                        // For jobs: strictly generate insertOne. It CANNOT overwrite an existing job!
-                        // If job exists, unique index on id rejects insertion.
+                        // For jobs: strictly generate insertOne. It CANNOT overwrite an existing document!
                         return {
                             insertOne: {
                                 document: {
                                     ...rest,
                                     id: itemId,
                                     editVersion: 1,
+                                    isActive: rest.isActive !== false,
                                     createdAt: createdAt || now,
                                     updatedAt: now
                                 }
@@ -1693,19 +2234,20 @@ const createRouter = (collectionName, options = {}) => {
                 const clientToUse = client || (db && db.client);
                 const replicaSetActive = isReplicaSet || (clientToUse && (await checkReplicaSetTopology(clientToUse)));
 
-                // [P1 FIX] Strict fail-closed check: Jobs batch-import requires active Replica Set in production
-                if (collectionName === 'jobs') {
+                // [P1 FIX] Strict fail-closed check: Jobs & Offers batch-import requires active Replica Set in production
+                if (collectionName === 'jobs' || collectionName === 'offers') {
+                    const entityBatchName = collectionName === 'jobs' ? 'zleceń' : 'ofert';
                     if ((!replicaSetActive || _testFailpoint === 'force_session_failure' || _testFailpoint === 'session_returns_null') &&
                         process.env.ALLOW_NON_TRANSACTIONAL !== 'true' &&
                         process.env.NODE_ENV !== 'test') {
                         return res.status(503).json({
                             code: 'TRANSACTIONS_REQUIRED',
-                            error: "Operacja wsadowego importu zleceń wymaga włączonego Replica Set w MongoDB (ACID transactions required). Skonfiguruj 'replication.replSet' w konfiguracji bazy danych."
+                            error: `Operacja wsadowego importu ${entityBatchName} wymaga włączonego Replica Set w MongoDB (ACID transactions required). Skonfiguruj 'replication.replSet' w konfiguracji bazy danych.`
                         });
                     }
                 }
 
-                const useTransaction = collectionName === 'jobs' && replicaSetActive && clientToUse && typeof clientToUse.startSession === 'function';
+                const useTransaction = (collectionName === 'jobs' || collectionName === 'offers') && replicaSetActive && clientToUse && typeof clientToUse.startSession === 'function';
 
                 const executeBatchWrite = async (sess) => {
                     const opt = sess ? { session: sess } : {};
@@ -1738,6 +2280,43 @@ const createRouter = (collectionName, options = {}) => {
                             }
                             await db.collection('counters').updateOne(
                                 { _id: `job_${y}` },
+                                { $max: { seq: maxSeq } },
+                                { upsert: true, ...opt }
+                            );
+                        }
+                    }
+
+                    // Synchronize counter sequence for imported offers
+                    if (collectionName === 'offers' && Array.isArray(items)) {
+                        const maxSeqByYear = new Map();
+                        for (const it of items) {
+                            if (it && it.number && it.recordKind !== 'template') {
+                                const num = String(it.number).trim();
+                                let y = null;
+                                let s = null;
+                                let m = num.match(/^OF\/(\d{4})\/(\d+)$/i) || num.match(/^OFERTA\/(\d{4})\/(\d+)$/i);
+                                if (m) {
+                                    y = parseInt(m[1], 10);
+                                    s = parseInt(m[2], 10);
+                                } else {
+                                    m = num.match(/^(\d+)\/(\d{4})(?:\s*\(.*\))?$/);
+                                    if (m) {
+                                        s = parseInt(m[1], 10);
+                                        y = parseInt(m[2], 10);
+                                    }
+                                }
+                                if (y && s && !Number.isNaN(y) && !Number.isNaN(s)) {
+                                    const cur = maxSeqByYear.get(y) || 0;
+                                    if (s > cur) maxSeqByYear.set(y, s);
+                                }
+                            }
+                        }
+                        for (const [y, maxSeq] of maxSeqByYear.entries()) {
+                            if (process.env.NODE_ENV === 'test' && getTestFailpoint() === 'batch_offer_counter_failure') {
+                                throw new Error('FAILPOINT: Simulated counter update failure during offer batch import');
+                            }
+                            await db.collection('counters').updateOne(
+                                { _id: `offer_${y}` },
                                 { $max: { seq: maxSeq } },
                                 { upsert: true, ...opt }
                             );
@@ -1818,7 +2397,9 @@ const createRouter = (collectionName, options = {}) => {
                         errors: []
                     });
                 } catch (bulkErr) {
-                    if (collectionName === 'jobs') {
+                    if (collectionName === 'jobs' || collectionName === 'offers') {
+                        const entityName = collectionName === 'jobs' ? 'zleceń' : 'ofert';
+                        const entitySingular = collectionName === 'jobs' ? 'Zlecenie' : 'Oferta';
                         // [P1 FIX] All-or-nothing rollback semantics for jobs batch import.
                         // In MongoDB transactions, any error aborts withTransaction and rolls back all writes.
                         // Returning 207 claiming items were saved would be a false representation of database state.
@@ -1830,7 +2411,7 @@ const createRouter = (collectionName, options = {}) => {
                         const specificConflictId = (writeErrors[0] && items[writeErrors[0].index]?.id) || 'nieznany';
                         const errorMessages = writeErrors.map(e => {
                             if (e.code === 11000) {
-                                return `Zlecenie o ID '${items[e.index]?.id || 'nieznany'}' już istnieje w bazie danych. Nadpisywanie przez import wsadowy jest zabronione (wymóg Optimistic Locking).`;
+                                return `${entitySingular} o ID '${items[e.index]?.id || 'nieznany'}' już istnieje w bazie danych. Nadpisywanie przez import wsadowy jest zabronione (wymóg Optimistic Locking).`;
                             }
                             return e.errmsg || e.message || String(e);
                         });
@@ -1841,8 +2422,8 @@ const createRouter = (collectionName, options = {}) => {
                         return res.status(isConflict ? 409 : 500).json({
                             code: isConflict ? 'BATCH_IMPORT_VERSION_CONFLICT' : 'BATCH_IMPORT_FAILED',
                             error: isConflict
-                                ? `Jedno lub więcej zleceń spowodowało konflikt unikalności klucza (11000). Zgodnie z gwarancją ACID transakcja importu zleceń została wycofana w całości (all-or-nothing rollback).`
-                                : `Błąd transakcyjnego zapisu wsadowego zleceń: ${bulkErr.message}`,
+                                ? `Jedno lub więcej zleceń spowodowało konflikt unikalności klucza (11000). Zgodnie z gwarancją ACID transakcja importu ${entityName} została wycofana w całości (all-or-nothing rollback).`
+                                : `Błąd transakcyjnego zapisu wsadowego ${entityName}: ${bulkErr.message}`,
                             status: 'failed',
                             succeeded: 0,
                             succeededIds: [],
@@ -2008,24 +2589,33 @@ const createRouter = (collectionName, options = {}) => {
                 }
                 beforeDoc = { ...rawBefore };
 
-                // [P1 FIX] Optimistic Locking Precondition & Version check for jobs
-                if (collectionName === 'jobs') {
+                // [P1 FIX] Optimistic Locking Precondition & Version check for jobs & offers
+                if (collectionName === 'jobs' || collectionName === 'offers') {
+                    const entityLabel = collectionName === 'jobs' ? 'Zlecenie' : 'Oferta';
                     if (beforeDoc.editVersion === undefined || beforeDoc.editVersion === null) {
                         return res.status(500).json({
                             code: 'CORRUPT_DOCUMENT_VERSION',
-                            error: "Zlecenie w bazie danych nie posiada wymaganego pola 'editVersion'. Skontaktuj się z administratorem lub uruchom migrację.",
+                            error: `${entityLabel} w bazie danych nie posiada wymaganego pola 'editVersion'. Skontaktuj się z administratorem lub uruchom migrację.`,
                             id
                         });
                     }
                     if (req.expectedVersion !== undefined && beforeDoc.editVersion !== req.expectedVersion) {
                         return res.status(409).json({
                             code: 'VERSION_CONFLICT',
-                            error: 'Zlecenie zostało zmodyfikowane przez innego użytkownika. Pobierz aktualne dane przed ponowną próbą zapisu.',
+                            error: `${entityLabel} została zmodyfikowana przez innego użytkownika. Pobierz aktualne dane przed ponowną próbą zapisu.`,
                             id,
                             entity: collectionName,
                             currentVersion: beforeDoc.editVersion,
                             expectedVersion: req.expectedVersion
                         });
+                    }
+                    if (collectionName === 'offers') {
+                        if (updates.number !== undefined && updates.number !== beforeDoc.number) {
+                            return res.status(400).json({ error: "Modyfikacja numeru oferty jest zabroniona." });
+                        }
+                        if (updates.recordKind !== undefined && updates.recordKind !== beforeDoc.recordKind) {
+                            return res.status(400).json({ error: "Modyfikacja typu rekordu (recordKind) oferty jest zabroniona." });
+                        }
                     }
                 }
             } catch (snapErr) {
@@ -2052,18 +2642,18 @@ const createRouter = (collectionName, options = {}) => {
                 }
             }
 
-            // [P1 FIX] Atomic CAS update for jobs: filter by id AND expectedVersion, increment editVersion by 1
-            const casFilter = (collectionName === 'jobs' && req.expectedVersion !== undefined)
+            // [P1 FIX] Atomic CAS update for jobs & offers: filter by id AND expectedVersion, increment editVersion by 1
+            const casFilter = ((collectionName === 'jobs' || collectionName === 'offers') && req.expectedVersion !== undefined)
                 ? { id: id, editVersion: req.expectedVersion }
                 : { id: id };
 
-            if (collectionName === 'jobs' && req.expectedVersion !== undefined) {
+            if ((collectionName === 'jobs' || collectionName === 'offers') && req.expectedVersion !== undefined) {
                 updateDoc.$inc = { editVersion: 1 };
             }
 
             // Test barrier hook for real concurrency simulation
             const barrierHook = getTestBarrierHook();
-            if (typeof barrierHook === 'function' && collectionName === 'jobs') {
+            if (typeof barrierHook === 'function' && (collectionName === 'jobs' || collectionName === 'offers')) {
                 await barrierHook({ id, req, stage: 'before-cas-update' });
             }
 
@@ -2086,21 +2676,22 @@ const createRouter = (collectionName, options = {}) => {
             }
 
             if (!updated) {
-                if (collectionName === 'jobs') {
+                if (collectionName === 'jobs' || collectionName === 'offers') {
+                    const entityLabel = collectionName === 'jobs' ? 'Zlecenie' : 'Oferta';
                     const latest = await db.collection(collectionName).findOne({ id: id });
                     if (!latest) {
-                        return res.status(404).json({ error: `Zlecenie o identyfikatorze '${id}' nie istnieje.` });
+                        return res.status(404).json({ error: `${entityLabel} o identyfikatorze '${id}' nie istnieje.` });
                     }
                     if (latest.editVersion === undefined || latest.editVersion === null) {
                         return res.status(500).json({
                             code: 'CORRUPT_DOCUMENT_VERSION',
-                            error: "Zlecenie w bazie danych nie posiada wymaganego pola 'editVersion'.",
+                            error: `${entityLabel} w bazie danych nie posiada wymaganego pola 'editVersion'.`,
                             id
                         });
                     }
                     return res.status(409).json({
                         code: 'VERSION_CONFLICT',
-                        error: 'Zlecenie zostało zmodyfikowane przez innego użytkownika. Pobierz aktualne dane przed ponowną próbą zapisu.',
+                        error: `${entityLabel} została zmodyfikowana przez innego użytkownika. Pobierz aktualne dane przed ponowną próbą zapisu.`,
                         id,
                         entity: collectionName,
                         currentVersion: latest.editVersion,
@@ -2147,18 +2738,19 @@ const createRouter = (collectionName, options = {}) => {
             }
 
             // Precondition requirement for versioned collections (jobs)
-            if (collectionName === 'jobs') {
+            if (collectionName === 'jobs' || collectionName === 'offers') {
                 if (expectedVersion === undefined) {
+                    const entityMsg = collectionName === 'jobs' ? 'zlecenia' : 'oferty';
                     return res.status(428).json({
                         code: 'PRECONDITION_REQUIRED',
-                        error: "Wymagany nagłówek 'If-Match' lub parametr 'expectedVersion' do bezpiecznej archiwizacji zlecenia (Optimistic Locking)."
+                        error: `Wymagany nagłówek 'If-Match' lub parametr 'expectedVersion' do bezpiecznej archiwizacji ${entityMsg} (Optimistic Locking).`
                     });
                 }
             }
 
             // [P1 FIX] Fail-closed fetch document before delete so afterMutation knows affected jobId/project_id and CAS can verify version
             let beforeDoc = null;
-            if (collectionName === 'jobs' || typeof options.afterMutation === 'function') {
+            if (collectionName === 'jobs' || collectionName === 'offers' || typeof options.afterMutation === 'function') {
                 try {
                     const rawDeleteBefore = await db.collection(collectionName).findOne(filter);
                     if (!rawDeleteBefore) {
@@ -2168,23 +2760,25 @@ const createRouter = (collectionName, options = {}) => {
                                 : 'Item not found'
                         });
                     }
-                    if (collectionName === 'jobs') {
+                    if (collectionName === 'jobs' || collectionName === 'offers') {
+                        const entityLabel = collectionName === 'jobs' ? 'Zlecenie' : 'Oferta';
                         if (rawDeleteBefore.isActive === false) {
+                            const archivedVerb = collectionName === 'jobs' ? 'zostało już zarchiwizowane' : 'została już zarchiwizowana';
                             return res.status(404).json({
-                                error: `Zlecenie o identyfikatorze '${id}' zostało już zarchiwizowane.`
+                                error: `${entityLabel} o identyfikatorze '${id}' ${archivedVerb}.`
                             });
                         }
                         if (rawDeleteBefore.editVersion === undefined || rawDeleteBefore.editVersion === null) {
                             return res.status(500).json({
                                 code: 'CORRUPT_DOCUMENT_VERSION',
-                                error: "Zlecenie w bazie danych nie posiada wymaganego pola 'editVersion'.",
+                                error: `${entityLabel} w bazie danych nie posiada wymaganego pola 'editVersion'.`,
                                 id
                             });
                         }
                         if (rawDeleteBefore.editVersion !== expectedVersion) {
                             return res.status(409).json({
                                 code: 'VERSION_CONFLICT',
-                                error: 'Zlecenie zostało zmodyfikowane przez innego użytkownika. Pobierz aktualne dane przed ponowną próbą archiwizacji.',
+                                error: `${entityLabel} została zmodyfikowana przez innego użytkownika. Pobierz aktualne dane przed ponowną próbą archiwizacji.`,
                                 id,
                                 entity: collectionName,
                                 currentVersion: rawDeleteBefore.editVersion,
@@ -2212,14 +2806,14 @@ const createRouter = (collectionName, options = {}) => {
             const softDeleteCollections = ['jobs', 'offers', 'clients', 'employees', 'subcontractors'];
 
             if (softDeleteCollections.includes(collectionName)) {
-                const casFilter = (collectionName === 'jobs' && expectedVersion !== undefined)
+                const casFilter = ((collectionName === 'jobs' || collectionName === 'offers') && expectedVersion !== undefined)
                     ? { id: id, editVersion: expectedVersion, isActive: { $ne: false } }
                     : filter;
 
                 const updateDoc = {
                     $set: { isActive: false, updatedAt: new Date().toISOString() }
                 };
-                if (collectionName === 'jobs') {
+                if (collectionName === 'jobs' || collectionName === 'offers') {
                     updateDoc.$inc = { editVersion: 1 };
                 }
 
@@ -2227,14 +2821,16 @@ const createRouter = (collectionName, options = {}) => {
 
                 const delMatched = result.matchedCount !== undefined ? result.matchedCount : (result.modifiedCount !== undefined ? result.modifiedCount : 1);
                 if (delMatched === 0) {
-                    if (collectionName === 'jobs') {
+                    if (collectionName === 'jobs' || collectionName === 'offers') {
+                        const entityLabel = collectionName === 'jobs' ? 'Zlecenie' : 'Oferta';
                         const latest = await db.collection(collectionName).findOne(filter);
                         if (!latest || latest.isActive === false) {
-                            return res.status(404).json({ error: `Zlecenie o identyfikatorze '${id}' nie istnieje lub zostało już zarchiwizowane.` });
+                            const archivedVerb = collectionName === 'jobs' ? 'zostało już zarchiwizowane' : 'została już zarchiwizowana';
+                            return res.status(404).json({ error: `${entityLabel} o identyfikatorze '${id}' nie istnieje lub ${archivedVerb}.` });
                         }
                         return res.status(409).json({
                             code: 'VERSION_CONFLICT',
-                            error: 'Zlecenie zostało zmodyfikowane przez innego użytkownika współbieżnie.',
+                            error: `${entityLabel} została zmodyfikowana przez innego użytkownika współbieżnie.`,
                             id,
                             entity: collectionName,
                             currentVersion: latest.editVersion,
@@ -2932,7 +3528,12 @@ const {
     JOB_STAGE_TYPES,
     JOB_BILLING_TYPES,
     JOB_RISK_FLAGS,
-    JOB_PRIORITIES
+    JOB_PRIORITIES,
+    offerSchema,
+    OFFER_RECORD_KINDS,
+    OFFER_STATUSES,
+    OFFER_VAT_RATES,
+    OFFER_DISCOUNT_TYPES
 } = require('../shared/contracts/index.cjs');
 
 const ajv = new Ajv({ allErrors: true, coerceTypes: false });
@@ -2942,6 +3543,12 @@ ajv.addFormat('date', (str) => isValidCalendarDate(str));
 ajv.addFormat('date-time', (str) => extractValidDateKey(str) !== null);
 ajv.addSchema(timeEntrySchema, 'timeEntry');
 ajv.addSchema(jobSchema, 'job');
+ajv.addSchema(offerSchema, 'offer');
+const validateOfferPostSchema = ajv.getSchema('offer#/definitions/OfferPostPayload');
+const validateOfferPatchSchema = ajv.getSchema('offer#/definitions/OfferPatchPayload');
+const validateOfferBatchSchema = ajv.getSchema('offer#/definitions/OfferBatchImportPayload');
+const validateOfferBatchItemSchema = ajv.getSchema('offer#/definitions/OfferBatchImportItem');
+const validateOfferSchema = ajv.getSchema('offer#/definitions/OfferDocument');
 const validateTimeEntryPostSchema = ajv.getSchema('timeEntry#/definitions/TimeEntryPostPayload');
 const validateTimeEntryPatchSchema = ajv.getSchema('timeEntry#/definitions/TimeEntryPatchPayload');
 const validateTimeEntryBatchSchema = ajv.getSchema('timeEntry#/definitions/TimeEntryBatchImportPayload');
@@ -3662,7 +4269,6 @@ function validateSettlement(req, res, next) {
 app.use('/api/employees', verifyToken, requireRoleOrSafeGet, createRouter('employees'));
 app.use('/api/subcontractors', verifyToken, requireRoleOrSafeGet, createRouter('subcontractors'));
 app.use('/api/clients', verifyToken, requireRoleOrSafeGet, createRouter('clients'));
-app.use('/api/offers', verifyToken, requireRoleOrSafeGet, createRouter('offers'));
 app.use('/api/constructions', verifyToken, requireRoleOrSafeGet, createRouter('constructions'));
 // CostBase catalog endpoints
 app.use('/api/installation-rates', verifyToken, requireRoleOrSafeGet, createRouter('installation-rates'));
@@ -6126,7 +6732,184 @@ app.use('/api/checklist-templates', verifyToken, requireRole('admin', 'manager')
 // --- Core CostFrame Routes (admin/manager only for write, but auth required for all) ---
 // clients route moved above with blockHardDelete middleware
 // FIX #1b: offers now also go through financial validation
-app.use('/api/offers', verifyToken, requireRoleOrSafeGet, validateFinancialAmount, createRouter('offers'));
+// ==========================================
+// Offer domain contracts & validation middleware
+// ==========================================
+async function validateAndNormalizeOfferDoc(rawDoc, { db, user, isBatch = false, isPatch = false, existingOffer = null }) {
+    if (!rawDoc || typeof rawDoc !== 'object' || Array.isArray(rawDoc)) {
+        return { error: 'Payload oferty musi być poprawnym obiektem JSON.' };
+    }
+    const doc = { ...rawDoc };
+
+    if (isBatch) {
+        if (!doc.id || typeof doc.id !== 'string' || !doc.id.trim()) {
+            return { error: "Każdy element w paczce importowej ofert musi posiadać niepuste pole 'id'.", status: 400 };
+        }
+        if (!doc.number || typeof doc.number !== 'string' || !doc.number.trim()) {
+            return { error: "Każdy element w paczce importowej ofert musi posiadać niepuste pole 'number'.", status: 400 };
+        }
+        if (!doc.recordKind || !['offer', 'template'].includes(doc.recordKind)) {
+            return { error: "Każdy element w paczce importowej ofert musi posiadać pole 'recordKind' ('offer' lub 'template').", status: 400 };
+        }
+        if (!doc.status || typeof doc.status !== 'string' || !doc.status.trim()) {
+            return { error: "Każdy element w paczce importowej ofert musi posiadać pole 'status'.", status: 400 };
+        }
+    }
+
+    if (isPatch && (doc.expectedVersion === undefined || doc.expectedVersion === null)) {
+        return {
+            error: "Aktualizacja oferty wymaga podania 'expectedVersion' w celu ochrony przed nadpisaniem współbieżnych zmian (Optimistic Locking).",
+            code: 'PRECONDITION_REQUIRED',
+            status: 428
+        };
+    }
+
+    if (isPatch) {
+        if (doc.number !== undefined && existingOffer && doc.number !== existingOffer.number) {
+            return { error: "Modyfikacja numeru oferty jest zabroniona.", status: 400 };
+        }
+        if (doc.recordKind !== undefined && existingOffer && doc.recordKind !== existingOffer.recordKind) {
+            return { error: "Modyfikacja typu rekordu (recordKind) oferty jest zabroniona.", status: 400 };
+        }
+        if (doc.editVersion !== undefined) {
+            return { error: "Bezpośrednia modyfikacja pola 'editVersion' jest zabroniona.", status: 400 };
+        }
+    }
+
+    if (!isPatch && !isBatch) {
+        delete doc.editVersion;
+        delete doc.isActive;
+        delete doc.expectedVersion;
+
+        // An offer cannot specify its own custom number; it is strictly generated by server
+        const effectiveKind = doc.recordKind || (doc.offerTemplateType ? 'template' : 'offer');
+        if (effectiveKind === 'offer' && doc.number !== undefined && doc.number !== null && String(doc.number).trim() !== '') {
+            return {
+                error: "Podawanie własnego numeru oferty jest zabronione. Numer jest nadawany wyłącznie atomowo przez serwer (OF/YYYY/NNN).",
+                status: 400
+            };
+        }
+    }
+
+    const schemaValidator = isPatch ? validateOfferPatchSchema : (isBatch ? validateOfferBatchItemSchema : validateOfferPostSchema);
+    if (typeof schemaValidator === 'function') {
+        const isValid = schemaValidator(doc);
+        if (!isValid) {
+            const errorMessages = (schemaValidator.errors || []).map(err => {
+                const field = err.instancePath ? err.instancePath.replace(/^\//, '') : (err.params?.missingProperty || 'obiekt');
+                return `${field}: ${err.message}`;
+            });
+            return {
+                error: `Błąd walidacji schematu oferty: ${errorMessages.join('; ')}`,
+                status: 400
+            };
+        }
+    }
+
+    let expectedVersion;
+    if (isPatch) {
+        expectedVersion = doc.expectedVersion;
+        delete doc.expectedVersion;
+    }
+
+    return { data: doc, expectedVersion };
+}
+
+async function validateOffer(req, res, next) {
+    if (req.method !== 'POST' && req.method !== 'PATCH') return next();
+
+    const pathId = req.path ? req.path.replace(/^\//, '').split('/')[0] : null;
+    const isBatchImport = pathId === 'batch-import' || req.originalUrl?.endsWith('/batch-import');
+    const targetId = req.params?.id || (pathId && pathId !== 'batch-import' ? pathId : null) || req.body?.id;
+
+    if (req.method === 'POST') {
+        if (isBatchImport) {
+            if (!req.body || typeof req.body !== 'object' || !Array.isArray(req.body.items)) {
+                return res.status(400).json({ error: "Żądanie importu wsadowego ofert wymaga obiektu z tablicą 'items'." });
+            }
+            if (typeof validateOfferBatchSchema === 'function') {
+                const isValid = validateOfferBatchSchema(req.body);
+                if (!isValid) {
+                    const errorMessages = (validateOfferBatchSchema.errors || []).map(err => {
+                        const field = err.instancePath ? err.instancePath.replace(/^\//, '') : (err.params?.missingProperty || 'obiekt');
+                        return `${field}: ${err.message}`;
+                    });
+                    return res.status(400).json({
+                        error: `Błąd walidacji schematu importu wsadowego ofert: ${errorMessages.join('; ')}`
+                    });
+                }
+            }
+
+            const normalizedItems = [];
+            for (let i = 0; i < req.body.items.length; i++) {
+                const item = req.body.items[i];
+                const itemValidation = await validateAndNormalizeOfferDoc(item, { db, user: req.user, isBatch: true });
+                if (itemValidation.error) {
+                    return res.status(itemValidation.status || 400).json({
+                        error: `Błąd walidacji elementu [${i}] w paczce ofert: ${itemValidation.error}`
+                    });
+                }
+
+                // Financial validations: non-negative and finite amounts
+                const finFields = ['materialsCost', 'laborCost', 'totalCost', 'totalNet', 'subtotalNet', 'totalGross', 'discountAmount', 'vatAmount'];
+                for (const f of finFields) {
+                    if (itemValidation.data[f] !== undefined && itemValidation.data[f] !== null) {
+                        if (typeof itemValidation.data[f] !== 'number' || !Number.isFinite(itemValidation.data[f]) || itemValidation.data[f] < 0) {
+                            return res.status(400).json({
+                                error: `Nieprawidłowa kwota w polu '${f}' dla elementu [${i}]: wartość musi być nieujemną liczbą skończoną.`
+                            });
+                        }
+                    }
+                }
+                normalizedItems.push(itemValidation.data);
+            }
+            req.body.items = normalizedItems;
+            return next();
+        }
+
+        const validation = await validateAndNormalizeOfferDoc(req.body, { db, user: req.user });
+        if (validation.error) {
+            return res.status(validation.status || 400).json({ error: validation.error });
+        }
+        req.body = validation.data;
+        return next();
+    }
+
+    if (req.method === 'PATCH') {
+        let existingOffer = null;
+        if (targetId && db && typeof db.collection === 'function') {
+            try {
+                existingOffer = await db.collection('offers').findOne({ id: targetId });
+                if (!existingOffer) {
+                    existingOffer = await db.collection('offers').findOne({ _id: targetId });
+                }
+                if (!existingOffer) {
+                    return res.status(404).json({ error: `Oferta o identyfikatorze '${targetId}' nie istnieje.` });
+                }
+            } catch (err) {
+                return res.status(500).json({ error: 'Błąd bazy danych podczas pobierania oferty: ' + err.message });
+            }
+        }
+        const validation = await validateAndNormalizeOfferDoc(req.body, { db, user: req.user, isPatch: true, existingOffer });
+        if (validation.error) {
+            return res.status(validation.status || 400).json({
+                error: validation.error,
+                code: validation.code
+            });
+        }
+        req.expectedVersion = validation.expectedVersion;
+        req.body = validation.data;
+        return next();
+    }
+
+    next();
+}
+
+app.post('/api/offers/create-atomic', verifyToken, requireRole('admin', 'manager'), requireTransactions, validateOffer, validateFinancialAmount, async (req, res) => {
+    return handleCreateOfferAtomic(req, res, { returnOfferOnly: false });
+});
+
+app.use('/api/offers', verifyToken, requireRoleOrSafeGet, validateOffer, validateFinancialAmount, createRouter('offers'));
 app.use('/api/constructions', verifyToken, requireRoleOrSafeGet, createRouter('constructions'));
 // ==========================================
 // Job domain contracts & validation middleware
@@ -6990,6 +7773,383 @@ async function handleCreateJobAtomic(req, res, options = {}) {
     }
 }
 
+
+// ==========================================
+// Atomic Offer Creation Service (Transaction + Sequence + Constructions + Idempotency)
+// ==========================================
+async function handleCreateOfferAtomic(req, res, options = {}) {
+    const returnOfferOnly = options.returnOfferOnly !== false;
+    let leaseHeartbeat = null;
+    let ownerToken = null;
+    let idempotencyKey = null;
+
+    try {
+        if (!db) return res.status(503).json({ error: 'Database not connected' });
+
+        const rawBody = req.body || {};
+        const {
+            id,
+            clientId,
+            location,
+            status,
+            validUntil,
+            materialsCost,
+            laborCost,
+            totalCost,
+            totalNet,
+            subtotalNet,
+            discountAmount,
+            vatAmount,
+            totalGross,
+            vatRate,
+            discountType,
+            discountValue,
+            rentalItems,
+            costBreakdown,
+            settings,
+            title,
+            scopeOfWork,
+            customMaterials,
+            notes,
+            printLayout,
+            printMode,
+            offerTemplateType,
+            constructions,
+            recordKind: rawRecordKind,
+            number: customNumber
+        } = rawBody;
+
+        const recordKind = rawRecordKind || (offerTemplateType || (customNumber && (customNumber.startsWith('TPL-') || customNumber.startsWith('WZÓR-'))) ? 'template' : 'offer');
+
+        // Validation for offers
+        if (recordKind === 'offer') {
+            if (customNumber !== undefined && customNumber !== null && String(customNumber).trim() !== '') {
+                return res.status(400).json({ error: "Podawanie własnego numeru oferty jest zabronione. Numer jest nadawany wyłącznie atomowo przez serwer (OF/YYYY/NNN)." });
+            }
+            if (!clientId && status !== 'draft') {
+                return res.status(400).json({ error: "Pole 'clientId' jest wymagane dla oferty." });
+            }
+        }
+
+        // Canonical payload for hash computation
+        const canonicalPayload = {
+            offer: { ...rawBody },
+            constructions: Array.isArray(constructions) ? constructions : []
+        };
+        delete canonicalPayload.offer.idempotencyKey;
+        delete canonicalPayload.offer.constructions;
+        const requestHash = crypto.createHash('sha256').update(canonicalJsonStringify(canonicalPayload)).digest('hex');
+
+        // Idempotency Key Handling
+        const headerKey = req.headers['x-idempotency-key'] || req.headers['idempotency-key'];
+        idempotencyKey = headerKey || rawBody.idempotencyKey || null;
+
+        if (idempotencyKey && typeof idempotencyKey === 'string' && idempotencyKey.trim().length > 0) {
+            idempotencyKey = idempotencyKey.trim();
+            ownerToken = crypto.randomUUID();
+            const now = new Date();
+            const expiresAt = new Date(now.getTime() + 30000);
+
+            let reservedKey = false;
+            try {
+                await db.collection('idempotency_keys').insertOne({
+                    endpoint: '/api/offers/create-atomic',
+                    key: idempotencyKey,
+                    ownerToken,
+                    requestHash,
+                    status: 'pending',
+                    createdAt: now,
+                    updatedAt: now,
+                    expiresAt
+                });
+                reservedKey = true;
+            } catch (insertErr) {
+                if (insertErr.code === 11000 || (insertErr.message && insertErr.message.includes('11000'))) {
+                    let acquired = false;
+                    for (let attempt = 0; attempt < 3; attempt++) {
+                        const check = await db.collection('idempotency_keys').findOne({
+                            endpoint: '/api/offers/create-atomic',
+                            key: idempotencyKey
+                        });
+
+                        if (!check) {
+                            try {
+                                await db.collection('idempotency_keys').insertOne({
+                                    endpoint: '/api/offers/create-atomic',
+                                    key: idempotencyKey,
+                                    ownerToken,
+                                    requestHash,
+                                    status: 'pending',
+                                    createdAt: now,
+                                    updatedAt: now,
+                                    expiresAt
+                                });
+                                reservedKey = true;
+                                acquired = true;
+                                break;
+                            } catch (_) {
+                                continue;
+                            }
+                        }
+
+                        if (check.status === 'completed' || (!check.status && check.responseBody)) {
+                            if (check.requestHash === requestHash) {
+                                const bodyToReturn = returnOfferOnly && check.responseBody?.offer
+                                    ? check.responseBody.offer
+                                    : check.responseBody;
+                                return res.status(check.statusCode || 201).json(bodyToReturn);
+                            } else {
+                                return res.status(409).json({
+                                    error: 'Klucz idempotencji został już użyty dla żądania o innym payloadzie (Idempotency Key Conflict).'
+                                });
+                            }
+                        }
+
+                        if (check.status === 'pending') {
+                            const isExpired = check.expiresAt && new Date(check.expiresAt) < new Date();
+                            if (isExpired) {
+                                const takeRes = await db.collection('idempotency_keys').updateOne(
+                                    { endpoint: '/api/offers/create-atomic', key: idempotencyKey, status: 'pending', expiresAt: check.expiresAt },
+                                    { $set: { ownerToken, requestHash, updatedAt: new Date(), expiresAt } }
+                                );
+                                if (takeRes.modifiedCount > 0) {
+                                    reservedKey = true;
+                                    acquired = true;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+
+                    if (!acquired && !reservedKey) {
+                        return res.status(409).json({
+                            error: 'Operacja jest w trakcie wykonywania przez inne żądanie lub nie została ukończona (Idempotency Key In Progress).'
+                        });
+                    }
+                } else {
+                    throw insertErr;
+                }
+            }
+
+            if (reservedKey) {
+                leaseHeartbeat = setInterval(async () => {
+                    try {
+                        await db.collection('idempotency_keys').updateOne(
+                            { endpoint: '/api/offers/create-atomic', key: idempotencyKey, ownerToken, status: 'pending' },
+                            { $set: { expiresAt: new Date(Date.now() + 30000), updatedAt: new Date() } }
+                        );
+                    } catch (_) {}
+                }, 10000);
+                if (leaseHeartbeat.unref) leaseHeartbeat.unref();
+            }
+        }
+
+        // Setup execution inside MongoDB session
+        const clientToUse = client || (db && db.client);
+        const replicaSetActive = isReplicaSet || (clientToUse && (await checkReplicaSetTopology(clientToUse)));
+        let responsePayload = null;
+
+        const executeOperations = async (sess) => {
+            const opt = sess ? { session: sess } : {};
+            const nowIso = new Date().toISOString();
+            const year = new Date().getFullYear();
+
+            // Failpoint for testing rollback
+            if (process.env.NODE_ENV === 'test' && getTestFailpoint() === 'before_offer_insert') {
+                throw new Error('FAILPOINT: Simulated crash before offer insert');
+            }
+
+            let offerNumber = null;
+            if (recordKind === 'offer') {
+                const generated = await generateOfferNumber(db, sess, year);
+                offerNumber = generated.number;
+            } else {
+                if (customNumber && typeof customNumber === 'string' && customNumber.trim().length > 0) {
+                    offerNumber = customNumber.trim();
+                } else {
+                    const generatedTpl = await generateTemplateNumber(db, sess, year);
+                    offerNumber = generatedTpl.number;
+                }
+            }
+
+            const offerId = id || crypto.randomUUID();
+
+            const offerDoc = {
+                id: offerId,
+                number: offerNumber,
+                recordKind,
+                clientId: clientId || null,
+                location: location || '',
+                status: status || 'draft',
+                createdAt: nowIso,
+                updatedAt: nowIso,
+                validUntil: validUntil || null,
+                materialsCost: materialsCost || 0,
+                laborCost: laborCost || 0,
+                totalCost: totalCost || 0,
+                totalNet: totalNet || 0,
+                subtotalNet: subtotalNet || 0,
+                discountAmount: discountAmount || 0,
+                vatAmount: vatAmount || 0,
+                totalGross: totalGross || 0,
+                vatRate: vatRate !== undefined ? vatRate : 23,
+                discountType: discountType || 'none',
+                discountValue: discountValue || 0,
+                rentalItems: Array.isArray(rentalItems) ? rentalItems : [],
+                costBreakdown: costBreakdown || {},
+                settings: settings || {},
+                title: title || '',
+                scopeOfWork: Array.isArray(scopeOfWork) ? scopeOfWork : [],
+                customMaterials: customMaterials || {},
+                notes: Array.isArray(notes) ? notes : [],
+                printLayout: printLayout || 'standard',
+                printMode: printMode || 'detailed',
+                offerTemplateType: offerTemplateType || null,
+                editVersion: 1,
+                isActive: true
+            };
+
+            await db.collection('offers').insertOne(offerDoc, opt);
+
+            if (process.env.NODE_ENV === 'test' && getTestFailpoint() === 'after_offer_insert') {
+                throw new Error('FAILPOINT: Simulated crash after offer insert');
+            }
+
+            const insertedConstructions = [];
+            if (Array.isArray(constructions) && constructions.length > 0) {
+                for (let i = 0; i < constructions.length; i++) {
+                    const c = constructions[i];
+                    const constrDoc = {
+                        ...c,
+                        id: c.id || crypto.randomUUID(),
+                        offerId: offerId,
+                        createdAt: c.createdAt || nowIso,
+                        updatedAt: nowIso,
+                        editVersion: 1,
+                        isActive: true
+                    };
+                    await db.collection('constructions').insertOne(constrDoc, opt);
+                    insertedConstructions.push(constrDoc);
+                }
+            }
+
+            if (process.env.NODE_ENV === 'test' && getTestFailpoint() === 'after_offer_constructions_insert') {
+                throw new Error('FAILPOINT: Simulated crash after offer constructions insert');
+            }
+
+            responsePayload = {
+                status: 'success',
+                offer: offerDoc,
+                constructions: insertedConstructions
+            };
+
+            // Atomically finalize idempotency key within the SAME transaction!
+            if (idempotencyKey) {
+                const idempRes = await db.collection('idempotency_keys').updateOne(
+                    { endpoint: '/api/offers/create-atomic', key: idempotencyKey, ownerToken, status: 'pending' },
+                    {
+                        $set: {
+                            status: 'completed',
+                            statusCode: 201,
+                            responseBody: responsePayload,
+                            completedAt: new Date(),
+                            updatedAt: new Date(),
+                            expiresAt: new Date(Date.now() + 86400000)
+                        }
+                    },
+                    opt
+                );
+                if (!idempRes || idempRes.matchedCount !== 1) {
+                    throw new Error("Utrata dzierżawy idempotencji przed zatwierdzeniem transakcji (Idempotency lease lost or expired: matchedCount !== 1).");
+                }
+            }
+
+            return responsePayload;
+        };
+
+        const _testFp = getTestFailpoint();
+        const shouldFailSession = process.env.NODE_ENV === 'test' && _testFp === 'force_session_failure';
+        const shouldReturnNullSession = process.env.NODE_ENV === 'test' && _testFp === 'session_returns_null';
+
+        if (replicaSetActive && clientToUse && typeof clientToUse.startSession === 'function' && !shouldReturnNullSession) {
+            let session = null;
+            try {
+                if (shouldFailSession) {
+                    throw new Error('Simulated startSession failure');
+                }
+                session = clientToUse.startSession();
+            } catch (sessErr) {
+                console.error('[handleCreateOfferAtomic] Failed to start MongoDB session:', sessErr.message);
+                if (process.env.ALLOW_NON_TRANSACTIONAL !== 'true' && process.env.NODE_ENV !== 'test') {
+                    return res.status(503).json({
+                        code: 'TRANSACTIONS_REQUIRED',
+                        error: `Nie udało się zainicjalizować sesji transakcyjnej MongoDB: ${sessErr.message}`
+                    });
+                }
+            }
+
+            if (session) {
+                try {
+                    await session.withTransaction(async () => {
+                        await executeOperations(session);
+                    });
+                } finally {
+                    await session.endSession();
+                }
+            } else {
+                if (process.env.ALLOW_NON_TRANSACTIONAL !== 'true' && process.env.NODE_ENV !== 'test') {
+                    return res.status(503).json({
+                        code: 'TRANSACTIONS_REQUIRED',
+                        error: "Operacja tworzenia oferty wymaga włączonego Replica Set w MongoDB (ACID transactions required). Skonfiguruj 'replication.replSet' w konfiguracji bazy danych."
+                    });
+                }
+                await executeOperations(null);
+            }
+        } else {
+            if (process.env.ALLOW_NON_TRANSACTIONAL !== 'true' && process.env.NODE_ENV !== 'test') {
+                return res.status(503).json({
+                    code: 'TRANSACTIONS_REQUIRED',
+                    error: "Operacja tworzenia oferty wymaga włączonego Replica Set w MongoDB (ACID transactions required). Skonfiguruj 'replication.replSet' w konfiguracji bazy danych."
+                });
+            }
+            await executeOperations(null);
+        }
+
+        if (leaseHeartbeat) clearInterval(leaseHeartbeat);
+
+        const bodyToReturn = returnOfferOnly ? responsePayload.offer : responsePayload;
+        return res.status(201).json(bodyToReturn);
+    } catch (err) {
+        if (leaseHeartbeat) clearInterval(leaseHeartbeat);
+        if (idempotencyKey && ownerToken) {
+            try {
+                await db.collection('idempotency_keys').updateOne(
+                    { endpoint: '/api/offers/create-atomic', key: idempotencyKey, ownerToken, status: 'pending' },
+                    {
+                        $set: {
+                            status: 'failed',
+                            errorMessage: err.message,
+                            failedAt: new Date(),
+                            updatedAt: new Date(),
+                            expiresAt: new Date(Date.now() + 60000)
+                        }
+                    }
+                );
+            } catch (_) {}
+        }
+
+        console.error('[OFFER-CREATE-ATOMIC ERROR]', err);
+        const status = err.status || 500;
+        if (err.code === 11000 || (err.message && err.message.includes('11000'))) {
+            return res.status(409).json({
+                code: 'DUPLICATE_KEY_CONFLICT',
+                error: `Oferta o podanym identyfikatorze lub numerze już istnieje w bazie danych: ${err.message}`
+            });
+        }
+        return res.status(status).json({ error: err.message });
+    }
+}
+
 app.post('/api/jobs/create-atomic', verifyToken, requireRole('admin', 'manager'), requireTransactions, async (req, res) => {
     return await handleCreateJobAtomic(req, res, { returnJobDocOnly: false });
 });
@@ -7570,5 +8730,17 @@ module.exports = {
     getTestFailpoint,
     setTestBarrierHook,
     getTestBarrierHook,
-    extractValidDateKey
+    extractValidDateKey,
+    OFFER_RECORD_KINDS,
+    OFFER_STATUSES,
+    OFFER_VAT_RATES,
+    OFFER_DISCOUNT_TYPES,
+    validateOfferPostSchema,
+    validateOfferPatchSchema,
+    validateOfferBatchSchema,
+    validateOfferSchema,
+    migrateOfferDomainAndReconcileConflicts,
+    syncOfferCountersFromExistingData,
+    generateOfferNumber,
+    generateTemplateNumber
 };

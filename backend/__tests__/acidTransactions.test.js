@@ -3981,4 +3981,369 @@ test('ACID Multi-Document Transactions: Real Replica Set Verification', async (t
             });
         }
     });
+
+    await t.test('46. [ACID] POST /api/offers/create-atomic: transaction commits Offer, sequence number and constructions; rolls back all on error', async () => {
+        const testYear = new Date().getFullYear();
+        const testOfferId = 'offer-acid-atomic-test-1';
+        const testFailpointOfferId = 'offer-acid-atomic-failpoint-1';
+
+        // Read initial counter
+        const initialCounterDoc = await testDb.collection('counters').findOne({ _id: `offer_${testYear}` });
+        const initialSeq = initialCounterDoc ? initialCounterDoc.seq : 0;
+
+        try {
+            // 1. Success path: atomic creation of offer with constructions
+            const res = await request(app)
+                .post('/api/offers/create-atomic')
+                .set('Authorization', 'Bearer ' + adminToken)
+                .set('Idempotency-Key', 'acid-offer-ik-1')
+                .send({
+                    id: testOfferId,
+                    clientId: 'client-acid-job',
+                    location: 'Gdańsk, Długie Pobrzeże',
+                    status: 'draft',
+                    totalNet: 25000,
+                    constructions: [
+                        { id: 'constr-acid-1', name: 'Drzwi Tarasowe', width: 2500, height: 2200, quantity: 1, totalNet: 25000 }
+                    ]
+                });
+
+            assert.strictEqual(res.status, 201);
+            assert.strictEqual(res.body.status, 'success');
+            assert.strictEqual(res.body.offer.id, testOfferId);
+            assert.match(res.body.offer.number, /^OF\/\d{4}\/\d{3}$/);
+            assert.strictEqual(res.body.offer.editVersion, 1);
+            assert.strictEqual(res.body.constructions.length, 1);
+
+            // Verify in MongoDB
+            const inDb = await testDb.collection('offers').findOne({ id: testOfferId });
+            assert.ok(inDb);
+            assert.strictEqual(inDb.number, res.body.offer.number);
+
+            const constrInDb = await testDb.collection('constructions').findOne({ id: 'constr-acid-1' });
+            assert.ok(constrInDb);
+            assert.strictEqual(constrInDb.offerId, testOfferId);
+
+            // Counter incremented
+            const postCounterDoc = await testDb.collection('counters').findOne({ _id: `offer_${testYear}` });
+            assert.ok(postCounterDoc.seq > initialSeq);
+
+            // 2. Failpoint simulation: transaction aborts, neither offer nor constructions saved
+            setTestFailpoint('after_offer_insert');
+            const resFail = await request(app)
+                .post('/api/offers/create-atomic')
+                .set('Authorization', 'Bearer ' + adminToken)
+                .set('Idempotency-Key', 'acid-offer-ik-fail')
+                .send({
+                    id: testFailpointOfferId,
+                    clientId: 'client-acid-job',
+                    location: 'Gdynia',
+                    status: 'draft',
+                    totalNet: 10000,
+                    constructions: [
+                        { id: 'constr-acid-fail-1', name: 'Okno', width: 1000, height: 1000, quantity: 1, totalNet: 10000 }
+                    ]
+                });
+
+            assert.strictEqual(resFail.status, 500);
+
+            // Verify ACID rollback: neither offer nor construction exists
+            const failOfferInDb = await testDb.collection('offers').findOne({ id: testFailpointOfferId });
+            assert.strictEqual(failOfferInDb, null, 'Aborted transaction must roll back offer insert');
+
+            const failConstrInDb = await testDb.collection('constructions').findOne({ id: 'constr-acid-fail-1' });
+            assert.strictEqual(failConstrInDb, null, 'Aborted transaction must roll back construction insert');
+        } finally {
+            setTestFailpoint(null);
+            await testDb.collection('offers').deleteMany({ id: { $in: [testOfferId, testFailpointOfferId] } });
+            await testDb.collection('constructions').deleteMany({ id: { $in: ['constr-acid-1', 'constr-acid-fail-1'] } });
+            await testDb.collection('idempotency_keys').deleteMany({ key: { $in: ['acid-offer-ik-1', 'acid-offer-ik-fail'] } });
+        }
+    });
+
+    await t.test('47. [ACID] Global unique index on offers.number prevents duplicate numbers in database', async () => {
+        const uniqueNumber = 'OF/2026/777';
+        const off1Id = 'off-unique-idx-1';
+        const off2Id = 'off-unique-idx-2';
+
+        try {
+            await testDb.collection('offers').insertOne({
+                id: off1Id,
+                number: uniqueNumber,
+                recordKind: 'offer',
+                clientId: 'client-acid-job',
+                status: 'draft',
+                createdAt: new Date().toISOString(),
+                updatedAt: new Date().toISOString(),
+                isActive: true,
+                editVersion: 1
+            });
+
+            let dupErr = null;
+            try {
+                await testDb.collection('offers').insertOne({
+                    id: off2Id,
+                    number: uniqueNumber,
+                    recordKind: 'offer',
+                    clientId: 'client-acid-job',
+                    status: 'draft',
+                    createdAt: new Date().toISOString(),
+                    updatedAt: new Date().toISOString(),
+                    isActive: false,
+                    editVersion: 1
+                });
+            } catch (err) {
+                dupErr = err;
+            }
+
+            assert.ok(dupErr, 'Inserting duplicate offer number must be rejected by unique index');
+            assert.strictEqual(dupErr.code, 11000, 'Error code must be E11000 duplicate key');
+        } finally {
+            await testDb.collection('offers').deleteMany({ id: { $in: [off1Id, off2Id] } });
+        }
+    });
+
+    await t.test('48. [ACID] POST /api/offers/batch-import: conflict triggers all-or-nothing rollback (409 BATCH_IMPORT_VERSION_CONFLICT, succeeded: 0)', async () => {
+        const existingOffId = 'off-batch-exist-1';
+        const existingOffNum = 'OF/2026/888';
+        const newOff1Id = 'off-batch-new-1';
+        const newOff1Num = 'OF/2026/889';
+        const conflictOff2Id = 'off-batch-conflict-2';
+
+        // 1. Seed existing offer in database
+        await testDb.collection('offers').insertOne({
+            id: existingOffId,
+            number: existingOffNum,
+            recordKind: 'offer',
+            clientId: 'client-acid-job',
+            status: 'draft',
+            createdAt: new Date().toISOString(),
+            updatedAt: new Date().toISOString(),
+            isActive: true,
+            editVersion: 1
+        });
+
+        try {
+            // 2. Send batch with 2 offers: Offer 1 is valid/new, Offer 2 has conflicting number
+            const res = await request(app)
+                .post('/api/offers/batch-import')
+                .set('Authorization', 'Bearer ' + adminToken)
+                .send({
+                    items: [
+                        { id: newOff1Id, number: newOff1Num, recordKind: 'offer', status: 'draft', clientId: 'client-acid-job' },
+                        { id: conflictOff2Id, number: existingOffNum, recordKind: 'offer', status: 'draft', clientId: 'client-acid-job' }
+                    ]
+                });
+
+            assert.strictEqual(res.status, 409);
+            assert.strictEqual(res.body.code, 'BATCH_IMPORT_VERSION_CONFLICT');
+            assert.strictEqual(res.body.status, 'failed');
+            assert.strictEqual(res.body.succeeded, 0, 'Transactional batch write must have succeeded: 0 after rollback');
+            assert.strictEqual(res.body.failed, 2);
+
+            // ACID verification: Offer 1 was NOT inserted into MongoDB
+            const off1InDb = await testDb.collection('offers').findOne({ id: newOff1Id });
+            assert.strictEqual(off1InDb, null, 'Offer 1 must NOT exist in DB due to all-or-nothing rollback');
+
+            const off2InDb = await testDb.collection('offers').findOne({ id: conflictOff2Id });
+            assert.strictEqual(off2InDb, null, 'Offer 2 must NOT exist in DB');
+        } finally {
+            await testDb.collection('offers').deleteMany({ id: { $in: [existingOffId, newOff1Id, conflictOff2Id] } });
+        }
+    });
+    await t.test('49. [ACID] POST /api/offers/batch-import: importing existing ID returns 409 and DOES NOT overwrite existing offer', async () => {
+        const existingOffId = 'off-batch-id-overwrite-guard';
+        const existingOffNum = 'OF/2026/777';
+
+        // Seed original offer
+        await testDb.collection('offers').insertOne({
+            id: existingOffId,
+            number: existingOffNum,
+            title: 'Oryginalna Nienaruszona Oferta',
+            recordKind: 'offer',
+            clientId: 'client-acid-job',
+            status: 'draft',
+            createdAt: new Date().toISOString(),
+            updatedAt: new Date().toISOString(),
+            isActive: true,
+            editVersion: 1
+        });
+
+        try {
+            // Attempt batch import with the same ID and different title (forbidden overwrite attempt)
+            const res = await request(app)
+                .post('/api/offers/batch-import')
+                .set('Authorization', 'Bearer ' + adminToken)
+                .send({
+                    items: [
+                        { id: existingOffId, number: 'OF/2026/778', title: 'Nieuprawnione Nadpisanie', recordKind: 'offer', status: 'draft', clientId: 'client-acid-job' }
+                    ]
+                });
+
+            assert.strictEqual(res.status, 409);
+            assert.strictEqual(res.body.code, 'BATCH_IMPORT_VERSION_CONFLICT');
+            assert.strictEqual(res.body.succeeded, 0);
+
+            // Verify original offer in DB was NOT overwritten
+            const docInDb = await testDb.collection('offers').findOne({ id: existingOffId });
+            assert.strictEqual(docInDb.title, 'Oryginalna Nienaruszona Oferta', 'Original offer title must remain unchanged');
+            assert.strictEqual(docInDb.number, existingOffNum, 'Original offer number must remain unchanged');
+            assert.strictEqual(docInDb.editVersion, 1, 'Version must remain 1');
+        } finally {
+            await testDb.collection('offers').deleteOne({ id: existingOffId });
+        }
+    });
+
+    await t.test('50. [ACID] Offer atomic creation commits Idempotency record within the SAME transaction (failpoint rollback leaves no completed lease)', async () => {
+        const idempKey = 'key-offer-tx-failpoint-' + Date.now();
+        setTestFailpoint('after_offer_insert');
+
+        try {
+            const res = await request(app)
+                .post('/api/offers/create-atomic')
+                .set('Authorization', 'Bearer ' + adminToken)
+                .set('Idempotency-Key', idempKey)
+                .send({
+                    title: 'Oferta Failpoint Transakcji',
+                    clientId: 'client-acid-job'
+                });
+
+            assert.strictEqual(res.status, 500);
+
+            // Because failpoint crashed inside withTransaction, the offer and completed idempotency status rolled back!
+            const idempDoc = await testDb.collection('idempotency_keys').findOne({ key: idempKey });
+            assert.ok(!idempDoc || idempDoc.status !== 'completed', 'Idempotency record must NOT be completed');
+
+            // No orphaned offer exists
+            const orphanedOffer = await testDb.collection('offers').findOne({ title: 'Oferta Failpoint Transakcji' });
+            assert.strictEqual(orphanedOffer, null, 'Orphaned offer must be rolled back');
+        } finally {
+            setTestFailpoint(null);
+            await testDb.collection('idempotency_keys').deleteMany({ key: idempKey });
+        }
+    });
+
+    await t.test('51. [P2 REAL CONCURRENCY] Concurrent PATCH /api/offers/:id race with CAS: winner gets 200, loser gets 409 VERSION_CONFLICT (not 404)', async () => {
+        const offerId = 'off-cas-race-test-' + Date.now();
+        await testDb.collection('offers').insertOne({
+            id: offerId,
+            number: 'OF/2026/911',
+            title: 'Oferta CAS Race',
+            recordKind: 'offer',
+            clientId: 'client-acid-job',
+            status: 'draft',
+            createdAt: new Date().toISOString(),
+            updatedAt: new Date().toISOString(),
+            isActive: true,
+            editVersion: 1
+        });
+
+        try {
+            // Send 2 concurrent PATCH requests both with expectedVersion: 1
+            const [res1, res2] = await Promise.all([
+                request(app)
+                    .patch('/api/offers/' + offerId)
+                    .set('Authorization', 'Bearer ' + adminToken)
+                    .send({ title: 'Aktualizacja A', expectedVersion: 1 }),
+                request(app)
+                    .patch('/api/offers/' + offerId)
+                    .set('Authorization', 'Bearer ' + adminToken)
+                    .send({ title: 'Aktualizacja B', expectedVersion: 1 })
+            ]);
+
+            const statuses = [res1.status, res2.status].sort();
+            assert.deepStrictEqual(statuses, [200, 409], 'One request must succeed with 200 and the other must fail with 409 VERSION_CONFLICT');
+
+            const conflictRes = res1.status === 409 ? res1 : res2;
+            assert.strictEqual(conflictRes.body.code, 'VERSION_CONFLICT');
+            assert.strictEqual(conflictRes.body.currentVersion, 2);
+            assert.strictEqual(conflictRes.body.expectedVersion, 1);
+        } finally {
+            await testDb.collection('offers').deleteOne({ id: offerId });
+        }
+    });
+
+    await t.test('52. [ACID] Offer domain migration transaction failure rolls back all mutations and aborts fail-closed', async () => {
+        // Temporarily delete completed migration marker so migration will attempt to execute
+        await testDb.collection('_migrations').deleteOne({ id: 'm2026_10_04_offer_domain_hardening_v1' });
+
+        // Seed unmigrated Jan collision offer
+        const janId = 'jan-migration-rollback-test';
+        await testDb.collection('offers').insertOne({
+            id: janId,
+            number: 'OF/2026/05',
+            clientId: 'jan-id',
+            title: 'Jan Oferta Rollback Test',
+            status: 'draft',
+            createdAt: new Date().toISOString(),
+            updatedAt: new Date().toISOString()
+        });
+
+        setTestFailpoint('migration_transaction_failure');
+
+        try {
+            const { migrateOfferDomainAndReconcileConflicts } = require('../server');
+            let migrationThrew = false;
+            try {
+                await migrateOfferDomainAndReconcileConflicts(testDb, mongoClient);
+            } catch (mErr) {
+                migrationThrew = true;
+                assert.ok(mErr.message.includes('Simulated transaction crash during migration'), 'Error message must reflect failpoint');
+            }
+
+            assert.strictEqual(migrationThrew, true, 'Migration must throw fail-closed upon transaction crash');
+
+            // Jan offer must NOT have been renumbered to OF/2026/006 due to transaction rollback
+            const janInDb = await testDb.collection('offers').findOne({ id: janId });
+            assert.strictEqual(janInDb.number, 'OF/2026/05', 'Jan offer number must remain unchanged due to ACID rollback');
+
+            // No migration completion marker written
+            const marker = await testDb.collection('_migrations').findOne({ id: 'm2026_10_04_offer_domain_hardening_v1' });
+            assert.strictEqual(marker, null, 'Migration marker must NOT be completed');
+        } finally {
+            setTestFailpoint(null);
+            await testDb.collection('offers').deleteOne({ id: janId });
+            // Re-apply migration cleanly so subsequent runs are in clean completed state
+            const { migrateOfferDomainAndReconcileConflicts } = require('../server');
+            await migrateOfferDomainAndReconcileConflicts(testDb, mongoClient);
+        }
+    });
+    await t.test('53. [ACID] Idempotency lease loss (matchedCount !== 1) during atomic offer creation aborts transaction and rolls back offer and counter', async () => {
+        const idempKey = 'key-lease-loss-test-' + Date.now();
+
+        // 1. Manually insert expired/stolen idempotency key so that updateOne with ownerToken matches 0 documents
+        await testDb.collection('idempotency_keys').insertOne({
+            endpoint: '/api/offers/create-atomic',
+            key: idempKey,
+            ownerToken: 'other-owner-who-stole-lease',
+            status: 'completed',
+            createdAt: new Date(),
+            updatedAt: new Date(),
+            expiresAt: new Date(Date.now() + 60000)
+        });
+
+        // Current counter
+        const counterBefore = await testDb.collection('counters').findOne({ _id: 'offer_2026' });
+        const seqBefore = counterBefore ? counterBefore.seq : 0;
+
+        try {
+            const res = await request(app)
+                .post('/api/offers/create-atomic')
+                .set('Authorization', 'Bearer ' + adminToken)
+                .set('Idempotency-Key', idempKey)
+                .send({
+                    title: 'Oferta Lease Loss',
+                    clientId: 'client-acid-job'
+                });
+
+            // Must reject because completed key had different hash
+            assert.strictEqual(res.status, 409);
+
+            // Counter must NOT have incremented
+            const counterAfter = await testDb.collection('counters').findOne({ _id: 'offer_2026' });
+            assert.strictEqual(counterAfter ? counterAfter.seq : 0, seqBefore, 'Counter must remain unchanged');
+        } finally {
+            await testDb.collection('idempotency_keys').deleteOne({ key: idempKey });
+        }
+    });
 });

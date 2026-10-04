@@ -45,7 +45,9 @@ export default function OffersPage() {
         number: string;
         client: string;
         location: string;
+        idempotencyKey?: string;
     } | null>(null);
+    const [formIdempotencyKey, setFormIdempotencyKey] = useState<string | null>(null);
     const [error, setError] = useState<string | null>(null);
 
     // Wizard State
@@ -71,6 +73,7 @@ export default function OffersPage() {
                 await clearConstructions();
                 setEditingOffer(null);
                 setCurrentOfferData(null);
+                setFormIdempotencyKey(uuidv4());
                 setIsInitialFormOpen(true);
             }, 0);
             return () => clearTimeout(timer);
@@ -127,6 +130,7 @@ export default function OffersPage() {
             await clearConstructions();
             setEditingOffer(null);
             setCurrentOfferData(null);
+            setFormIdempotencyKey(uuidv4());
             setIsInitialFormOpen(true);
         } catch (error) {
             console.error('Błąd podczas przygotowania nowej oferty:', error);
@@ -135,7 +139,14 @@ export default function OffersPage() {
     };
 
     const handleInitialFormSubmit = (data: { number: string; client: string; location: string }) => {
-        setCurrentOfferData(data);
+        const key = formIdempotencyKey || uuidv4();
+        if (!formIdempotencyKey) {
+            setFormIdempotencyKey(key);
+        }
+        setCurrentOfferData({
+            ...data,
+            idempotencyKey: key
+        });
         setIsInitialFormOpen(false);
         setIsFormOpen(true);
     };
@@ -166,13 +177,14 @@ export default function OffersPage() {
     const [showTemplates, setShowTemplates] = useState(false);
 
     // Filter out templates from the main offers list unless showTemplates is true
-    const displayedOffers = offers.filter(offer => showTemplates ? true : !offer.offerTemplateType);
+    const displayedOffers = offers.filter(offer => showTemplates ? true : (offer.recordKind ? offer.recordKind !== 'template' : !offer.offerTemplateType));
 
     const handleDeleteOffer = async (id: string) => {
         if (window.confirm('Czy na pewno chcesz usunąć tę ofertę?')) {
             try {
                 setError(null);
-                await offerStorage.deleteOffer(id);
+                const targetOffer = offers.find(o => o.id === id);
+                await offerStorage.deleteOffer(id, targetOffer?.editVersion !== undefined ? { expectedVersion: targetOffer.editVersion } : undefined);
                 await refreshOffers();
                 toast.success('Oferta została usunięta');
             } catch (error) {
@@ -365,45 +377,67 @@ export default function OffersPage() {
                 throw new Error('Brak danych oferty');
             }
 
-            const offerToSave: Offer = editingOffer ? {
-                ...editingOffer,
-                ...data
-                // NOTE: do NOT set updatedAt — backend stamps it on PATCH to avoid 409
-            } as Offer : {
-                ...offerStorage.createEmptyOffer(), // Helper to get defaults
-                number: currentOfferData.number,
-                clientId: currentOfferData.client,
-                location: currentOfferData.location,
-                status: 'draft',
-                ...data,
-                createdAt: new Date().toISOString(),
-                updatedAt: new Date().toISOString()
-            } as Offer;
+            if (editingOffer) {
+                const offerToSave: Offer = {
+                    ...editingOffer,
+                    ...data
+                    // NOTE: do NOT set updatedAt — backend stamps it on PATCH to avoid 409
+                } as Offer;
 
-            // Save offer
-            const offerId = await offerStorage.saveOffer(offerToSave);
+                // Save offer
+                const offerId = await offerStorage.saveOffer(offerToSave);
 
-            // Sync Offer ID to constructions & Save to DB
-            const constructionsToSave = constructions.map(c => ({ ...c, offerId }));
-            for (const c of constructionsToSave) {
-                await offerStorage.saveConstruction(c);
-            }
+                // Sync Offer ID to constructions & Save to DB
+                const constructionsToSave = constructions.map(c => ({ ...c, offerId }));
+                for (const c of constructionsToSave) {
+                    await offerStorage.saveConstruction(c);
+                }
 
-            // Sync back to LocalStorage so OfferForm (via hook) sees updated OfferID for these items
-            // This is crucial for "Save & Continue Editing" flow for new offers.
-            await initializeConstructions(constructionsToSave);
+                await initializeConstructions(constructionsToSave);
+                await refreshOffers();
 
-            await refreshOffers();
+                const freshOffer = await offerStorage.getOffer(offerId);
+                if (freshOffer) {
+                    setEditingOffer(freshOffer);
+                    setCurrentOfferData({
+                        number: freshOffer.number,
+                        client: freshOffer.clientId,
+                        location: freshOffer.location
+                    });
+                }
+            } else {
+                // ACID Atomic creation with stable form idempotency key across retries
+                const key = formIdempotencyKey || currentOfferData?.idempotencyKey || uuidv4();
+                const offerPayload: Partial<Offer> = {
+                    ...offerStorage.createEmptyOffer(),
+                    clientId: currentOfferData.client,
+                    location: currentOfferData.location,
+                    status: 'draft',
+                    ...data
+                };
+                if (currentOfferData.number && currentOfferData.number.trim()) {
+                    offerPayload.number = currentOfferData.number.trim();
+                }
 
-            // Update state to "Editing Mode" for the saved offer without closing
-            const freshOffer = await offerStorage.getOffer(offerId);
-            if (freshOffer) {
-                setEditingOffer(freshOffer);
-                setCurrentOfferData({
-                    number: freshOffer.number,
-                    client: freshOffer.clientId,
-                    location: freshOffer.location
+                const result = await offerStorage.createOfferAtomic({
+                    offer: offerPayload,
+                    constructions: constructions,
+                    idempotencyKey: key
                 });
+
+                const createdOffer = result.offer;
+                const createdConstructions = result.constructions || [];
+
+                await initializeConstructions(createdConstructions);
+                await refreshOffers();
+
+                setEditingOffer(createdOffer);
+                setCurrentOfferData({
+                    number: createdOffer.number,
+                    client: createdOffer.clientId,
+                    location: createdOffer.location
+                });
+                setFormIdempotencyKey(null);
             }
 
             setIsInitialFormOpen(false);

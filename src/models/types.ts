@@ -22,7 +22,9 @@ import {
     JOB_STAGE_TYPES,
     JOB_BILLING_TYPES,
     JOB_RISK_FLAGS,
-    JOB_PRIORITIES
+    JOB_PRIORITIES,
+    type OfferRecordKind,
+    OFFER_RECORD_KINDS
 } from '../../shared/contracts';
 
 export type {
@@ -36,7 +38,8 @@ export type {
     JobStageType,
     JobBillingType,
     JobRiskFlag,
-    JobPriority
+    JobPriority,
+    OfferRecordKind
 };
 export {
     TIME_ENTRY_STATUSES,
@@ -51,7 +54,8 @@ export {
     JOB_STAGE_TYPES,
     JOB_BILLING_TYPES,
     JOB_RISK_FLAGS,
-    JOB_PRIORITIES
+    JOB_PRIORITIES,
+    OFFER_RECORD_KINDS
 };
 
 export type ConstructionType =
@@ -131,6 +135,10 @@ export interface RentalItem {
 export interface Offer {
     id: string;
     number: string;
+    recordKind?: OfferRecordKind;
+    editVersion?: number;
+    isActive?: boolean;
+    expectedVersion?: number;
     clientId: string;
     location: string; // Added to match reference
     placeOfInstallation?: string; // Legacy

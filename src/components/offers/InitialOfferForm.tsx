@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { FileText, MapPin } from 'lucide-react';
+import { FileText, MapPin, Hash } from 'lucide-react';
 import { ClientSelector } from '../ui/ClientSelector';
 
 interface InitialOfferFormProps {
@@ -14,7 +14,7 @@ export default function InitialOfferForm({ onSubmit, onCancel }: InitialOfferFor
         e.preventDefault();
         const formData = new FormData(e.currentTarget);
         onSubmit({
-            number: formData.get('number') as string,
+            number: '',
             client: selectedClientId,
             location: formData.get('location') as string
         });
@@ -31,19 +31,18 @@ export default function InitialOfferForm({ onSubmit, onCancel }: InitialOfferFor
                 </div>
 
                 <form onSubmit={handleSubmit} className="space-y-5">
-                    {/* Numer oferty */}
+                    {/* Numer oferty: informacja o automatycznym nadawaniu przez serwer */}
                     <div>
-                        <label htmlFor="number" className="block text-xs font-bold text-zinc-400 uppercase tracking-widest mb-1.5">
+                        <label className="block text-xs font-bold text-zinc-400 uppercase tracking-widest mb-1.5">
                             Numer oferty
                         </label>
-                        <input
-                            type="text"
-                            name="number"
-                            id="number"
-                            required
-                            className="w-full rounded-xl border border-zinc-200/80 bg-white p-3 text-sm text-zinc-900 focus:border-[#21808D] focus:ring-1 focus:ring-[#21808D] outline-none"
-                            placeholder="np. OF/2024/001"
-                        />
+                        <div className="w-full rounded-xl border border-zinc-200/80 bg-zinc-50/80 p-3 text-sm text-zinc-600 flex items-center justify-between">
+                            <div className="flex items-center space-x-2">
+                                <Hash className="h-4 w-4 text-zinc-400" />
+                                <span>Nadawany automatycznie przez serwer</span>
+                            </div>
+                            <span className="text-xs font-mono font-semibold px-2 py-0.5 bg-zinc-200/80 text-zinc-700 rounded-md">OF/YYYY/NNN</span>
+                        </div>
                     </div>
 
                     {/* Klient */}
